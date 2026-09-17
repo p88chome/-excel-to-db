@@ -40,9 +40,10 @@ class App(Tk):
         self._build()
         self.after(100, self._pump)
 
-        missing = core.missing_driver()
-        if missing:
-            messagebox.showwarning("缺少 ODBC 驅動程式", missing)
+        if self.cfg["conn"].startswith("mssql"):
+            missing = core.missing_driver()
+            if missing:
+                messagebox.showwarning("缺少 ODBC 驅動程式", missing)
 
     # --- 畫面 ----------------------------------------------------------
 
@@ -137,11 +138,7 @@ class App(Tk):
         self.bg(lambda: self.q.put(("tables", core.scan(root))))
 
     def show_tables(self, tables):
-        self.tables = tables
-        saved = self.cfg.get("dtypes", {})
-        for t in tables:                       # 套用上次存下來的型別覆寫
-            t.dtypes.update({c: ty for c, ty in saved.get(t.name, {}).items()
-                             if c in t.dtypes})
+        self.tables = core.apply_overrides(tables, self.cfg)
         self.tv.delete(*self.tv.get_children())
         self.cv.delete(*self.cv.get_children())
         self.current = None

@@ -1,61 +1,46 @@
-"""Import CSV/Excel files under a root folder into SQL Server.
+"""命令列版匯入，沒有預覽。圖形介面版見 app.pyw。
 
-Layout rule:
-    data/
-      customers/          -> table "customers" (all files inside concatenated)
-        cust_2024.xlsx
-        cust_2025.csv
-      orders.csv          -> table "orders"
+連線字串與型別設定都讀 config.json，跟 UI 共用同一份設定。
 
-Usage: python import_data.py [root]      (root defaults to "data")
-Deps:  pip install pandas sqlalchemy pyodbc openpyxl
+用法：
+    python import_data.py                 # 用 config.json 裡的資料夾與模式
+    python import_data.py data            # 指定資料夾
+    python import_data.py data append     # 指定資料夾與寫入模式
 """
 import sys
-from pathlib import Path
 
-import pandas as pd
-from sqlalchemy import create_engine
-
-CONN = "mssql+pyodbc://@SERVER/DB?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
-EXTS = {".csv", ".xlsx", ".xls"}
+import core
 
 
-def read(path):
-    return pd.read_csv(path) if path.suffix.lower() == ".csv" else pd.read_excel(path)
+def main(root=None, mode=None):
+    cfg = core.load_config()
+    root = root or cfg["root"]
+    mode = mode or cfg["write_mode"]
 
+    if cfg["conn"].startswith("mssql"):
+        missing = core.missing_driver()
+        if missing:
+            sys.exit(missing)
 
-def groups(root):
-    """Yield (table_name, [files]) for each subfolder and each loose file."""
-    for p in sorted(Path(root).iterdir()):
-        if p.is_dir():
-            files = [f for f in sorted(p.iterdir()) if f.suffix.lower() in EXTS]
-            if files:
-                yield p.name, files
-        elif p.suffix.lower() in EXTS:
-            yield p.stem, [p]
+    engine = core.connect(cfg["conn"])
+    tables = core.apply_overrides(core.scan(root), cfg)
+    if not tables:
+        sys.exit(f"{root} 底下沒有 .csv/.xlsx/.xls 檔案")
 
-
-def load(files):
-    """Concatenate files, refusing to guess when their columns disagree."""
-    frames = [read(f) for f in files]
-    cols = list(frames[0].columns)
-    for f, df in zip(files[1:], frames[1:]):
-        if set(df.columns) != set(cols):
-            raise SystemExit(
-                f"column mismatch in {f}\n"
-                f"  expected (from {files[0].name}): {cols}\n"
-                f"  got: {list(df.columns)}"
-            )
-    return pd.concat([df[cols] for df in frames], ignore_index=True)
-
-
-def main(root):
-    engine = create_engine(CONN, fast_executemany=True)
-    for table, files in groups(root):
-        df = load(files)
-        df.to_sql(table, engine, if_exists="replace", index=False, chunksize=1000)
-        print(f"{table}: {len(df)} rows <- {len(files)} file(s)")
+    failed = 0
+    for t in tables:
+        if not t.ok:
+            print(f"略過 {t.name}：{t.error}")
+            failed += 1
+            continue
+        try:
+            rows = core.import_table(engine, t, mode)
+            print(f"{t.name}：{rows:,} 列 <- {len(t.files)} 個檔案")
+        except Exception as e:
+            print(f"失敗 {t.name}：{str(e).splitlines()[0]}")
+            failed += 1
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "data")
+    sys.exit(main(*sys.argv[1:3]))

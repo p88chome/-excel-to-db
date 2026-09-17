@@ -258,6 +258,15 @@ DEFAULTS = {
 }
 
 
+def apply_overrides(tables, cfg):
+    """把 config.json 裡存下來的型別覆寫套回掃描結果。"""
+    saved = cfg.get("dtypes", {})
+    for t in tables:
+        t.dtypes.update({c: ty for c, ty in saved.get(t.name, {}).items()
+                         if c in t.dtypes})
+    return tables
+
+
 def load_config(path=CONFIG):
     cfg = dict(DEFAULTS)
     p = Path(path)
