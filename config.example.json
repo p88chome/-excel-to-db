@@ -1,0 +1,13 @@
+{
+  "conn": "mssql+pyodbc://@SERVER/DB?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes",
+  "root": "data",
+  "write_mode": "replace",
+  "dtypes": {
+    "orders": {
+      "id": "INT",
+      "order_no": "NVARCHAR(20)",
+      "amount": "DECIMAL(18,2)",
+      "created_at": "DATETIME"
+    }
+  }
+}

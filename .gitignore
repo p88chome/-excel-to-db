@@ -1,0 +1,22 @@
+# 連線設定可能含密碼，不進版控。範本見 config.example.json
+config.json
+
+# 匯入紀錄
+*.log
+
+# 待匯入的資料
+data/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# 離線安裝用的 wheel（需要時再解除）
+wheels/

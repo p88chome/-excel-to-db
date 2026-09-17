@@ -1,0 +1,6 @@
+# 版本已釘死，與開發機實測通過的組合一致。
+# 不要放寬 pandas —— 3.0 有 breaking change，尚未驗證。
+pandas==2.3.3
+SQLAlchemy==2.0.52
+pyodbc==5.3.0
+openpyxl==3.1.5
