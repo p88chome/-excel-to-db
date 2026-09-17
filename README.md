@@ -50,11 +50,35 @@ python app.pyw
 4. 點一個欄位 → 用下拉選單改型別，改動會存進 `config.json`，下次自動套用
 5. 選 replace 或 append → 按「開始匯入」
 
-命令列版本（無預覽，功能較陽春）：
+命令列版本（沒有預覽，其餘功能相同，適合排程執行）：
 
 ```
-python import_data.py data
+python import_data.py              # 用 config.json 裡的資料夾與模式
+python import_data.py data         # 指定資料夾
+python import_data.py data append  # 指定資料夾與寫入模式
 ```
+
+兩個版本共用 `config.json`，連線字串與型別覆寫只需設定一次。
+有任何一張表失敗時，命令列版會回傳 exit code 1，方便排程判斷成敗。
+
+## 連線字串填在哪
+
+擇一即可，UI 最方便：
+
+- **UI**：「連線設定…」按鈕，存好後寫進 `config.json`
+- **手動**：複製 `config.example.json` 成 `config.json`，改 `conn` 那行
+
+```json
+{ "conn": "mssql+pyodbc://@主機/資料庫?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes" }
+```
+
+用帳號密碼登入的話：
+
+```json
+{ "conn": "mssql+pyodbc://帳號:密碼@主機/資料庫?driver=ODBC+Driver+17+for+SQL+Server" }
+```
+
+`config.json` 已列入 `.gitignore`，不會被推上 GitHub。
 
 ## 型別推斷
 
