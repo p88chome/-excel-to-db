@@ -18,5 +18,5 @@ __pycache__/
 venv/
 .venv/
 
-# 離線安裝用的 wheel（需要時再解除）
-wheels/
+# 離線安裝用的 wheel 要進版控 —— 目標機器有 proxy 407，
+# 沒辦法從 PyPI 下載，只能靠 git 帶過去。約 27 MB。

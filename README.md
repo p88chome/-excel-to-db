@@ -16,14 +16,44 @@ data/
 
 ## 安裝
 
+有網路的機器：
+
 ```
 pip install -r requirements.txt
 copy config.example.json config.json
 ```
 
-然後編輯 `config.json` 的 `conn`，把 `SERVER` 和 `DB` 換成實際的。
+### 沒網路 / proxy 擋住的機器
 
-`config.json` 不進版控（可能含密碼）。
+公司的 proxy 需要認證時，`pip install` 會噴 `407 Proxy Authentication Required`。
+pip 只支援 basic auth，遇到 NTLM/Kerberos 的 proxy 帳密打對也照樣失敗，
+不要跟它耗，直接走離線安裝：
+
+**在有網路的開發機**（先問目標機器的 Python 版本）：
+
+```
+python check_env.py          在目標機器執行，取得版本號
+fetch_wheels.bat 3.12        在開發機執行，參數是目標機器的版本
+```
+
+wheel 會抓進 `wheels\`（約 27 MB）並隨版控一起帶走。
+跨版本抓沒問題，在 3.14 的機器上一樣抓得到 `cp312` 的 wheel。
+
+**在目標機器**：
+
+```
+install_offline.bat
+```
+
+裝完會自動跑 `check_env.py` 驗證。
+
+wheel 綁 Python 版本與架構（`pandas-2.3.3-cp312-cp312-win_amd64.whl`），
+版本不合會裝不起來，這時重跑 `fetch_wheels.bat` 換正確的版本號即可。
+
+### 設定連線
+
+編輯 `config.json` 的 `conn`（見下方「連線字串填在哪」）。
+`config.json` 不進版控，因為可能含密碼。
 
 ## 前置需求
 
