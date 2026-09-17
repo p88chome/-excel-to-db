@@ -29,21 +29,20 @@ copy config.example.json config.json
 pip 只支援 basic auth，遇到 NTLM/Kerberos 的 proxy 帳密打對也照樣失敗，
 不要跟它耗，直接走離線安裝：
 
-`wheels\` 裡已經放好 Python **3.11 / 3.12 / 3.13 / 3.14** 四個版本的檔案，
-pip 會依 wheel tag 自動挑對應執行版本的那一份，**不需要事先知道版本號**。
-直接在目標機器執行：
+`wheels\` 裡已經放好 Python **3.14**（`cp314`／`win_amd64`）的檔案，約 27 MB。
+目標機器是 3.14.2，wheel tag 只認 minor 版本，3.14.x 都適用。直接執行：
 
 ```
 install_offline.bat
 ```
 
-如果目標機器是 3.10 或更舊，`wheels\` 沒有對應檔案，在**有網路的開發機**補抓：
+換到其他 Python 版本的機器時，在**有網路的開發機**補抓：
 
 ```
-fetch_wheels.bat 3.10        參數是目標機器的 Python 版本
+fetch_wheels.bat 3.12        參數是目標機器的 Python 版本
 ```
 
-跨版本抓沒問題，在 3.14 的機器上一樣抓得到 `cp310` 的 wheel。
+跨版本抓沒問題，在 3.14 的機器上一樣抓得到 `cp312` 的 wheel。
 
 裝完會自動跑 `check_env.py` 驗證。
 
