@@ -243,7 +243,7 @@ def test_sniff_marks_code_fields(tmp_path):
     codes = {name: sniff.guess_type([r[i] for r in data], name)[2]
              for i, name in enumerate(header)}
     assert codes["BUKRS"] == "T!" and codes["BELNR"] == "T!"
-    assert codes["WRBTR"] == "N-" and codes["MENGE"] == "N"
+    assert codes["WRBTR"] == "N-" and codes["MENGE"] == "N"   # MENGE 是已知數字欄位
 
 
 @pytest.mark.parametrize("name, why", [
@@ -265,3 +265,37 @@ def test_patterns_and_additions_catch_code_fields(name, why):
 ])
 def test_patterns_do_not_swallow_amounts_dates_or_text(name, why):
     assert not core.is_code_field(name), why
+
+
+# --- 可疑欄位警示 -------------------------------------------------------
+
+SUSPECT_TXT = (
+    "Dynamic List Display\n"
+    "\n"
+    "BUKRS\tDOCTYPE\tMENGE\tWRBTR\tBUDAT\n"
+    "8104\t4500000123\t12\t1.234,56\t31.12.2026\n"
+    "1763\t4500000124\t34\t70.319,87-\t01.01.2026\n"
+)
+
+
+def test_suspects_flags_unknown_integer_columns(tmp_path):
+    t = core.scan(write(tmp_path, "ZFI001.txt", SUSPECT_TXT).parent)[0]
+    # DOCTYPE 是自訂欄名又是整數 -> 可疑。其餘都有憑有據。
+    assert core.suspects(t) == ["DOCTYPE"]
+
+
+def test_suspects_ignores_known_numeric_fields(tmp_path):
+    t = core.scan(write(tmp_path, "ZFI001.txt", SUSPECT_TXT).parent)[0]
+    assert t.dtypes["MENGE"] == "INT"
+    assert "MENGE" not in core.suspects(t)
+
+
+def test_sniff_marks_suspect_and_spares_quantities(tmp_path):
+    import sniff
+    p = write(tmp_path, "ZFI001.txt", SUSPECT_TXT)
+    _, _, _, _, header, data, _ = sniff.layout_of(p)
+    codes = {n: sniff.guess_type([r[i] for r in data], n)[2]
+             for i, n in enumerate(header)}
+    assert codes["DOCTYPE"] == "N!"
+    assert codes["MENGE"] == "N"
+    assert codes["WRBTR"] == "N-" and codes["BUKRS"] == "T!"

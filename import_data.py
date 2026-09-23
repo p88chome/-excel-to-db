@@ -36,6 +36,12 @@ def main(root=None, mode=None):
         try:
             rows = core.import_table(engine, t, mode)
             print(f"{t.name}：{rows:,} 列 <- {len(t.files)} 個檔案")
+            bad = core.suspects(t)
+            if bad:
+                print(f"  注意：{' '.join(bad)} 被推斷成整數，"
+                      f"但欄名不在 SAP 代碼欄位清單。")
+                print(f"  如果是代碼欄位，請在 config.json 的 dtypes 改成 "
+                      f"NVARCHAR，否則前導零會掉、JOIN 不到來源表。")
         except Exception as e:
             print(f"失敗 {t.name}：{str(e).splitlines()[0]}")
             failed += 1

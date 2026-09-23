@@ -180,6 +180,37 @@ SAP_CODE_FIELDS = frozenset("""
     GLVOR GRPID FIKRS HWAER HWAE2 HWAE3 AUGLV PPNAM BRNCH RLDNR LDGRP
     IBLAR DOCCAT KTOPL VERSN ERGSL TXJCD XREF1 XREF2 XREF3
     FISTL FIPOS GEBER KDAUF KDPOS PROJK AUFPL APLZL PRODH
+
+    AKONT ZWELS BUSAB QSSKZ MINDK KONZS BRSCH SPERR SPERM LOEVM LOEKZ
+    BANKL BANKN BANKS BKONT IBAN SWIFT
+
+    XBILK BILKT GVTYP MITKZ ZUMSK REBZG REBZJ REBZZ MANSP MSCHL MABER
+    VERTN VERTT
+
+    BISMT LABOR PRDHA MSTAE MSTAV DISPO DISMM BESKZ SOBSL LGPBE BKLAS
+    VPRSV
+
+    SMBLN SJAHR SMBLP KZBEW KZZUG KZVBR UMWRK UMLGO UMMAT UMCHA GRUND
+    VGABE
+
+    BSTYP BSAKZ STATU LPONR KONNR KTPNR ANFNR IHREZ VERKF
+
+    AUGRU ABRVW VKBUR VKGRP PSTYV POSAR VGTYP UEPOS GRKOR
+
+    OBJNR PAROB USPOB BEKNZ VRGNG WRTTP AFABE BWASL
+
+    RBUKRS RACCT RCNTR RFAREA RBUSA RMVCT RTCUR RHCUR RKCUR RWCUR RUNIT
+""".split())
+
+# 反過來：這些本來就是數字，就算沒小數也不要當成可疑欄位。
+# 數量欄位（MENGE、LFIMG）匯出時剛好整數很常見，天期欄位（ZBD1T）更是。
+SAP_NUMERIC_FIELDS = frozenset("""
+    WRBTR DMBTR DMBE2 DMBE3 WRBTR2 NETWR BRTWR KZWRT KBETR KWERT
+    MWSTS WMWST FWSTE HWSTE SKFBT WSKTO SKNTO
+    MENGE BSTMG LFIMG FKIMG WEMNG PSMNG ERFMG BDMNG GSMNG LBKUM
+    SALK3 SALKV VERPR STPRS PEINH UMREZ UMREN
+    NTGEW BRGEW VOLUM
+    KURSF KURRF KURS2 KURS3 ZBD1T ZBD2T ZBD3T ZBD1P ZBD2P
 """.split())
 
 # 標準欄位太多，列不完。這幾條欄名規則接住沒列到的，一樣只看名字不看值。
@@ -329,6 +360,18 @@ def sap_convert(df):
             converted = sap_numbers(s)
         out[col] = s if converted is None else converted
     return pd.DataFrame(out, columns=df.columns)
+
+
+def suspects(table):
+    """挑出最可能被判錯的欄位：欄名不在 SAP 清單，卻被推斷成整數。
+
+    代碼被當數字是唯一會靜悄悄弄壞資料的情況——前導零掉了、跟來源表
+    JOIN 不起來，而且要等下游出錯才發現。金額有小數、日期有格式，
+    判斷有憑有據，不在這裡報。
+    """
+    return [c for c, ty in table.dtypes.items()
+            if ty in ("INT", "BIGINT") and not is_code_field(c)
+            and str(c).strip().upper() not in SAP_NUMERIC_FIELDS]
 
 
 def read_txt(path, encoding=None, sep=None, skiprows=0):

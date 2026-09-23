@@ -45,16 +45,17 @@ NULL_TOKENS = {"", "#", "-", "--", "n/a", "na", "null", "none",
 
 SHORT_LEGEND = (
     "代碼：T=文字 T0=文字有前導零 T!=SAP代碼欄位強制文字 N=數字 "
-    "N-=有尾綴負號 N?=千分位待確認 D:iso=YYYY-MM-DD D:dot=DD.MM.YYYY "
-    "D:slash?=日月順序待確認 D:8=YYYYMMDD _=整欄空白")
+    "N!=整數但欄名不在清單（請確認） N-=有尾綴負號 N?=千分位待確認 "
+    "D:iso=YYYY-MM-DD D:dot=DD.MM.YYYY D:slash?=日月順序待確認 "
+    "D:8=YYYYMMDD _=整欄空白")
 
 # SAP 代碼欄位清單放在 core.py，這裡不複製一份，免得兩邊改到不一致。
 # 只複製了 sniff.py 到遠端、或那台沒裝 pandas 時，清單就不套用——
 # 版面與編碼的判斷不受影響，只是代碼欄位不會標成 T!。
 try:
-    from core import SAP_CODE_FIELDS, is_code_field
+    from core import SAP_CODE_FIELDS, SAP_NUMERIC_FIELDS, is_code_field
 except Exception:                                   # noqa: BLE001
-    SAP_CODE_FIELDS = frozenset()
+    SAP_CODE_FIELDS = SAP_NUMERIC_FIELDS = frozenset()
 
     def is_code_field(name):
         return False
@@ -126,10 +127,10 @@ def guess_type(values, name=""):
         return "（整欄空白）", "", "_"
     if is_code_field(name):
         return "文字（SAP 代碼欄位）", "欄名在 SAP 代碼欄位清單，一律當文字", "T!"
-    for rx, name, code in DATE_RES:
+    for rx, fmt, date_code in DATE_RES:      # 別用 name/code，會蓋掉參數
         if all(rx.fullmatch(v.split(" ")[0]) for v in real):
-            note = "!! 日月順序看不出來，預設當 DD/MM" if "或" in name else ""
-            return f"日期 {name}", note, code
+            note = "!! 日月順序看不出來，預設當 DD/MM" if "或" in fmt else ""
+            return f"日期 {fmt}", note, date_code
     if any(CODE_RE.fullmatch(v) for v in real):
         return "文字（有前導零）", "保持文字，轉數字會掉開頭的 0", "T0"
     if all(NUM_RE.fullmatch(v) for v in real):
@@ -142,6 +143,13 @@ def guess_type(values, name=""):
         if ambiguous and not any("," in v for v in real):
             note = f"!! 像 {ambiguous[0]} 這種看不出是千分位還是小數點，預設當千分位"
             code = "N?"
+        # 欄名不在清單、整欄又都是沒小數的整數——代碼被當數字的典型長相。
+        # 金額有小數、日期有格式，都不會落到這裡。
+        if (code == "N" and SAP_CODE_FIELDS
+                and name.strip().upper() not in SAP_NUMERIC_FIELDS
+                and not any(re.search(r"[.,]\d{1,2}$", v) for v in real)):
+            note = "!! 欄名不在 SAP 代碼欄位清單，整欄都是整數——是代碼的話要改成文字"
+            code = "N!"
         return "數字", note, code
     return f"文字（最長 {max(len(v) for v in real)} 字）", "", "T"
 
