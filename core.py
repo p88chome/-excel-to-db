@@ -11,6 +11,7 @@ import codecs
 import json
 import os
 import re
+import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,7 +25,7 @@ from sqlalchemy.types import (
     NVARCHAR, BigInteger, Boolean, Date, DateTime, Float, Integer, Numeric,
 )
 
-EXTS = {".csv", ".xlsx", ".xls", ".txt"}
+EXTS = {".csv", ".xlsx", ".xls", ".txt", ".xml"}
 PREVIEW_ROWS = 200
 CONFIG = Path("config.json")
 
@@ -451,6 +452,73 @@ def read_txt(path, encoding=None, sep=None, skiprows=0, int_codes=True):
     return sap_convert(parse(text, sep=sep, skiprows=skiprows), int_codes)
 
 
+# --- Excel 2003 XML（SpreadsheetML）------------------------------------
+
+# SAP 的「匯出成試算表」在某些版本吐的是這種檔：副檔名 .xml，內容是
+# <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet">。
+# Excel 開得起來，但 pandas.read_excel 讀不了（它不是 zip 也不是 BIFF）。
+SS = "{urn:schemas-microsoft-com:office:spreadsheet}"
+
+
+def xml_cell(data):
+    """一個 <Data> 的值。型別寫在 ss:Type，不用猜。"""
+    if data is None or data.text is None:
+        return None
+    text = data.text
+    kind = data.get(SS + "Type")
+    if kind == "Number":
+        number = float(text)
+        return int(number) if number.is_integer() and abs(number) < 2**63 else number
+    if kind == "DateTime":
+        return pd.to_datetime(text, errors="coerce")
+    if kind == "Boolean":
+        return text.strip() in ("1", "true", "True")
+    return text
+
+
+def xml_row(el):
+    """一列。空白儲存格會被省略，靠 ss:Index 跳位補回來。"""
+    cells = []
+    for cell in el.findall(SS + "Cell"):
+        at = cell.get(SS + "Index")
+        if at:
+            while len(cells) < int(at) - 1:
+                cells.append(None)
+        cells.append(xml_cell(cell.find(SS + "Data")))
+        across = cell.get(SS + "MergeAcross")
+        if across:
+            cells.extend([None] * int(across))
+    return cells
+
+
+def read_xml(path, nrows=None):
+    """讀 SpreadsheetML，只取第一個有資料的工作表。"""
+    rows = []
+    limit = None if nrows is None else nrows + 1     # 加上標題列
+    for _, el in ET.iterparse(str(path), events=("end",)):
+        if el.tag == SS + "Row":
+            rows.append(xml_row(el))
+            el.clear()
+            if limit and len(rows) >= limit:
+                break
+        elif el.tag == SS + "Worksheet" and rows:
+            break                                    # 後面的工作表不碰
+
+    if len(rows) < 2:
+        raise ValueError(
+            "SpreadsheetML 裡找不到標題列加資料列。"
+            "確認這個 .xml 是 Excel 2003 XML，而不是 SAP 自訂的 XML 格式。")
+
+    width = max(len(r) for r in rows)
+    head = [str(h) if h is not None else "" for h in rows[0]]
+    head += [""] * (width - len(head))
+    data = [r + [None] * (width - len(r)) for r in rows[1:]]
+
+    df = pd.DataFrame(data, columns=headers(head))
+    blank = [c for c in df.columns if c.startswith("COL") and df[c].isna().all()]
+    return df.drop(columns=blank)
+
+
 # --- 讀檔 ---------------------------------------------------------------
 
 def code_columns_to_text(df, int_codes=True):
@@ -488,6 +556,8 @@ def read(path, nrows=None, opts=None, int_codes=True):
     if ext == ".txt":
         df = read_txt(path, int_codes=int_codes, **(opts or {}))
         df = df.head(nrows) if nrows else df
+    elif ext == ".xml":
+        df = read_xml(path, nrows)
     elif ext == ".csv":
         df = pd.read_csv(path, nrows=nrows)
     else:
@@ -502,6 +572,8 @@ def count_rows(path, opts=None):
         o = dict(opts or {})
         text = decode(Path(path).read_bytes(), o.pop("encoding", None))
         return len(parse(text, **o))
+    if ext == ".xml":
+        return len(read_xml(path))
     if ext == ".csv":
         with open(path, "rb") as f:
             return max(sum(1 for _ in f) - 1, 0)
@@ -616,6 +688,7 @@ class Table:
     opts: dict = field(default_factory=dict)    # txt 解析覆寫
     int_codes: bool = True      # 沒小數的整數欄位當文字
     pinned: set = field(default_factory=set)    # 使用者指定死的型別
+    skipped: list = field(default_factory=list)  # 副檔名不支援、沒讀的檔
     widened: dict = field(default_factory=dict)  # 建表前放寬過的長度
 
     @property
@@ -624,14 +697,20 @@ class Table:
 
 
 def groups(root):
-    """列出 (表名, 檔案清單)。子資料夾 = 一張表，散檔 = 一張表。"""
+    """列出 (表名, 檔案清單, 跳過的檔案)。子資料夾 = 一張表，散檔 = 一張表。
+
+    跳過的檔案也要回報。整個資料夾只有不支援的副檔名時，原本會安靜地
+    連表都不出現，人會以為匯過了。
+    """
     for p in sorted(Path(root).iterdir()):
         if p.is_dir():
-            files = [f for f in sorted(p.iterdir()) if f.suffix.lower() in EXTS]
-            if files:
-                yield p.name, files
-        elif p.suffix.lower() in EXTS:
-            yield p.stem, [p]
+            inside = [f for f in sorted(p.iterdir()) if f.is_file()]
+            files = [f for f in inside if f.suffix.lower() in EXTS]
+            skipped = [f for f in inside if f.suffix.lower() not in EXTS]
+            if files or skipped:
+                yield p.name, files, skipped
+        elif p.is_file() and p.suffix.lower() in EXTS:
+            yield p.stem, [p], []
 
 
 def scan(root, cfg=None):
@@ -639,9 +718,15 @@ def scan(root, cfg=None):
     txt_opts = (cfg or {}).get("txt", {})
     int_codes = (cfg or {}).get("int_codes", True)
     tables = []
-    for name, files in groups(root):
+    for name, files, skipped in groups(root):
         t = Table(name=name, files=files, opts=dict(txt_opts.get(name, {})),
-                  int_codes=int_codes)
+                  int_codes=int_codes, skipped=skipped)
+        if not files:
+            t.error = ("沒有支援的檔案，只有 "
+                       + "、".join(f.name for f in skipped[:5])
+                       + f"（支援 {' '.join(sorted(EXTS))}）")
+            tables.append(t)
+            continue
         try:
             samples = [read(f, nrows=PREVIEW_ROWS, opts=t.opts,
                             int_codes=int_codes) for f in files]

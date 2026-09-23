@@ -794,3 +794,116 @@ def test_a_pinned_length_is_reported_not_silently_widened(tmp_path):
                              {"dtypes": {"ZTM105": {"SGTXT": "NVARCHAR(10)"}}})[0]
     with pytest.raises(ValueError, match="SGTXT 宣告 10 但實際最長 60"):
         core.import_table(core.connect(f"sqlite:///{tmp_path / 'out.db'}"), t)
+
+
+# --- Excel 2003 XML（SpreadsheetML）------------------------------------
+
+SPREADSHEETML = """<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+ <Worksheet ss:Name="MAKT">
+  <Table>
+   <Row>
+    <Cell><Data ss:Type="String">MATNR</Data></Cell>
+    <Cell><Data ss:Type="String">SPRAS</Data></Cell>
+    <Cell><Data ss:Type="String">MAKTX</Data></Cell>
+    <Cell><Data ss:Type="String">MENGE</Data></Cell>
+    <Cell><Data ss:Type="String">ERSDA</Data></Cell>
+   </Row>
+   <Row>
+    <Cell><Data ss:Type="String">000000000010001234</Data></Cell>
+    <Cell><Data ss:Type="String">ZH</Data></Cell>
+    <Cell><Data ss:Type="String">WAFER 12IN</Data></Cell>
+    <Cell><Data ss:Type="Number">12</Data></Cell>
+    <Cell><Data ss:Type="DateTime">2026-12-31T00:00:00.000</Data></Cell>
+   </Row>
+   <Row>
+    <Cell><Data ss:Type="String">000000000010001235</Data></Cell>
+    <Cell ss:Index="3"><Data ss:Type="String">WAFER 8IN</Data></Cell>
+    <Cell><Data ss:Type="Number">1.234</Data></Cell>
+    <Cell><Data ss:Type="DateTime">2026-01-01T00:00:00.000</Data></Cell>
+   </Row>
+  </Table>
+ </Worksheet>
+ <Worksheet ss:Name="說明">
+  <Table><Row><Cell><Data ss:Type="String">不該被讀到</Data></Cell></Row></Table>
+ </Worksheet>
+</Workbook>
+"""
+
+
+def write_xml(tmp_path, name="MAKT.xml"):
+    p = tmp_path / name
+    p.write_text(SPREADSHEETML, encoding="utf-8")
+    return p
+
+
+def test_spreadsheetml_is_read(tmp_path):
+    df = core.read(write_xml(tmp_path))
+    assert list(df.columns) == ["MATNR", "SPRAS", "MAKTX", "MENGE", "ERSDA"]
+    assert len(df) == 2
+
+
+def test_ss_index_fills_the_skipped_cell(tmp_path):
+    # 第二列省略了 SPRAS，靠 ss:Index="3" 跳到第三欄
+    df = core.read(write_xml(tmp_path))
+    assert df["MAKTX"].tolist() == ["WAFER 12IN", "WAFER 8IN"]
+    assert pd.isna(df["SPRAS"].iloc[1])
+
+
+def test_types_come_from_ss_type_not_from_guessing(tmp_path):
+    df = core.read(write_xml(tmp_path))
+    # 1.234 在 SpreadsheetML 裡是 Number，小數點就是小數點，
+    # 不會像 txt 那樣要猜千分位
+    assert df["MENGE"].tolist() == [12, 1.234]
+    assert df["ERSDA"].iloc[0] == pd.Timestamp("2026-12-31")
+    assert df["MATNR"].tolist()[0] == "000000000010001234"   # 前導零留著
+
+
+def test_only_the_first_worksheet_is_read(tmp_path):
+    df = core.read(write_xml(tmp_path))
+    assert "不該被讀到" not in df.astype(str).to_numpy()
+
+
+def test_count_rows_matches(tmp_path):
+    p = write_xml(tmp_path)
+    assert core.count_rows(p) == len(core.read(p))
+
+
+def test_preview_stops_early(tmp_path):
+    assert len(core.read(write_xml(tmp_path), nrows=1)) == 1
+
+
+def test_xml_joins_the_same_table_as_txt(tmp_path):
+    root = tmp_path / "data" / "MAKT"
+    root.mkdir(parents=True)
+    write_xml(root)
+    write(root, "part2.txt",
+          "Dynamic List Display\n\nMATNR\tSPRAS\tMAKTX\tMENGE\tERSDA\n"
+          "000000000010009999\tEN\tWAFER 4IN\t7\t01.06.2026\n")
+    t = core.scan(tmp_path / "data")[0]
+    assert t.ok, t.error
+    assert t.rows == 3
+
+
+def test_a_folder_with_no_supported_files_is_reported(tmp_path):
+    root = tmp_path / "data" / "MAKT"
+    root.mkdir(parents=True)
+    (root / "MAKT.pdf").write_bytes(b"%PDF-1.4")
+    (root / "readme.docx").write_bytes(b"PK")
+    t = core.scan(tmp_path / "data")[0]
+    assert not t.ok
+    assert "MAKT.pdf" in t.error and ".xml" in t.error
+
+
+def test_unsupported_files_alongside_good_ones_are_listed(tmp_path):
+    root = tmp_path / "data" / "MAKT"
+    root.mkdir(parents=True)
+    write_xml(root)
+    (root / "note.pdf").write_bytes(b"%PDF-1.4")
+    t = core.scan(tmp_path / "data")[0]
+    assert t.ok
+    assert [f.name for f in t.skipped] == ["note.pdf"]

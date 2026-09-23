@@ -150,6 +150,8 @@ class App(Tk):
             warn = core.suspects(t) if t.ok else []
             status = t.error or (f"可匯入（{len(warn)} 欄整數已當文字）" if warn
                                  else "可匯入")
+            if t.ok and t.skipped:
+                status += f"，略過 {len(t.skipped)} 個不支援的檔案"
             self.tv.insert("", "end", iid=str(i),
                            values=(t.name, len(t.files), f"{t.rows:,}", status),
                            tags=("err",) if not t.ok else

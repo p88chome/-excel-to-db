@@ -16,7 +16,8 @@ data/
 子資料夾 = 一張表（夾內所有檔案合併），散檔 = 一張表（表名為檔名）。
 同一張表裡 `.xlsx` 與 `.txt` 可以混放，只要欄名一致就會合併。
 
-支援的副檔名：`.xlsx` `.xls` `.csv` `.txt`。
+支援的副檔名：`.xlsx` `.xls` `.csv` `.txt` `.xml`。
+不支援的副檔名會被列出來，不會安靜跳過。
 
 ## 安裝
 
@@ -296,6 +297,22 @@ ANLA（1 個檔案，406,537 列）
 | `MENGE` `LFIMG` `ZBD1T` 等 | 在 `SAP_NUMERIC_FIELDS` 已知數字清單裡 |
 | `BUKRS` `BELNR` 等 | 欄名就認得出來 |
 | `0000001000` 有前導零 | 百分之百是代碼，沒什麼好確認的 |
+
+### 匯出成 .xml 的情況
+
+SAP 的「匯出成試算表」在某些版本吐的是 **Excel 2003 XML（SpreadsheetML）**：
+副檔名 `.xml`，第一行是 `<?xml version="1.0"?>`，下面有
+`urn:schemas-microsoft-com:office:spreadsheet`。Excel 開得起來，
+但 `pandas.read_excel` 讀不了（它既不是 zip 也不是 BIFF）。
+
+這種檔直接讀得了，和 `.xlsx` 放同一個資料夾也能合併成一張表。
+
+型別直接取自檔案裡的 `ss:Type`，**不用猜**——所以 `1.234` 在這種檔案裡
+明確是小數，不會被當成千分位。省略的空白儲存格靠 `ss:Index` 跳位補回。
+只讀第一個有資料的工作表。
+
+`.xml` 但不是 SpreadsheetML（SAP 自訂的 XML 結構）會報錯說清楚，
+不會亂解析。
 
 ### 先探一下格式
 
