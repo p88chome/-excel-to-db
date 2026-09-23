@@ -27,6 +27,26 @@ pip install -r requirements.txt
 copy config.example.json config.json
 ```
 
+### API 串接與爬蟲的套件
+
+`requirements-api.txt` 是另一組：FastAPI、requests、selenium、
+BeautifulSoup、alembic、pymysql、psycopg2 等。
+
+```
+pip install -r requirements-api.txt
+```
+
+與 `requirements.txt` 版本相容——共用的 `pandas` / `SQLAlchemy` /
+`pyodbc` / `openpyxl` 釘在同一版，裝完 excel-to-db 仍然跑得起來。
+**特別是 `pandas`**：3.0 已經發布，不釘版本的話 pip 會裝 3.0.x，
+那一版有 breaking change，excel-to-db 會壞。
+
+已在 Python 3.14 / win_amd64 驗證解析：68 個套件、零衝突，
+全部都有 cp314 wheel，目標機器不需要編譯器。
+
+`json` 與 `re` 沒有列進去——那是標準庫，直接 import 就好。
+寫進 requirements 的話 pip 會去 PyPI 抓到別人上傳的同名套件。
+
 ### 沒網路 / proxy 擋住的機器
 
 公司的 proxy 需要認證時，`pip install` 會噴 `407 Proxy Authentication Required`。
@@ -43,7 +63,15 @@ install_offline.bat
 換到其他 Python 版本的機器時，在**有網路的開發機**補抓：
 
 ```
-fetch_wheels.bat 3.12        參數是目標機器的 Python 版本
+fetch_wheels.bat 3.12                          參數是目標機器的 Python 版本
+fetch_wheels.bat 3.14 requirements-api.txt     指定要抓哪一組
+```
+
+裝的時候同樣可以指定：
+
+```
+install_offline.bat
+install_offline.bat requirements-api.txt
 ```
 
 跨版本抓沒問題，在 3.14 的機器上一樣抓得到 `cp312` 的 wheel。

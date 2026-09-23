@@ -1,0 +1,61 @@
+# API 串接、資料處理與爬蟲用的套件。
+#
+# 與 requirements.txt（excel-to-db 本身）分開，但版本是相容的：
+# 共用的 pandas / SQLAlchemy / pyodbc / openpyxl 釘在同一版，
+# 三台機器裝完之後 excel-to-db 仍然跑得起來。
+#
+# 安裝：
+#     pip install -r requirements-api.txt
+#
+# proxy 擋住（407）時走離線：在有網路的機器跑
+#     fetch_wheels.bat 3.14 requirements-api.txt
+# 再把 wheels\ 帶過去執行 install_offline.bat。
+#
+# 已驗證：Python 3.14 / win_amd64，每一個都有 cp314 wheel，不需要編譯器。
+
+
+# --- 共用：與 requirements.txt 同版，不要單獨升級 ----------------------
+# pandas 3.0 已經發布，不釘版本的話 pip 會裝 3.0.x，
+# 那一版有 breaking change 且尚未驗證，excel-to-db 會壞。
+pandas==2.3.3
+numpy==2.4.2
+SQLAlchemy==2.0.52
+openpyxl==3.1.5
+
+
+# --- API 串接 ----------------------------------------------------------
+requests==2.34.2                # 呼叫外部 API
+fastapi==0.141.1                # 建立 API 服務介面
+uvicorn[standard]==0.53.0       # 執行 FastAPI 服務
+pydantic==2.13.5                # 資料驗證與格式轉換
+pydantic-settings==2.15.0       # 系統設定與環境變數管理
+python-multipart==0.0.32        # 檔案上傳與表單資料
+python-dotenv==1.2.3            # 讀取 .env 設定檔
+
+
+# --- 資料庫 ------------------------------------------------------------
+pyodbc==5.3.0                   # SQL Server（本專案實際用的那一個）
+pymysql==1.2.3                  # MySQL
+psycopg2-binary==2.9.13         # PostgreSQL
+alembic==1.20.0                 # 資料庫版本管理與 Migration
+
+
+# --- 爬蟲（商工登記資料查詢）------------------------------------------
+beautifulsoup4==4.15.0          # HTML 解析
+lxml==6.1.3                     # 解析引擎，讓 BeautifulSoup 快很多
+selenium==4.49.0                # 動態網頁、驗證機制
+
+
+# --- 補充的（原清單沒有，但會用到）------------------------------------
+httpx==0.28.1                   # FastAPI 的 TestClient 需要它；也支援 async
+tenacity==9.1.4                 # 外部 API 逾時或 5xx 時自動重試
+pytest==8.4.2                   # 測試
+
+
+# --- 不要加進來 --------------------------------------------------------
+# json 與 re 是 Python 標準庫，直接 import 就好。
+# 寫進 requirements.txt 的話 pip 會去 PyPI 找同名套件——
+# 那是別人上傳的無關套件，裝了不會是你要的東西。
+#
+# webdriver-manager 也不需要：Selenium 4.6 起內建 Selenium Manager，
+# 會自動下載對應版本的 driver。但目標機器要先裝好 Chrome 或 Edge。

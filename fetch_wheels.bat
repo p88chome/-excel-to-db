@@ -2,7 +2,10 @@
 REM 在「有網路的開發機」執行，把目標機器要用的套件抓成 wheel 檔。
 REM
 REM 用法：fetch_wheels.bat 3.12
-REM       參數是「目標機器」的 Python 版本，不是這台的。
+REM       fetch_wheels.bat 3.14 requirements-api.txt
+REM
+REM 第一個參數是「目標機器」的 Python 版本，不是這台的。
+REM 第二個參數是要抓的 requirements 檔，省略時用 requirements.txt。
 REM
 REM 跨版本抓是可以的：在 3.14 的機器上一樣抓得到 cp312 的 wheel。
 
@@ -14,7 +17,11 @@ if "%~1"=="" (
   exit /b 1
 )
 
-python -m pip download -r requirements.txt -d wheels ^
+set REQ=%~2
+if "%REQ%"=="" set REQ=requirements.txt
+
+echo 抓取 %REQ% 的 wheel（目標 Python %1 / win_amd64）...
+python -m pip download -r %REQ% -d wheels ^
   --only-binary=:all: --python-version %1 --platform win_amd64
 
 echo.
