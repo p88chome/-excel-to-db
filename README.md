@@ -127,8 +127,15 @@ JOIN 不到；還有同一欄位這個月的檔案沒有前導零、下個月有
 每次重建表，欄位型別就在 INT 與 NVARCHAR 之間跳，下游跟著爛。
 
 所以 `core.py` 帶一張 SAP 標準代碼欄位清單（`SAP_CODE_FIELDS`），
-**只看欄名、不看值**，命中就當文字。涵蓋 FI／MM／SD／CO 常見的組織、
-憑證、主檔、採購、銷售欄位，十幾張報表不用各設定一次。
+**只看欄名、不看值**，命中就當文字。目前 576 個欄名，逐一比對過這 32 張表：
+
+```
+A017  ANLA  BKPF  BSEG  CDHDR CDPOS T001  EBAN  EBKN  EINA  EINE
+EKBE  EKET  EKKN  EKKO  EKPO  KONH  KONP  LFA1  LFB1  LFBK  LFM1
+MAKT  MARA  MARC  MARD  MBEW  MBEWH MKPF  MSEG  T001W T001K
+```
+
+漏 0、誤判 0，而且鎖進 `test_sap.py` —— 之後改清單，退步會被測試擋下來。
 
 清單認不出來的兩種情況：
 
