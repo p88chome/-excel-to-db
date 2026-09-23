@@ -78,7 +78,9 @@ def main(*argv):
             failed += 1
             continue
         try:
-            rows = core.import_table(engine, t, mode)
+            rows = core.import_table(
+                engine, t, mode,
+                progress=lambda m, name=t.name: print(f"  {name}  {m}"))
             print(f"{t.name}：{rows:,} 列 <- {len(t.files)} 個檔案")
             if t.skipped:
                 names = "、".join(f.name for f in t.skipped[:5])

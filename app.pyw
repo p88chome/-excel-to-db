@@ -265,7 +265,10 @@ class App(Tk):
         for t in tables:
             self.q.put(("status", f"匯入 {t.name}…"))
             try:
-                rows = core.import_table(engine, t, mode)
+                rows = core.import_table(
+                    engine, t, mode,
+                    progress=lambda m, name=t.name:
+                        self.q.put(("status", f"{name}　{m}")))
                 done.append(f"{t.name}：{rows:,} 列")
                 log(f"OK   {t.name} {rows} rows ({mode})")
             except Exception as e:

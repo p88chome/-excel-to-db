@@ -766,9 +766,13 @@ def scan(root, cfg=None):
     return tables
 
 
-def load(files, opts=None, int_codes=True):
+def load(files, opts=None, int_codes=True, progress=None):
     """讀完整資料。欄位不一致就丟例外 —— 猜錯比不做更糟。"""
-    frames = [read(f, opts=opts, int_codes=int_codes) for f in files]
+    say = progress or (lambda message: None)
+    frames = []
+    for i, f in enumerate(files, 1):
+        say(f"讀取 {f.name}（{i}/{len(files)}）")
+        frames.append(read(f, opts=opts, int_codes=int_codes))
     cols = list(frames[0].columns)
     for f, df in zip(files[1:], frames[1:]):
         if set(df.columns) != set(cols):
@@ -915,8 +919,17 @@ def fit_types(df, types, pinned=()):
     return fitted, changed, conflicts
 
 
-def import_table(engine, table, mode="replace", overrides=None):
-    """匯入一張表。整個動作包在交易裡，失敗會回滾，不影響其他表。"""
+# 每寫入這麼多列回報一次。太小的話光是回報就拖慢速度。
+PROGRESS_ROWS = 50_000
+
+
+def import_table(engine, table, mode="replace", overrides=None, progress=None):
+    """匯入一張表。整個動作包在交易裡，失敗會回滾，不影響其他表。
+
+    progress 是一個接收字串的函式。幾十萬列要跑好幾分鐘，沒有回報的話
+    沒辦法分辨是卡住還是在跑。
+    """
+    say = progress or (lambda message: None)
     if not table.ok:
         raise ValueError(table.error)
     types = {**table.dtypes, **(overrides or {})}
@@ -924,7 +937,8 @@ def import_table(engine, table, mode="replace", overrides=None):
 
     # 先用完整資料校正型別再轉換：掃描是抽樣的，直接拿去 coerce 會在
     # 「無法轉成 INT」或 INSERT 的截斷錯誤上炸掉。
-    raw = load(table.files, table.opts, table.int_codes)
+    raw = load(table.files, table.opts, table.int_codes, say)
+    say("校正型別…")
     types, table.widened, conflicts = fit_types(raw, types, pinned)
     if conflicts:
         detail = "、".join(f"{c} 指定 {old}，但實際資料需要 {new}"
@@ -934,12 +948,22 @@ def import_table(engine, table, mode="replace", overrides=None):
             "請在 config.json 的 dtypes 調整，或把該欄的指定拿掉讓程式自己判斷。")
     table.dtypes.update(table.widened)
 
+    say("轉換型別…")
     df = coerce(raw, types)
     dtype = {c: to_sa(t) for c, t in types.items() if c in df.columns}
+
+    total = len(df)
     with engine.begin() as conn:
-        df.to_sql(table.name, conn, if_exists=mode, index=False,
-                  chunksize=1000, dtype=dtype)
-    return len(df)
+        if not total:                       # 空表也要建出來
+            df.to_sql(table.name, conn, if_exists=mode, index=False,
+                      dtype=dtype)
+        for start in range(0, total, PROGRESS_ROWS):
+            part = df.iloc[start:start + PROGRESS_ROWS]
+            part.to_sql(table.name, conn, index=False, dtype=dtype,
+                        if_exists=mode if start == 0 else "append",
+                        chunksize=1000)
+            say(f"寫入 {min(start + PROGRESS_ROWS, total):,} / {total:,} 列")
+    return total
 
 
 DEFAULT_DRIVER = "ODBC Driver 17 for SQL Server"

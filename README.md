@@ -173,6 +173,24 @@ python import_data.py data append  # 指定資料夾與寫入模式
 python import_data.py data --check # 只檢查不寫入，也不連資料庫
 ```
 
+匯入時會逐段回報進度。幾十萬列要跑好幾分鐘，沒有回報的話沒辦法
+分辨是卡住還是在跑：
+
+```
+  EKBE  讀取 part1.xlsx（1/3）
+  EKBE  讀取 part2.xlsx（2/3）
+  EKBE  讀取 part3.xlsx（3/3）
+  EKBE  校正型別…
+  EKBE  轉換型別…
+  EKBE  寫入 50,000 / 450,000 列
+  ...
+EKBE：450,000 列 <- 3 個檔案
+```
+
+寫入之前的每一段都不碰資料庫，所以會失敗的都失敗在開始寫之前；
+寫入本身包在一個交易裡，中斷會整批回滾，不會留下半套資料。
+UI 版的同一份訊息顯示在狀態列。
+
 `--check` 列出每張表的欄位型別與可疑欄位，是 Excel 的探路工具——
 `sniff.py` 只看得懂 txt：
 

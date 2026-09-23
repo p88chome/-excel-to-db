@@ -1011,3 +1011,48 @@ def test_sniff_agrees_with_core_on_ragged_rows(tmp_path):
                           "post1 code", "city", "Name2", "Name", "Version"]
     assert len(data) == 2
     assert [r[1] for r in data] == ["VDR6", "1000"]
+
+
+# --- 進度回報 -----------------------------------------------------------
+
+def test_progress_reports_each_stage(tmp_path):
+    root = tmp_path / "data" / "EKBE"
+    root.mkdir(parents=True)
+    head = "Dynamic List Display\n\nEBELN\tMENGE\n"
+    write(root, "part1.txt", head + "4500000001\t1\n")
+    write(root, "part2.txt", head + "4500000002\t2\n")
+
+    t = core.scan(tmp_path / "data")[0]
+    seen = []
+    core.import_table(core.connect(f"sqlite:///{tmp_path / 'out.db'}"), t,
+                      progress=seen.append)
+
+    assert seen[0].startswith("讀取 part1.txt（1/2）")
+    assert seen[1].startswith("讀取 part2.txt（2/2）")
+    assert "校正型別…" in seen and "轉換型別…" in seen
+    assert seen[-1] == "寫入 2 / 2 列"
+
+
+def test_progress_is_optional(tmp_path):
+    t = core.scan(write(tmp_path, "T001.txt",
+                        "Dynamic List Display\n\nBUKRS\tBUTXT\n8104\t聯電\n"
+                        ).parent)[0]
+    assert core.import_table(core.connect(f"sqlite:///{tmp_path / 'o.db'}"), t) == 1
+
+
+def test_chunked_write_lands_every_row(tmp_path, monkeypatch):
+    # 分批寫入不能漏列，也不能因為第二批用 append 而重建表
+    monkeypatch.setattr(core, "PROGRESS_ROWS", 10)
+    rows = "".join(f"450000{i:04d}\t{i}\n" for i in range(25))
+    t = core.scan(write(tmp_path, "EKBE.txt",
+                        "Dynamic List Display\n\nEBELN\tMENGE\n" + rows).parent)[0]
+    db = tmp_path / "out.db"
+    seen = []
+    assert core.import_table(core.connect(f"sqlite:///{db}"), t,
+                             progress=seen.append) == 25
+
+    import sqlite3
+    with sqlite3.connect(db) as c:
+        assert c.execute("SELECT COUNT(*) FROM EKBE").fetchone()[0] == 25
+    assert [m for m in seen if m.startswith("寫入")] == [
+        "寫入 10 / 25 列", "寫入 20 / 25 列", "寫入 25 / 25 列"]
