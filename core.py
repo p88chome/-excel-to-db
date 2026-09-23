@@ -828,39 +828,75 @@ def connect(conn_str):
 
 
 NVARCHAR_RE = re.compile(r"NVARCHAR\((\d+)\)")
+DECIMAL_RE = re.compile(r"(?:DECIMAL|NUMERIC)\((\d+),\s*(\d+)\)")
 
 
-def fit_text_lengths(df, types, pinned=()):
-    """用完整資料重新量文字欄位的長度，回 (型別, 放寬的, 不夠long的)。
+def better_spec(series, spec):
+    """宣告的型別放不下這一欄時回傳放得下的，放得下就回 None。
 
-    掃描為了快只看前 PREVIEW_ROWS 列，第 201 列之後才出現的長字串會在
-    INSERT 時被擋下來，而且錯誤訊息只說
-    「String data, right truncation: length 48 buffer 40」，
-    不會告訴你是哪一欄。這裡在建表前先補齊。
+    掃描為了快只看前 PREVIEW_ROWS 列，之後才出現的值可能放不進去：
+    文字更長、整數欄冒出小數、金額多一位小數。這些在 INSERT 時才會
+    爆，而且訊息很難看懂（「cannot safely cast non-equivalent float64
+    to int64」、「String data, right truncation」），還不會說是哪一欄。
+    """
+    values = series.dropna()
+    if values.empty:
+        return None
+    name = spec.split("(")[0].strip().upper()
 
-    自己推斷出來的長度放寬就好；使用者在 config.json 指定死的不動它，
+    if name == "NVARCHAR":
+        m = NVARCHAR_RE.fullmatch(spec.strip().upper())
+        if not m:
+            return None                     # 已經是 NVARCHAR(MAX)
+        longest = int(values.astype(str).str.len().max())
+        return text_spec(longest) if longest > int(m.group(1)) else None
+
+    if name in ("INT", "BIGINT"):
+        numbers = pd.to_numeric(values, errors="coerce").dropna()
+        if numbers.empty:
+            return None
+        if not numbers.mod(1).eq(0).all():
+            # 數量欄位常常是 12.500 這種，前 200 列剛好都整數就會判成 INT
+            return infer(pd.to_numeric(series, errors="coerce"))
+        if name == "INT" and (numbers.min() < -2**31 or numbers.max() >= 2**31):
+            return "BIGINT"
+        return None
+
+    if name in ("DECIMAL", "NUMERIC"):
+        m = DECIMAL_RE.fullmatch(spec.strip().upper())
+        if not m:
+            return None
+        numbers = pd.to_numeric(values, errors="coerce").dropna()
+        if numbers.empty:
+            return None
+        used = numbers.astype(str).str.extract(r"\.(\d+)$")[0].str.len().max()
+        if pd.isna(used) or int(used) <= int(m.group(2)):
+            return None
+        # 小數位不夠不會報錯，SQL Server 會安靜地四捨五入掉
+        return "FLOAT" if int(used) > 6 else f"DECIMAL(18,{int(used)})"
+
+    return None
+
+
+def fit_types(df, types, pinned=()):
+    """用完整資料校正型別，回 (型別, 調整過的, 衝突的)。
+
+    自己推斷出來的放寬就好；使用者在 config.json 指定死的不動它，
     改成報錯並指名欄位——那是他明確的選擇，不該被偷偷改掉。
     """
-    fitted, widened, too_small = dict(types), {}, {}
+    fitted, changed, conflicts = dict(types), {}, {}
     for col, spec in types.items():
         if col not in df.columns:
             continue
-        m = NVARCHAR_RE.fullmatch(spec.strip().upper())
-        if not m:
-            continue
-        declared = int(m.group(1))
-        values = df[col].dropna()
-        if values.empty:
-            continue
-        longest = int(values.astype(str).str.len().max())
-        if longest <= declared:
+        better = better_spec(df[col], spec)
+        if better is None or better == spec:
             continue
         if col in pinned:
-            too_small[col] = (declared, longest)
+            conflicts[col] = (spec, better)
             continue
-        fitted[col] = text_spec(longest)
-        widened[col] = fitted[col]
-    return fitted, widened, too_small
+        fitted[col] = better
+        changed[col] = better
+    return fitted, changed, conflicts
 
 
 def import_table(engine, table, mode="replace", overrides=None):
@@ -869,17 +905,20 @@ def import_table(engine, table, mode="replace", overrides=None):
         raise ValueError(table.error)
     types = {**table.dtypes, **(overrides or {})}
     pinned = set(table.pinned) | set(overrides or {})
-    df = coerce(load(table.files, table.opts, table.int_codes), types)
 
-    types, table.widened, too_small = fit_text_lengths(df, types, pinned)
-    if too_small:
-        detail = "、".join(f"{c} 宣告 {d} 但實際最長 {n}"
-                           for c, (d, n) in too_small.items())
+    # 先用完整資料校正型別再轉換：掃描是抽樣的，直接拿去 coerce 會在
+    # 「無法轉成 INT」或 INSERT 的截斷錯誤上炸掉。
+    raw = load(table.files, table.opts, table.int_codes)
+    types, table.widened, conflicts = fit_types(raw, types, pinned)
+    if conflicts:
+        detail = "、".join(f"{c} 指定 {old}，但實際資料需要 {new}"
+                           for c, (old, new) in conflicts.items())
         raise ValueError(
-            f"指定的長度放不下：{detail}。"
-            "請在 config.json 的 dtypes 調大，或把該欄的指定拿掉讓程式自己量。")
+            f"指定的型別放不下：{detail}。"
+            "請在 config.json 的 dtypes 調整，或把該欄的指定拿掉讓程式自己判斷。")
     table.dtypes.update(table.widened)
 
+    df = coerce(raw, types)
     dtype = {c: to_sa(t) for c, t in types.items() if c in df.columns}
     with engine.begin() as conn:
         df.to_sql(table.name, conn, if_exists=mode, index=False,

@@ -792,7 +792,8 @@ def test_a_pinned_length_is_reported_not_silently_widened(tmp_path):
     root = long_text_table(tmp_path, "很" * 60)
     t = core.apply_overrides(core.scan(root),
                              {"dtypes": {"ZTM105": {"SGTXT": "NVARCHAR(10)"}}})[0]
-    with pytest.raises(ValueError, match="SGTXT 宣告 10 但實際最長 60"):
+    with pytest.raises(ValueError,
+                       match=r"SGTXT 指定 NVARCHAR\(10\)，但實際資料需要"):
         core.import_table(core.connect(f"sqlite:///{tmp_path / 'out.db'}"), t)
 
 
@@ -907,3 +908,59 @@ def test_unsupported_files_alongside_good_ones_are_listed(tmp_path):
     t = core.scan(tmp_path / "data")[0]
     assert t.ok
     assert [f.name for f in t.skipped] == ["note.pdf"]
+
+
+# --- 抽樣判錯的數字型別 -------------------------------------------------
+#
+# txt 是整檔解析後才取前 200 列，所以推斷看得到完整欄位。
+# Excel 不是：read_excel(nrows=200) 真的只讀 200 列，第 201 列以後
+# 才出現的小數、超出 int32 的值、多一位的小數位都看不到。
+
+
+def quantity_xlsx(tmp_path, tail):
+    """前 200 列都是整數，之後才出現 tail。"""
+    values = list(range(250)) + [tail]
+    pd.DataFrame({
+        "EBELN": [f"450000{i:04d}" for i in range(len(values))],
+        "MENGE": values,
+    }).to_excel(tmp_path / "EKBE.xlsx", index=False)
+    return tmp_path
+
+
+def test_int_column_with_a_late_decimal_is_promoted(tmp_path):
+    # 這就是 EKBE 的 MENGE：前 200 列都整數 -> 判成 INT，完整資料有
+    # 12.5 -> coerce 炸「cannot safely cast non-equivalent float64 to int64」
+    root = quantity_xlsx(tmp_path, 12.5)
+    t = core.scan(root)[0]
+    assert t.dtypes["MENGE"] == "INT"
+
+    rows = core.import_table(core.connect(f"sqlite:///{tmp_path / 'out.db'}"), t)
+    assert rows == 251
+    assert t.dtypes["MENGE"].startswith("DECIMAL")
+    assert t.widened["MENGE"].startswith("DECIMAL")
+
+
+def test_int_column_beyond_int32_becomes_bigint(tmp_path):
+    root = quantity_xlsx(tmp_path, 3_000_000_000)
+    t = core.scan(root)[0]
+    assert t.dtypes["MENGE"] == "INT"
+    core.import_table(core.connect(f"sqlite:///{tmp_path / 'out.db'}"), t)
+    assert t.dtypes["MENGE"] == "BIGINT"
+
+
+def test_decimal_scale_is_widened_instead_of_rounding_away(tmp_path):
+    # DECIMAL(18,2) 放 12.345 不會報錯，SQL Server 會安靜地四捨五入
+    values = [i + 0.5 for i in range(250)] + [12.345]
+    pd.DataFrame({"MENGE": values}).to_excel(tmp_path / "EKBE.xlsx", index=False)
+    t = core.scan(tmp_path)[0]
+    assert t.dtypes["MENGE"] == "DECIMAL(18,2)"
+    core.import_table(core.connect(f"sqlite:///{tmp_path / 'out.db'}"), t)
+    assert t.dtypes["MENGE"] == "DECIMAL(18,3)"
+
+
+def test_a_pinned_numeric_type_is_reported_not_silently_changed(tmp_path):
+    root = quantity_xlsx(tmp_path, 12.5)
+    t = core.apply_overrides(core.scan(root),
+                             {"dtypes": {"EKBE": {"MENGE": "INT"}}})[0]
+    with pytest.raises(ValueError, match="MENGE 指定 INT，但實際資料需要"):
+        core.import_table(core.connect(f"sqlite:///{tmp_path / 'out.db'}"), t)
