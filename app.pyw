@@ -1,4 +1,4 @@
-"""Excel/CSV 匯入 SQL Server 的圖形介面。
+"""Excel/CSV/SAP txt 匯入 SQL Server 的圖形介面。
 
 副檔名用 .pyw，雙擊執行時不會跳出黑色命令列視窗。
 所有匯入邏輯都在 core.py，這裡只處理畫面與執行緒。
@@ -23,7 +23,7 @@ def log(text):
 class App(Tk):
     def __init__(self):
         super().__init__()
-        self.title("Excel/CSV 匯入工具")
+        self.title("Excel/txt 匯入工具")
         self.geometry("980x680")
         self.minsize(820, 560)
 
@@ -75,6 +75,7 @@ class App(Tk):
             self.tv.heading(col, text=text)
             self.tv.column(col, width=width, anchor=anchor)
         self.tv.tag_configure("err", foreground="#b00020")
+        self.tv.tag_configure("warn", foreground="#a15c00")
         self.tv.grid(row=0, column=0, sticky="nsew")
         ttk.Scrollbar(mid, orient="vertical", command=self.tv.yview).grid(row=0, column=1, sticky="ns")
         self.tv.bind("<<TreeviewSelect>>", self.on_table)
@@ -92,6 +93,7 @@ class App(Tk):
         self.cv.grid(row=0, column=0, sticky="nsew")
         ttk.Scrollbar(low, orient="vertical", command=self.cv.yview).grid(row=0, column=1, sticky="ns")
         self.cv.bind("<<TreeviewSelect>>", self.on_column)
+        self.cv.tag_configure("warn", foreground="#a15c00")
 
         edit = ttk.Frame(low)
         edit.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
@@ -143,13 +145,21 @@ class App(Tk):
         self.cv.delete(*self.cv.get_children())
         self.current = None
         for i, t in enumerate(tables):
+            # 欄名不在 SAP 代碼欄位清單、又被推斷成整數的欄位要人看一眼，
+            # 代碼被當數字是唯一會靜悄悄弄壞資料的情況。
+            warn = core.suspects(t) if t.ok else []
+            status = t.error or (f"可匯入（{len(warn)} 欄待確認）" if warn
+                                 else "可匯入")
             self.tv.insert("", "end", iid=str(i),
-                           values=(t.name, len(t.files), f"{t.rows:,}",
-                                   t.error or "可匯入"),
-                           tags=() if t.ok else ("err",))
+                           values=(t.name, len(t.files), f"{t.rows:,}", status),
+                           tags=("err",) if not t.ok else
+                                ("warn",) if warn else ())
         bad = sum(1 for t in tables if not t.ok)
+        warned = sum(1 for t in tables if t.ok and core.suspects(t))
         self.status_var.set(
-            f"找到 {len(tables)} 張表" + (f"，其中 {bad} 張有問題，將略過" if bad else ""))
+            f"找到 {len(tables)} 張表"
+            + (f"，其中 {bad} 張有問題，將略過" if bad else "")
+            + (f"，{warned} 張有待確認的欄位" if warned else ""))
 
     def on_table(self, _=None):
         sel = self.tv.selection()
@@ -160,9 +170,14 @@ class App(Tk):
         if not self.current.ok:
             self.cv.insert("", "end", values=("—", "—", self.current.error))
             return
+        warn = set(core.suspects(self.current))
         for col in self.current.columns:
+            sample = self.sample_of(col)
+            if col in warn:
+                sample = "← 整數但欄名不在 SAP 清單，是代碼的話請改 NVARCHAR｜" + sample
             self.cv.insert("", "end", iid=col,
-                           values=(col, self.current.dtypes[col], self.sample_of(col)))
+                           values=(col, self.current.dtypes[col], sample),
+                           tags=("warn",) if col in warn else ())
 
     def sample_of(self, col):
         values = self.current.sample[col].dropna().astype(str).head(3).tolist()
