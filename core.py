@@ -537,6 +537,12 @@ def infer(series):
 
     # CSV 讀進來的日期是字串，要先還原才推得出 DATE/DATETIME。
     if s.dtype.kind == "O":
+        # 整欄都是 True/False 時 pandas 給 bool；只要有一格空白就退成
+        # object，型別會因此從 BIT 變成 NVARCHAR。這裡補回來。
+        # 用 is_bool 而不是 == True/False：Python 裡 1 == True，
+        # 整數 0/1 的欄位會被誤判成布林。
+        if all(pd.api.types.is_bool(v) for v in s.unique()):
+            return "BIT"
         parsed = as_datetime(s)
         if parsed is not None:
             s = parsed
@@ -659,6 +665,32 @@ def load(files, opts=None, int_codes=True):
 
 # --- 匯入 ---------------------------------------------------------------
 
+TRUE_TOKENS = {"true", "t", "yes", "y", "x", "1", "1.0"}
+FALSE_TOKENS = {"false", "f", "no", "n", "0", "0.0"}
+
+
+def to_bool(s):
+    """把各種寫法的是/否轉成布林。
+
+    SAP 的旗標是 X 與空白，Excel 匯出可能變成 TRUE/FALSE 或 1/0，
+    pandas 讀進來又可能是 bool、字串或數字——全部收斂成同一種。
+    """
+    if s.dtype.kind == "b":
+        return s.astype("boolean")
+
+    def one(v):
+        if pd.isna(v):
+            return pd.NA
+        text = str(v).strip().lower()
+        if text in TRUE_TOKENS:
+            return True
+        if text in FALSE_TOKENS:
+            return False
+        raise ValueError(f"看不懂的布林值 {v!r}")
+
+    return s.map(one).astype("boolean")
+
+
 def coerce(df, types):
     """把資料轉成宣告的型別。
 
@@ -680,7 +712,7 @@ def coerce(df, types):
             elif name in ("DECIMAL", "NUMERIC", "FLOAT"):
                 out[col] = pd.to_numeric(out[col])
             elif name == "BIT":
-                out[col] = out[col].astype("boolean")
+                out[col] = to_bool(out[col])
             elif name == "NVARCHAR":
                 out[col] = out[col].astype("string")
         except (ValueError, TypeError) as e:

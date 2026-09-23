@@ -365,6 +365,30 @@ SQL_PASSWORD=
 | 布林 | `BIT` |
 | 文字 | `NVARCHAR(最大長度 × 2)`，介於 20 與 4000 之間 |
 
+### 布林欄位
+
+SQL Server 沒有 `BOOLEAN`，`BIT` 就是它的布林型別，存 `0` / `1` / `NULL`
+（查詢寫 `WHERE flag = 1`，不能寫 `= TRUE`）。
+
+想在資料庫裡看到 `True`/`False` 字樣而改用 `NVARCHAR` 的話要先知道：
+**存進去的東西會因為那一欄有沒有空白而不同**。pandas 讀 Excel 時，
+整欄都是布林才會保留布林，只要有一格空白就整欄變成 `1.0/0.0/nan`：
+
+| 來源欄位 | 宣告 `BIT` | 宣告 `NVARCHAR` |
+|---|---|---|
+| `TRUE FALSE TRUE` | `1 0 1` | `'True' 'False' 'True'` |
+| `TRUE FALSE （空白）` | `1 0 NULL` | `'1' '0' NULL` |
+
+所以 `NVARCHAR` 不保證拿得到 `True`/`False`。要文字就在查詢端轉，
+來源怎麼變都不影響：
+
+```sql
+SELECT IIF(HAS_TDDP = 1, 'TRUE', 'FALSE') AS HAS_TDDP FROM ZTM105;
+```
+
+宣告 `BIT` 時，`X`／空白（SAP 旗標）、`TRUE`／`FALSE`、`Y`／`N`、`1`／`0`
+都讀得懂，空白存成 `NULL`（要當成 false 就在查詢端 `ISNULL(col, 0)`）。
+
 在 UI 改過的型別會寫進 `config.json`。因為 replace 模式每次都會 drop 重建，
 直接在 SSMS 改型別會被下次匯入蓋掉 —— 要改請改這裡。
 

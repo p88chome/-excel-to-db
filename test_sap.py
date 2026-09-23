@@ -696,3 +696,47 @@ def test_suspects_still_lists_them_so_they_are_visible(tmp_path):
     assert "AIMMO" in found and "LBASW" in found
     assert "ANLN1" not in found      # 有前導零，百分之百是代碼，不用確認
     assert "URWRT" not in found and "MENGE" not in found
+
+
+# --- 布林 ---------------------------------------------------------------
+
+@pytest.mark.parametrize("raw, want", [
+    ([True, False], [True, False]),
+    (["TRUE", "False"], [True, False]),
+    (["X", "x"], [True, True]),                 # SAP 的旗標
+    ([1, 0], [True, False]),
+    (["Y", "N"], [True, False]),
+])
+def test_bit_accepts_the_usual_spellings(raw, want):
+    assert core.to_bool(pd.Series(raw)).tolist() == want
+
+
+def test_bit_keeps_blanks_as_null():
+    out = core.to_bool(pd.Series(["X", None, "X"]))
+    assert out.tolist()[0] is True and pd.isna(out.tolist()[1])
+
+
+def test_bit_rejects_values_it_cannot_read():
+    with pytest.raises(ValueError, match="看不懂的布林值"):
+        core.to_bool(pd.Series(["X", "也許"]))
+
+
+def test_choosing_bit_on_a_text_column_no_longer_crashes(tmp_path):
+    # UI 的下拉選單提供 BIT，選在文字欄位上原本會噴
+    # 「Need to pass bool-like values」
+    txt = ("Dynamic List Display\n\nMATNR\tLOEKZ\n"
+           "000000001000\tX\n000000001001\t\n")
+    t = core.scan(write(tmp_path, "ZTM105.txt", txt).parent)[0]
+    df = core.coerce(core.load(t.files), {**t.dtypes, "LOEKZ": "BIT"})
+    assert df["LOEKZ"].tolist()[0] is True
+
+
+def test_blank_does_not_downgrade_a_boolean_column_to_text():
+    # 整欄 True/False 時 pandas 給 bool；有一格空白就退成 object，
+    # 型別不該因此從 BIT 變成 NVARCHAR。
+    assert core.infer(pd.Series([True, False, None], dtype="object")) == "BIT"
+
+
+def test_zero_one_integers_are_not_mistaken_for_booleans():
+    # Python 裡 1 == True，用 set 比對會誤判
+    assert core.infer(pd.Series([1, 0, 1], dtype="object")) != "BIT"
