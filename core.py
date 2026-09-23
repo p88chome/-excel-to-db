@@ -255,6 +255,21 @@ CODE_PATTERNS = re.compile(r"""
 """, re.X)
 
 
+def is_numeric_field(name):
+    """欄名是不是已知的金額／數量／天期欄位。"""
+    return str(name).strip().upper() in SAP_NUMERIC_FIELDS
+
+
+def is_whole_number_column(s):
+    """整欄都是沒有小數的整數（有空值時 pandas 會讓它變 float）。"""
+    if s.dtype.kind in "iu":
+        return True
+    if s.dtype.kind != "f":
+        return False
+    kept = s.dropna()
+    return not kept.empty and kept.mod(1).eq(0).all()
+
+
 def is_code_field(name):
     """欄名是不是 SAP 的代碼欄位。大小寫與前後空白都不計。"""
     n = str(name).strip().upper()
@@ -378,7 +393,7 @@ def sap_dates(s):
     return pd.to_datetime(s.map(lambda x: norm_date(x, rx, layout)))
 
 
-def sap_convert(df):
+def sap_convert(df, int_codes=True):
     """把字串欄位還原成數字/日期。先試日期再試數字——YYYYMMDD 兩邊都像。"""
     out = {}
     for col in df.columns:
@@ -391,30 +406,54 @@ def sap_convert(df):
         converted = sap_dates(s)
         if converted is None:
             converted = sap_numbers(s)
+        # 沒有小數的整數、欄名又不在已知數字清單裡，多半是代碼。
+        # 標準欄位清單列不完（光 ANLA 就一百多欄），所以用這條補。
+        # 猜錯成文字還能在 SQL 端 CAST 回來；猜錯成整數，前導零就永遠沒了。
+        if (int_codes and converted is not None
+                and converted.dtype.kind in "iu"
+                and not is_numeric_field(col)):
+            converted = None
         out[col] = s if converted is None else converted
     return pd.DataFrame(out, columns=df.columns)
 
 
+INT_TEXT_RE = re.compile(r"-?\d+")
+
+
 def suspects(table):
-    """挑出最可能被判錯的欄位：欄名不在 SAP 清單，卻被推斷成整數。
+    """欄名不在 SAP 清單、內容卻全是整數的欄位。
 
-    代碼被當數字是唯一會靜悄悄弄壞資料的情況——前導零掉了、跟來源表
-    JOIN 不起來，而且要等下游出錯才發現。金額有小數、日期有格式，
-    判斷有憑有據，不在這裡報。
+    int_codes 開著時它們已經被當成文字，也就是救得回來的那一邊：
+    真的是數字就在 SQL 端 CAST，或用 dtypes 指定成 INT 重匯一次。
+    這裡列出來只是讓人知道哪幾欄是靠規則判的，不是非處理不可。
+
+    有前導零的不列——那種百分之百是代碼，沒什麼好確認的。
     """
-    return [c for c, ty in table.dtypes.items()
-            if ty in ("INT", "BIGINT") and not is_code_field(c)
-            and str(c).strip().upper() not in SAP_NUMERIC_FIELDS]
+    found = []
+    for col, spec in table.dtypes.items():
+        if is_code_field(col) or is_numeric_field(col):
+            continue
+        if spec in ("INT", "BIGINT"):
+            found.append(col)
+            continue
+        if not spec.startswith("NVARCHAR") or table.sample is None:
+            continue
+        values = table.sample[col].dropna().astype(str)
+        if (not values.empty
+                and values.str.fullmatch(INT_TEXT_RE).all()
+                and not values.str.fullmatch(CODE_RE).any()):
+            found.append(col)
+    return found
 
 
-def read_txt(path, encoding=None, sep=None, skiprows=0):
+def read_txt(path, encoding=None, sep=None, skiprows=0, int_codes=True):
     text = decode(Path(path).read_bytes(), encoding)
-    return sap_convert(parse(text, sep=sep, skiprows=skiprows))
+    return sap_convert(parse(text, sep=sep, skiprows=skiprows), int_codes)
 
 
 # --- 讀檔 ---------------------------------------------------------------
 
-def code_columns_to_text(df):
+def code_columns_to_text(df, int_codes=True):
     """代碼欄位一律轉回文字。
 
     Excel 與 CSV 走 pandas 自己的型別推斷，憑證號碼會被讀成 int64，
@@ -426,9 +465,11 @@ def code_columns_to_text(df):
     """
     out = df.copy()
     for col in out.columns:
-        if not is_code_field(col):
-            continue
         s = out[col]
+        forced = is_code_field(col) or (
+            int_codes and not is_numeric_field(col) and is_whole_number_column(s))
+        if not forced:
+            continue
         if s.dtype.kind in "iu":
             out[col] = s.astype("string")
         elif s.dtype.kind == "f":
@@ -441,17 +482,17 @@ def code_columns_to_text(df):
     return out
 
 
-def read(path, nrows=None, opts=None):
+def read(path, nrows=None, opts=None, int_codes=True):
     """讀一個檔案。nrows 只讀前幾列，給預覽用。opts 是 txt 的解析覆寫。"""
     ext = Path(path).suffix.lower()
     if ext == ".txt":
-        df = read_txt(path, **(opts or {}))
+        df = read_txt(path, int_codes=int_codes, **(opts or {}))
         df = df.head(nrows) if nrows else df
     elif ext == ".csv":
         df = pd.read_csv(path, nrows=nrows)
     else:
         df = pd.read_excel(path, nrows=nrows)
-    return code_columns_to_text(df)
+    return code_columns_to_text(df, int_codes)
 
 
 def count_rows(path, opts=None):
@@ -553,6 +594,7 @@ class Table:
     sample: object = None       # 預覽用的 DataFrame
     error: str = ""             # 非空代表這張表不能匯入
     opts: dict = field(default_factory=dict)    # txt 解析覆寫
+    int_codes: bool = True      # 沒小數的整數欄位當文字
 
     @property
     def ok(self):
@@ -573,11 +615,14 @@ def groups(root):
 def scan(root, cfg=None):
     """掃描資料夾，每個檔只讀前 PREVIEW_ROWS 列，回傳每張表的預覽資訊。"""
     txt_opts = (cfg or {}).get("txt", {})
+    int_codes = (cfg or {}).get("int_codes", True)
     tables = []
     for name, files in groups(root):
-        t = Table(name=name, files=files, opts=dict(txt_opts.get(name, {})))
+        t = Table(name=name, files=files, opts=dict(txt_opts.get(name, {})),
+                  int_codes=int_codes)
         try:
-            samples = [read(f, nrows=PREVIEW_ROWS, opts=t.opts) for f in files]
+            samples = [read(f, nrows=PREVIEW_ROWS, opts=t.opts,
+                            int_codes=int_codes) for f in files]
             cols = list(samples[0].columns)
             for f, df in zip(files[1:], samples[1:]):
                 if set(df.columns) != set(cols):
@@ -598,9 +643,9 @@ def scan(root, cfg=None):
     return tables
 
 
-def load(files, opts=None):
+def load(files, opts=None, int_codes=True):
     """讀完整資料。欄位不一致就丟例外 —— 猜錯比不做更糟。"""
-    frames = [read(f, opts=opts) for f in files]
+    frames = [read(f, opts=opts, int_codes=int_codes) for f in files]
     cols = list(frames[0].columns)
     for f, df in zip(files[1:], frames[1:]):
         if set(df.columns) != set(cols):
@@ -654,7 +699,7 @@ def import_table(engine, table, mode="replace", overrides=None):
     if not table.ok:
         raise ValueError(table.error)
     types = {**table.dtypes, **(overrides or {})}
-    df = coerce(load(table.files, table.opts), types)
+    df = coerce(load(table.files, table.opts, table.int_codes), types)
     dtype = {c: to_sa(t) for c, t in types.items() if c in df.columns}
     with engine.begin() as conn:
         df.to_sql(table.name, conn, if_exists=mode, index=False,
@@ -745,7 +790,16 @@ DEFAULTS = {
     "write_mode": "replace",
     "dtypes": {},
     "txt": {},
+    # 沒有小數的整數欄位一律當文字。SAP 的標準欄位清單列不完，
+    # 而猜錯成文字可以在 SQL 端 CAST 救回來，猜錯成整數前導零就沒了。
+    # 要讓某一欄當數字，用 dtypes 指定 INT/DECIMAL。
+    "int_codes": True,
 }
+
+
+# 連線相關的環境變數，診斷時要逐一印出來對照。
+CONN_KEYS = ("SQL_CONN", "SQL_SERVER", "SQL_DATABASE", "SQL_USER",
+             "SQL_PASSWORD", "SQL_DRIVER", "SQL_TRUST_CERT")
 
 
 def load_env(path=".env"):
@@ -813,3 +867,41 @@ def load_config(path=CONFIG):
 def save_config(cfg, path=CONFIG):
     Path(path).write_text(
         json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+
+def mask(conn):
+    """把連線字串裡的密碼遮掉，方便貼給別人看。"""
+    return re.sub(r"://([^:/@]+):([^@]*)@", r"://\1:***@", conn)
+
+
+def conn_report(path=CONFIG):
+    """印出實際會用的連線設定，給連不上的時候對照用。
+
+    「我明明改了 .env」最常見的原因是那份 .env 根本沒被讀到，
+    或是程式還是舊版、根本不認得新的設定。直接把讀到什麼印出來。
+    """
+    env = Path(path).parent / ".env"
+    out = [f"程式版本　：{'認得 SQL_TRUST_CERT' if 'SQL_TRUST_CERT' in CONN_KEYS else '舊版，不認得 SQL_TRUST_CERT'}",
+           f".env 路徑 ：{env.resolve()}",
+           f".env 存在 ：{'是' if env.exists() else '否 —— 沒讀到任何設定'}"]
+
+    load_env(env)
+    out.append("")
+    out.append("讀到的環境變數：")
+    for key in CONN_KEYS:
+        value = os.environ.get(key)
+        if key == "SQL_PASSWORD" and value:
+            value = "***"
+        out.append(f"  {key:<16} {value if value else '（未設定）'}")
+
+    out.append("")
+    out.append(f"裝的 ODBC 驅動：{', '.join(installed_drivers()) or '（一個都沒有）'}")
+    out.append(f"實際使用驅動　：{os.environ.get('SQL_DRIVER') or best_driver()}")
+
+    cfg = load_config(path)
+    out.append("")
+    out.append(f"最終連線字串　：{mask(cfg['conn'])}")
+    if "TrustServerCertificate" not in cfg["conn"]:
+        out.append("  （沒有 TrustServerCertificate —— Driver 18 會驗證憑證）")
+    return "\n".join(out)

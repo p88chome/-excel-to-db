@@ -629,3 +629,70 @@ def test_certificate_error_explains_driver_18_encryption():
     out = core.explain_conn_error(err)
     assert "SQL_TRUST_CERT" in out
     assert "中間人" in out            # 有把代價說清楚
+
+
+# --- 整數一律當文字 -----------------------------------------------------
+
+ANLA_TXT = (
+    "Dynamic List Display\n"
+    "\n"
+    "ANLN1\tAIMMO\tLBASW\tURWRT\tMENGE\tAKTIV\n"
+    "000000001000\t1\t2\t1.234,56\t12\t31.12.2026\n"
+    "000000001001\t2\t1\t99,00\t34\t01.01.2026\n"
+)
+
+
+def test_unknown_integer_columns_become_text(tmp_path):
+    # ANLA 有一百多欄，清單不可能列完。AIMMO/LBASW 這種沒列到的整數欄位
+    # 當成文字比當成整數安全——文字可以 CAST 回來，前導零回不來。
+    df = core.read(write(tmp_path, "ANLA.txt", ANLA_TXT))
+    assert df["AIMMO"].tolist() == ["1", "2"]
+    assert df["LBASW"].tolist() == ["2", "1"]
+
+
+def test_amounts_dates_and_known_quantities_are_untouched(tmp_path):
+    df = core.read(write(tmp_path, "ANLA.txt", ANLA_TXT))
+    assert df["URWRT"].tolist() == [1234.56, 99.0]      # 有小數 = 金額
+    assert df["MENGE"].tolist() == [12, 34]             # 已知數量欄位
+    assert df["AKTIV"].iloc[0] == pd.Timestamp("2026-12-31")
+
+
+def test_int_codes_can_be_turned_off(tmp_path):
+    p = write(tmp_path, "ANLA.txt", ANLA_TXT)
+    df = core.read(p, int_codes=False)
+    assert df["AIMMO"].tolist() == [1, 2]
+
+
+def test_dtypes_override_turns_it_back_into_a_number(tmp_path):
+    t = core.scan(write(tmp_path, "ANLA.txt", ANLA_TXT).parent)[0]
+    assert t.dtypes["AIMMO"].startswith("NVARCHAR")
+    df = core.coerce(core.load(t.files), {**t.dtypes, "AIMMO": "INT"})
+    assert df["AIMMO"].tolist() == [1, 2]
+
+
+def test_excel_unknown_integer_columns_become_text(tmp_path):
+    pd.DataFrame({"AIMMO": [1, 2], "NETWR": [1234.56, 99.0],
+                  "MENGE": [12, 34]}).to_excel(tmp_path / "ZTM80.xlsx",
+                                               index=False)
+    df = core.read(tmp_path / "ZTM80.xlsx")
+    assert df["AIMMO"].tolist() == ["1", "2"]
+    assert df["NETWR"].tolist() == [1234.56, 99.0]
+    assert df["MENGE"].tolist() == [12, 34]
+
+
+def test_config_flag_reaches_scan_and_import(tmp_path):
+    write(tmp_path / "data" if (tmp_path / "data").mkdir() or True else tmp_path,
+          "ANLA.txt", ANLA_TXT)
+    on = core.scan(tmp_path / "data", {"int_codes": True})[0]
+    off = core.scan(tmp_path / "data", {"int_codes": False})[0]
+    assert on.dtypes["AIMMO"].startswith("NVARCHAR")
+    assert off.dtypes["AIMMO"] == "INT"
+    assert core.load(off.files, off.opts, off.int_codes)["AIMMO"].tolist() == [1, 2]
+
+
+def test_suspects_still_lists_them_so_they_are_visible(tmp_path):
+    t = core.scan(write(tmp_path, "ANLA.txt", ANLA_TXT).parent)[0]
+    found = core.suspects(t)
+    assert "AIMMO" in found and "LBASW" in found
+    assert "ANLN1" not in found      # 有前導零，百分之百是代碼，不用確認
+    assert "URWRT" not in found and "MENGE" not in found

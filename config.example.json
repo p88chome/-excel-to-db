@@ -16,5 +16,6 @@
       "sep": "\t",
       "skiprows": 0
     }
-  }
+  },
+  "int_codes": true
 }

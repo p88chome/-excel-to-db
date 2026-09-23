@@ -7,6 +7,7 @@
     python import_data.py data            # 指定資料夾
     python import_data.py data append     # 指定資料夾與寫入模式
     python import_data.py data --check    # 只檢查不寫入，也不連資料庫
+    python import_data.py --conn          # 印出實際用的連線設定（密碼遮蔽）
 
 --check 是給 Excel 用的：sniff.py 只看得懂 txt，Excel 要先跑這個
 才知道欄位被判成什麼型別、有沒有代碼欄位被當成數字。
@@ -32,10 +33,10 @@ def check(root, cfg):
             print(f"  {col:<20} {ty}")
         bad = core.suspects(t)
         if bad:
-            print(f"  注意：{' '.join(bad)} 被推斷成整數，"
-                  f"但欄名不在 SAP 代碼欄位清單。")
-            print(f"  如果是代碼欄位，請在 config.json 的 dtypes 改成 "
-                  f"NVARCHAR，否則前導零會掉、JOIN 不到來源表。")
+            print(f"  參考：{' '.join(bad)} 是整數、欄名不在 SAP 清單，"
+                  f"已當成文字。")
+            print(f"  真的要拿來計算，就在 config.json 的 dtypes 指定 "
+                  f"INT/DECIMAL，或在 SQL 端 CAST。")
     return 0
 
 
@@ -44,6 +45,10 @@ def main(*argv):
     cfg = core.load_config()
     root = (args[0] if args else None) or cfg["root"]
     mode = (args[1] if len(args) > 1 else None) or cfg["write_mode"]
+
+    if "--conn" in argv:
+        print(core.conn_report())
+        return 0
 
     if "--check" in argv or "-c" in argv:
         return check(root, cfg)
@@ -74,10 +79,10 @@ def main(*argv):
             print(f"{t.name}：{rows:,} 列 <- {len(t.files)} 個檔案")
             bad = core.suspects(t)
             if bad:
-                print(f"  注意：{' '.join(bad)} 被推斷成整數，"
-                      f"但欄名不在 SAP 代碼欄位清單。")
-                print(f"  如果是代碼欄位，請在 config.json 的 dtypes 改成 "
-                      f"NVARCHAR，否則前導零會掉、JOIN 不到來源表。")
+                print(f"  參考：{' '.join(bad)} 是整數、欄名不在 SAP 清單，"
+                      f"已當成文字。")
+                print(f"  真的要拿來計算，就在 config.json 的 dtypes 指定 "
+                      f"INT/DECIMAL，或在 SQL 端 CAST。")
         except Exception as e:
             print(f"失敗 {t.name}：{str(e).splitlines()[0]}")
             failed += 1
