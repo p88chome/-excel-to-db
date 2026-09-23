@@ -78,7 +78,13 @@ def split_pipe(lines):
 
 
 def split_char(lines, sep):
-    """單一分隔符格式。出現次數最多的欄數才算資料，其餘是標題與頁尾。"""
+    """單一分隔符格式。出現次數最多的欄數當資料列的基準。
+
+    用「大於等於」而不是「等於」：SAP 會把每一列結尾的空欄砍掉，
+    所以最後一欄沒值的資料列會比標題列少一個分隔符。只收剛好相等的
+    話，標題列會被排除，第一列資料就被當成欄名。
+    比基準少的（報表標題、「* n 筆記錄」）分隔符不夠，照樣排除。
+    """
     counts = Counter(ln.count(sep) for ln in lines if ln.strip())
     if not counts:
         return []
@@ -86,15 +92,23 @@ def split_char(lines, sep):
     if n < 1 or hits < 2:           # 至少要有標題列加一筆資料
         return []
     return [[c.strip() for c in ln.split(sep)]
-            for ln in lines if ln.strip() and ln.count(sep) == n]
+            for ln in lines if ln.strip() and ln.count(sep) >= n]
 
 
 def widest(rows):
-    """只留下欄數最常見的列，順手丟掉 SAP 檔尾的「* n 筆記錄」。"""
+    """只留下欄數最常見的列。給管線格式用，那種每列寬度一致。"""
     if not rows:
         return []
     n = Counter(len(r) for r in rows).most_common(1)[0][0]
     return [r for r in rows if len(r) == n]
+
+
+def squared(rows):
+    """把各列補到一樣寬。SAP 砍掉列尾空欄之後，各列長度會不一致。"""
+    if not rows:
+        return []
+    width = max(len(r) for r in rows)
+    return [r + [""] * (width - len(r)) for r in rows]
 
 
 def headers(names):
@@ -110,18 +124,20 @@ def headers(names):
 def parse(text, sep=None, skiprows=0):
     """把 SAP txt 的文字切成 DataFrame（全部先當字串）。"""
     lines = text.splitlines()[skiprows:]
-    if sep == "|":
+    piped = sep == "|"
+    if piped:
         rows = split_pipe(lines)
     elif sep:
         rows = split_char(lines, sep)
     else:
         rows = split_pipe(lines)
+        piped = len(rows) >= 2
         for cand in AUTO_SEPS:
             if len(rows) >= 2:
                 break
             rows = split_char(lines, cand)
 
-    rows = widest(rows)
+    rows = widest(rows) if piped else squared(rows)
     if len(rows) < 2:
         raise ValueError(
             "看不出欄位分隔方式。可能是固定寬度格式，或標題列之前的雜訊太多"

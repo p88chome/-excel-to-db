@@ -964,3 +964,50 @@ def test_a_pinned_numeric_type_is_reported_not_silently_changed(tmp_path):
                              {"dtypes": {"EKBE": {"MENGE": "INT"}}})[0]
     with pytest.raises(ValueError, match="MENGE 指定 INT，但實際資料需要"):
         core.import_table(core.connect(f"sqlite:///{tmp_path / 'out.db'}"), t)
+
+
+# --- 資料列結尾的空欄被砍掉 --------------------------------------------
+
+# T001W（Plant list）的真實長相：標題列 8 個 Tab（9 欄），資料列最後
+# 一欄 Version 沒值被 SAP 砍掉，只剩 7 個 Tab（8 欄）。
+PLANT_TXT = (
+    "Plant list\n"
+    "\tplnt\tsearch term2\tsearch term1\tpost1 code\tcity\tName2\tName\tVersion\n"
+    "\n"
+    "\tVDR6\t\t\t\t\tDC 1/4t\tPlant VDR6\n"
+    "\t1000\t\t\t30078\t新竹\t\t晶圓一廠\n"
+)
+
+
+def test_header_wider_than_data_is_not_mistaken_for_data(tmp_path):
+    df = core.read(write(tmp_path, "T001W.txt", PLANT_TXT))
+    # 第一欄沒有欄名而且整欄空白，會被丟掉
+    assert list(df.columns) == ["plnt", "search term2", "search term1",
+                                "post1 code", "city", "Name2", "Name",
+                                "Version"]
+    assert len(df) == 2
+    assert df["plnt"].tolist() == ["VDR6", "1000"]
+    assert df["Name"].tolist() == ["Plant VDR6", "晶圓一廠"]
+
+
+def test_the_trimmed_column_is_kept_as_null(tmp_path):
+    # Version 有欄名但整欄沒值，仍然要建出來
+    df = core.read(write(tmp_path, "T001W.txt", PLANT_TXT))
+    assert df["Version"].isna().all()
+
+
+def test_count_rows_agrees_when_rows_are_ragged(tmp_path):
+    p = write(tmp_path, "T001W.txt", PLANT_TXT)
+    assert core.count_rows(p) == len(core.read(p)) == 2
+
+
+def test_sniff_agrees_with_core_on_ragged_rows(tmp_path):
+    import sniff
+    p = write(tmp_path, "T001W.txt", PLANT_TXT)
+    _, _, _, sep, header, data, skip = sniff.layout_of(p)
+    assert sep == "\t"
+    assert skip == 1                      # 標題列在第 2 行
+    assert header[1:] == ["plnt", "search term2", "search term1",
+                          "post1 code", "city", "Name2", "Name", "Version"]
+    assert len(data) == 2
+    assert [r[1] for r in data] == ["VDR6", "1000"]

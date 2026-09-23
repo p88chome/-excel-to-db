@@ -88,6 +88,8 @@ def rows_by_pipe(lines):
 
 
 def rows_by_char(lines, sep):
+    # 「大於等於」而不是「等於」：SAP 會砍掉每列結尾的空欄，
+    # 最後一欄沒值的資料列會比標題列少一個分隔符。跟 core.py 同一條規則。
     counts = Counter(ln.count(sep) for ln in lines if ln.strip())
     if not counts:
         return []
@@ -95,19 +97,25 @@ def rows_by_char(lines, sep):
     if n < 1 or hits < 2:
         return []
     return [[c.strip() for c in ln.split(sep)]
-            for ln in lines if ln.strip() and ln.count(sep) == n]
+            for ln in lines if ln.strip() and ln.count(sep) >= n]
+
+
+def squared(rows):
+    """把各列補到一樣寬。"""
+    width = max(len(r) for r in rows)
+    return [r + [""] * (width - len(r)) for r in rows]
 
 
 def find_layout(lines):
-    """回傳 (分隔符, 資料列)。認不出來分隔符回 None。"""
+    """回傳 (分隔符, 資料列, 是不是管線格式)。認不出來分隔符回 None。"""
     rows = rows_by_pipe(lines)
     if len(rows) >= 2:
-        return "|", rows
+        return "|", rows, True
     for sep in AUTO_SEPS:
         rows = rows_by_char(lines, sep)
         if len(rows) >= 2:
-            return sep, rows
-    return None, []
+            return sep, squared(rows), False
+    return None, [], False
 
 
 def header_line_no(lines, sep, header):
@@ -115,7 +123,7 @@ def header_line_no(lines, sep, header):
     for i, ln in enumerate(lines, 1):
         cells = ([c.strip() for c in ln.strip().strip("|").split("|")]
                  if sep == "|" else [c.strip() for c in ln.split(sep)])
-        if cells == header:
+        if cells == header[:len(cells)]:    # header 可能被補過寬
             return i
     return 1
 
@@ -159,11 +167,12 @@ def layout_of(path):
     raw = path.read_bytes()
     enc, why = sniff_encoding(raw)
     lines = raw.decode(enc, errors="replace").splitlines()
-    sep, rows = find_layout(lines)
+    sep, rows, piped = find_layout(lines)
     if not sep:
         return enc, why, lines, None, [], [], 0
-    n = Counter(len(r) for r in rows).most_common(1)[0][0]
-    rows = [r for r in rows if len(r) == n]
+    if piped:                       # 管線格式每列寬度一致，異常列丟掉
+        n = Counter(len(r) for r in rows).most_common(1)[0][0]
+        rows = [r for r in rows if len(r) == n]
     header = rows[0]
     data = [r for r in rows[1:] if r != header]     # ALV 分頁會重印標題
     skip = header_line_no(lines, sep, header) - 1
