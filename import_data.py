@@ -77,6 +77,9 @@ def main(*argv):
         try:
             rows = core.import_table(engine, t, mode)
             print(f"{t.name}：{rows:,} 列 <- {len(t.files)} 個檔案")
+            if t.widened:
+                grown = " ".join(f"{c}->{ty}" for c, ty in t.widened.items())
+                print(f"  長度放寬：{grown}（掃描只看前 200 列，量不到後面的長字串）")
             bad = core.suspects(t)
             if bad:
                 print(f"  參考：{' '.join(bad)} 是整數、欄名不在 SAP 清單，"

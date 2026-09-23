@@ -514,6 +514,21 @@ def count_rows(path, opts=None):
 
 # --- 型別推斷 -----------------------------------------------------------
 
+# 文字欄位最短給 255。量到 40 就宣告 40 的話，append 模式下個月來個
+# 50 就爆了，而 NVARCHAR 是變動長度，宣告寬一點不佔空間。
+# SAP 的標準文字欄位都不長（SGTXT 50、TXZ01 40、MAKTX 40），255 蓋得住；
+# 真正的自由輸入欄位會超過 4000，那時才給 MAX。
+TEXT_FLOOR = 255
+TEXT_LIMIT = 4000
+
+
+def text_spec(longest):
+    """依實際最長長度決定文字型別。留一倍成長空間。"""
+    if longest > TEXT_LIMIT:
+        return "NVARCHAR(MAX)"      # MAX 不能進索引鍵，所以不隨便用
+    return f"NVARCHAR({min(max(longest * 2, TEXT_FLOOR), TEXT_LIMIT)})"
+
+
 # 只有長得像日期的字串才嘗試轉換，免得 "1"、"2" 這種被 pandas 當成日期。
 DATE_RE = re.compile(r"\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?)?\s*")
 
@@ -533,7 +548,7 @@ def infer(series):
     """從一個欄位的資料推斷 SQL Server 型別字串。"""
     s = series.dropna()
     if s.empty:
-        return "NVARCHAR(255)"
+        return f"NVARCHAR({TEXT_FLOOR})"
 
     # CSV 讀進來的日期是字串，要先還原才推得出 DATE/DATETIME。
     if s.dtype.kind == "O":
@@ -564,8 +579,7 @@ def infer(series):
         return "DATE" if (s.dt.normalize() == s).all() else "DATETIME"
 
     # 文字：量最大長度再留一倍成長空間，比預設的 NVARCHAR(MAX) 好用得多。
-    longest = int(s.astype(str).str.len().max())
-    return f"NVARCHAR({min(max(longest * 2, 20), 4000)})"
+    return text_spec(int(s.astype(str).str.len().max()))
 
 
 def to_sa(spec):
@@ -601,6 +615,8 @@ class Table:
     error: str = ""             # 非空代表這張表不能匯入
     opts: dict = field(default_factory=dict)    # txt 解析覆寫
     int_codes: bool = True      # 沒小數的整數欄位當文字
+    pinned: set = field(default_factory=set)    # 使用者指定死的型別
+    widened: dict = field(default_factory=dict)  # 建表前放寬過的長度
 
     @property
     def ok(self):
@@ -726,12 +742,59 @@ def connect(conn_str):
         else create_engine(conn_str)
 
 
+NVARCHAR_RE = re.compile(r"NVARCHAR\((\d+)\)")
+
+
+def fit_text_lengths(df, types, pinned=()):
+    """用完整資料重新量文字欄位的長度，回 (型別, 放寬的, 不夠long的)。
+
+    掃描為了快只看前 PREVIEW_ROWS 列，第 201 列之後才出現的長字串會在
+    INSERT 時被擋下來，而且錯誤訊息只說
+    「String data, right truncation: length 48 buffer 40」，
+    不會告訴你是哪一欄。這裡在建表前先補齊。
+
+    自己推斷出來的長度放寬就好；使用者在 config.json 指定死的不動它，
+    改成報錯並指名欄位——那是他明確的選擇，不該被偷偷改掉。
+    """
+    fitted, widened, too_small = dict(types), {}, {}
+    for col, spec in types.items():
+        if col not in df.columns:
+            continue
+        m = NVARCHAR_RE.fullmatch(spec.strip().upper())
+        if not m:
+            continue
+        declared = int(m.group(1))
+        values = df[col].dropna()
+        if values.empty:
+            continue
+        longest = int(values.astype(str).str.len().max())
+        if longest <= declared:
+            continue
+        if col in pinned:
+            too_small[col] = (declared, longest)
+            continue
+        fitted[col] = text_spec(longest)
+        widened[col] = fitted[col]
+    return fitted, widened, too_small
+
+
 def import_table(engine, table, mode="replace", overrides=None):
     """匯入一張表。整個動作包在交易裡，失敗會回滾，不影響其他表。"""
     if not table.ok:
         raise ValueError(table.error)
     types = {**table.dtypes, **(overrides or {})}
+    pinned = set(table.pinned) | set(overrides or {})
     df = coerce(load(table.files, table.opts, table.int_codes), types)
+
+    types, table.widened, too_small = fit_text_lengths(df, types, pinned)
+    if too_small:
+        detail = "、".join(f"{c} 宣告 {d} 但實際最長 {n}"
+                           for c, (d, n) in too_small.items())
+        raise ValueError(
+            f"指定的長度放不下：{detail}。"
+            "請在 config.json 的 dtypes 調大，或把該欄的指定拿掉讓程式自己量。")
+    table.dtypes.update(table.widened)
+
     dtype = {c: to_sa(t) for c, t in types.items() if c in df.columns}
     with engine.begin() as conn:
         df.to_sql(table.name, conn, if_exists=mode, index=False,
@@ -879,8 +942,10 @@ def apply_overrides(tables, cfg):
     txt = cfg.get("txt", {})
     for t in tables:
         t.opts = {**txt.get(t.name, {}), **t.opts}
-        t.dtypes.update({c: ty for c, ty in saved.get(t.name, {}).items()
-                         if c in t.dtypes})
+        mine = {c: ty for c, ty in saved.get(t.name, {}).items()
+                if c in t.dtypes}
+        t.dtypes.update(mine)
+        t.pinned |= set(mine)       # 指定死的不讓程式自己放寬
     return tables
 
 

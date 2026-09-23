@@ -740,3 +740,57 @@ def test_blank_does_not_downgrade_a_boolean_column_to_text():
 def test_zero_one_integers_are_not_mistaken_for_booleans():
     # Python 裡 1 == True，用 set 比對會誤判
     assert core.infer(pd.Series([1, 0, 1], dtype="object")) != "BIT"
+
+
+# --- 文字長度 -----------------------------------------------------------
+
+def long_text_table(tmp_path, tail):
+    """前 200 列都是短字串，之後才出現長的——掃描抽樣看不到。"""
+    rows = "".join(f"A{i}\t短\n" for i in range(250))
+    txt = "Dynamic List Display\n\nMATNR\tSGTXT\n" + rows + f"A999\t{tail}\n"
+    return write(tmp_path, "ZTM105.txt", txt).parent
+
+
+def test_the_255_floor_absorbs_moderate_growth(tmp_path):
+    # 量到 20 字就宣告 40 的話，下個月來個 30 字就爆了
+    root = long_text_table(tmp_path, "很" * 60)
+    t = core.scan(root)[0]
+    assert t.dtypes["SGTXT"] == "NVARCHAR(255)"
+    core.import_table(core.connect(f"sqlite:///{tmp_path / 'out.db'}"), t)
+    assert t.widened == {}                          # 不必放寬
+
+
+def test_column_is_widened_from_the_full_data(tmp_path):
+    root = long_text_table(tmp_path, "很" * 400)
+    t = core.scan(root)[0]
+    assert t.dtypes["SGTXT"] == "NVARCHAR(255)"     # 只看前 200 列的結果
+
+    core.import_table(core.connect(f"sqlite:///{tmp_path / 'out.db'}"), t)
+    assert "SGTXT" in t.widened
+    assert t.dtypes["SGTXT"] == "NVARCHAR(800)"     # 400 字 x 2
+
+
+def test_very_long_text_becomes_max(tmp_path):
+    root = long_text_table(tmp_path, "很" * 4100)
+    t = core.scan(root)[0]
+    core.import_table(core.connect(f"sqlite:///{tmp_path / 'out.db'}"), t)
+    assert t.dtypes["SGTXT"] == "NVARCHAR(MAX)"
+
+
+def test_import_no_longer_fails_with_right_truncation(tmp_path):
+    root = long_text_table(tmp_path, "很" * 60)
+    t = core.scan(root)[0]
+    db = tmp_path / "out.db"
+    assert core.import_table(core.connect(f"sqlite:///{db}"), t) == 251
+    import sqlite3
+    with sqlite3.connect(db) as c:
+        longest = c.execute("SELECT MAX(LENGTH(SGTXT)) FROM ZTM105").fetchone()
+    assert longest[0] == 60
+
+
+def test_a_pinned_length_is_reported_not_silently_widened(tmp_path):
+    root = long_text_table(tmp_path, "很" * 60)
+    t = core.apply_overrides(core.scan(root),
+                             {"dtypes": {"ZTM105": {"SGTXT": "NVARCHAR(10)"}}})[0]
+    with pytest.raises(ValueError, match="SGTXT 宣告 10 但實際最長 60"):
+        core.import_table(core.connect(f"sqlite:///{tmp_path / 'out.db'}"), t)
