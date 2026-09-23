@@ -98,8 +98,24 @@ python -c "import pyodbc; print('
 '.join(pyodbc.drivers()))"
 ```
 
-Driver 18 預設強制加密。憑證不受信任時連線會被擋，要改用 `SQL_CONN`
-自己寫字串並補上 `&TrustServerCertificate=yes`。
+### Driver 18 的強制加密
+
+Driver 18 起預設強制加密**並且驗證伺服器憑證**。內部的 SQL Server 多半是
+自簽憑證，會被擋下來：
+
+```
+('08001', '[ODBC Driver 18 for SQL Server]SSL Provider: 憑證鏈結是由不受信任的授權單位發出')
+```
+
+兩條路：
+
+1. **請 DBA 換上受信任的憑證** —— 正解，加密與身分驗證都成立
+2. **`.env` 設 `SQL_TRUST_CERT=yes`** —— 跳過憑證驗證
+
+選 2 的話連線**仍然是加密的**，但不再驗證對方是不是真的那台伺服器，
+也就是擋不住中間人。內網通常可以接受，對外連線不要這樣設。
+
+預設是關的 —— 跳過憑證驗證要是明確的決定，不該由程式偷偷幫你開。
 
 ## 使用
 
@@ -282,6 +298,7 @@ COL1:_ BUZEI:T! LIFNR:T! ZUONR:T! SGTXT:T HKONT:T! WRBTR:N- ZFBDT:D:slash?
 擇一即可，`.env` 最適合遠端機器：
 
 - **`.env`**：複製 `.env.example` 成 `.env`，填 `SQL_SERVER` 與 `SQL_DATABASE`
+  （Driver 18 且憑證自簽時再加 `SQL_TRUST_CERT=yes`）
 - **UI**：「連線設定…」按鈕，存好後寫進 `config.json`
 - **手動**：複製 `config.example.json` 成 `config.json`，改 `conn` 那行
 

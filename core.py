@@ -707,16 +707,34 @@ def driver_hint():
             " TrustServerCertificate=yes。")
 
 
+CERT_KEYWORDS = ("SSL Provider", "certificate", "憑證", "SSL 提供者")
+
+
 def explain_conn_error(err):
     """把連線例外變成人看得懂的訊息。
 
-    IM002「找不到資料來源名稱且未指定預設的驅動程式」是最常見的一種，
-    原始訊息完全看不出問題出在驅動名稱，所以把實際裝了哪些一起附上。
+    兩種錯誤的原始訊息都看不出真正的原因：
+    IM002 其實是驅動名稱對不上，憑證錯誤其實是 Driver 18 的強制加密。
     """
     msg = str(err)
     if any(k in msg for k in ("IM002", "資料來源名稱", "Data source name")):
         return msg + "\n\n" + driver_hint()
+    if any(k in msg for k in CERT_KEYWORDS):
+        return msg + "\n\n" + cert_hint()
     return msg
+
+
+def cert_hint():
+    """Driver 18 強制加密、憑證不受信任時的提示。"""
+    return ("ODBC Driver 18 起預設強制加密，且會驗證伺服器憑證。"
+            "內部的 SQL Server 多半用自簽憑證，就會被擋在這裡。\n"
+            "\n"
+            "兩條路：\n"
+            "  1. 請 DBA 裝上受信任的憑證（正解，連線與身分驗證都成立）\n"
+            "  2. 在 .env 加 SQL_TRUST_CERT=yes 跳過憑證驗證\n"
+            "\n"
+            "選 2 的話，連線仍然是加密的，但不再驗證對方是不是真的那台"
+            "伺服器——也就是擋不住中間人。內網用通常可接受，對外連線不要這樣設。")
 
 
 # --- 設定 ---------------------------------------------------------------
@@ -762,6 +780,10 @@ def conn_from_env():
     else:
         auth = "@"
         query += "&trusted_connection=yes"
+    # Driver 18 起預設強制加密並驗證憑證，內部的自簽憑證會被擋。
+    # 跳過驗證是明確的選擇，不自動開。
+    if os.environ.get("SQL_TRUST_CERT", "").strip().lower() in ("1", "y", "yes", "true"):
+        query += "&TrustServerCertificate=yes"
     return f"mssql+pyodbc://{auth}{server}/{database}?{query}"
 
 

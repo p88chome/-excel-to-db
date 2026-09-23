@@ -594,3 +594,38 @@ def test_other_errors_are_left_alone(monkeypatch):
     fake_drivers(monkeypatch, ["ODBC Driver 17 for SQL Server"])
     out = core.explain_conn_error(Exception("('08001', '登入逾時終止')"))
     assert out == "('08001', '登入逾時終止')"
+
+
+@pytest.mark.parametrize("value", ["yes", "YES", "1", "true", " y "])
+def test_trust_cert_switch_adds_the_flag(monkeypatch, value):
+    fake_drivers(monkeypatch, ["ODBC Driver 18 for SQL Server"])
+    monkeypatch.setenv("SQL_SERVER", "SRV01")
+    monkeypatch.setenv("SQL_DATABASE", "UMC")
+    monkeypatch.setenv("SQL_TRUST_CERT", value)
+    assert "TrustServerCertificate=yes" in core.conn_from_env()
+
+
+@pytest.mark.parametrize("value", ["", "no", "false", "0"])
+def test_trust_cert_is_off_unless_asked(monkeypatch, value):
+    fake_drivers(monkeypatch, ["ODBC Driver 18 for SQL Server"])
+    monkeypatch.setenv("SQL_SERVER", "SRV01")
+    monkeypatch.setenv("SQL_DATABASE", "UMC")
+    monkeypatch.setenv("SQL_TRUST_CERT", value)
+    assert "TrustServerCertificate" not in core.conn_from_env()
+
+
+def test_empty_sql_driver_falls_back_to_autodetect(monkeypatch):
+    # .env 裡 SQL_DRIVER= 留空時不能當成驅動名稱
+    fake_drivers(monkeypatch, ["ODBC Driver 18 for SQL Server"])
+    monkeypatch.setenv("SQL_SERVER", "SRV01")
+    monkeypatch.setenv("SQL_DATABASE", "UMC")
+    monkeypatch.setenv("SQL_DRIVER", "")
+    assert "ODBC+Driver+18+for+SQL+Server" in core.conn_from_env()
+
+
+def test_certificate_error_explains_driver_18_encryption():
+    err = Exception("('08001', '[ODBC Driver 18 for SQL Server]"
+                    "SSL Provider: 憑證鏈結是由不受信任的授權單位發出')")
+    out = core.explain_conn_error(err)
+    assert "SQL_TRUST_CERT" in out
+    assert "中間人" in out            # 有把代價說清楚
