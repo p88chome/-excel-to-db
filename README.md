@@ -1,6 +1,6 @@
 # excel-to-db
 
-把一個資料夾底下的 Excel/CSV 檔匯入 SQL Server，匯入前可預覽資料與欄位型別。
+把一個資料夾底下的 Excel/CSV/SAP txt 匯入 SQL Server，匯入前可預覽資料與欄位型別。
 
 ## 資料夾怎麼擺
 
@@ -10,9 +10,13 @@ data/
     cust_2024.xlsx
     cust_2025.csv
   orders.csv          -> 匯入成 table orders
+  ZMM001.txt          -> 匯入成 table ZMM001（SAP 匯出的 txt）
 ```
 
 子資料夾 = 一張表（夾內所有檔案合併），散檔 = 一張表（表名為檔名）。
+同一張表裡 `.xlsx` 與 `.txt` 可以混放，只要欄名一致就會合併。
+
+支援的副檔名：`.xlsx` `.xls` `.csv` `.txt`。
 
 ## 安裝
 
@@ -51,8 +55,13 @@ wheel 綁 Python 版本與架構（`pandas-2.3.3-cp312-cp312-win_amd64.whl`）�
 
 ### 設定連線
 
-編輯 `config.json` 的 `conn`（見下方「連線字串填在哪」）。
-`config.json` 不進版控，因為可能含密碼。
+```
+copy .env.example .env
+```
+
+用記事本開 `.env`，填 `SQL_SERVER` 與 `SQL_DATABASE` 就好。
+`.env` 與 `config.json` 都不進版控，密碼不會被推上 GitHub。
+細節見下方「連線字串填在哪」。
 
 ## 前置需求
 
@@ -90,12 +99,80 @@ python import_data.py data append  # 指定資料夾與寫入模式
 兩個版本共用 `config.json`，連線字串與型別覆寫只需設定一次。
 有任何一張表失敗時，命令列版會回傳 exit code 1，方便排程判斷成敗。
 
+## SAP 匯出的 txt
+
+SAP 的 txt 不是乾淨的 CSV，檔頭有報表標題、檔尾有統計列、負號掛在數字後面。
+這些都會自動處理，不必先用 Excel 洗過一輪：
+
+| SAP 吐出來 | 匯入後 |
+|---|---|
+| 檔頭 `Dynamic List Display` 與空行 | 跳過，往下找真正的欄名列 |
+| 檔尾 `* 123 筆記錄` | 欄數對不上，自動丟掉 |
+| ALV 的 `\|----\|` 框線與分頁重印的標題 | 丟掉 |
+| `1.234,56-` | `-1234.56`（尾綴負號、德式小數點） |
+| `31.12.2026` | `2026-12-31` |
+| `00000000`、`#`、`n/a` | `NULL` |
+| `000000000010001234` | 保持文字，不轉數字（前導零是料號的一部分） |
+| UTF-8 BOM / UTF-16 / ANSI | 看 BOM 自動判斷編碼 |
+
+千分位與小數點是整欄一起判斷的：欄裡只要有一個 `1.234,56`
+就知道逗號是小數點。整欄都長得像 `1.234` 時無從判斷，一律當千分位（= 1234）。
+
+### 先探一下格式
+
+灌之前建議先跑 `sniff.py` 確認解析對不對。它只用標準函式庫，
+沒裝 pandas 也能跑，也不會連資料庫或動到任何檔案：
+
+```
+python sniff.py D:\SAP\ZMM001.txt      單一檔案
+python sniff.py D:\SAP                  整個資料夾的 txt
+python sniff.py D:\SAP > sniff.txt      存成檔案方便貼給別人看
+```
+
+會印出編碼、分隔符、欄名在第幾行、每欄推斷的型別與前 3 筆值，
+以及一段可以直接貼進 `config.json` 的設定。
+
+### 自動偵測猜錯時
+
+在 `config.json` 的 `txt` 區用表名指定，三個欄位都可以省略：
+
+```json
+{
+  "txt": {
+    "ZMM001": { "encoding": "utf-8-sig", "sep": "	", "skiprows": 0 }
+  }
+}
+```
+
+- `encoding` — `utf-8-sig`／`utf-16`／`cp950`
+- `sep` — `"	"`、`";"`、`","`、`"|"`
+- `skiprows` — 最前面要先砍掉幾行（欄名被認成資料時才需要）
+
+欄位型別另外用 `dtypes` 覆寫，例如逼料號留成文字：
+`"dtypes": { "ZMM001": { "MATNR": "NVARCHAR(50)" } }`
+
+固定寬度（沒有分隔符）的格式目前不支援，會直接報錯而不是亂切。
+
 ## 連線字串填在哪
 
-擇一即可，UI 最方便：
+擇一即可，`.env` 最適合遠端機器：
 
+- **`.env`**：複製 `.env.example` 成 `.env`，填 `SQL_SERVER` 與 `SQL_DATABASE`
 - **UI**：「連線設定…」按鈕，存好後寫進 `config.json`
 - **手動**：複製 `config.example.json` 成 `config.json`，改 `conn` 那行
+
+`.env` 的優先序最高，填了就會蓋掉 `config.json` 的 `conn`。
+`.env` 放在程式旁邊即可，exe 版也讀得到。
+
+```
+SQL_SERVER=SQLPRD01,1433
+SQL_DATABASE=UMC
+SQL_USER=            留空 = 用 Windows 整合驗證
+SQL_PASSWORD=
+```
+
+密碼裡的 `@` `:` `/` 不用跳脫，程式會自己編碼。
+整條字串要自己寫死時用 `SQL_CONN=`，會蓋掉其他所有設定。
 
 ```json
 { "conn": "mssql+pyodbc://@主機/資料庫?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes" }
@@ -147,5 +224,7 @@ ODBC Driver 17 仍需另外安裝，打包帶不走。
 - [x] `app.pyw` — tkinter 預覽 UI
 - [x] `build.bat` — PyInstaller 打包，已驗證可啟動
 - [x] `import_data.py` — 早期的命令列版本，保留
+- [x] `sniff.py` — SAP txt 格式診斷，零相依單檔
+- [x] `test_sap.py` — SAP txt 解析與 .env 的測試（`python -m pytest`）
 
 設計文件：[docs/design.md](docs/design.md)

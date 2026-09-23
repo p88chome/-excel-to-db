@@ -135,7 +135,7 @@ class App(Tk):
             messagebox.showerror("找不到資料夾", f"{root} 不存在")
             return
         self.status_var.set("掃描中…")
-        self.bg(lambda: self.q.put(("tables", core.scan(root))))
+        self.bg(lambda: self.q.put(("tables", core.scan(root, self.cfg))))
 
     def show_tables(self, tables):
         self.tables = core.apply_overrides(tables, self.cfg)

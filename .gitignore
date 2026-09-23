@@ -1,5 +1,6 @@
-# 連線設定可能含密碼，不進版控。範本見 config.example.json
+# 連線設定可能含密碼，不進版控。範本見 config.example.json / .env.example
 config.json
+.env
 
 # 匯入紀錄
 *.log

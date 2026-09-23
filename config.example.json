@@ -9,5 +9,12 @@
       "amount": "DECIMAL(18,2)",
       "created_at": "DATETIME"
     }
+  },
+  "txt": {
+    "ZMM001": {
+      "encoding": "utf-8-sig",
+      "sep": "\t",
+      "skiprows": 0
+    }
   }
 }

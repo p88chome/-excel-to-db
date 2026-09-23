@@ -15,6 +15,7 @@ python -m PyInstaller --onedir --clean --noconsole -n excel-to-db ^
   --exclude-module PIL ^
   --exclude-module notebook ^
   --add-data "config.example.json;." ^
+  --add-data ".env.example;." ^
   app.pyw
 
 echo.
