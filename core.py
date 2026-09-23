@@ -170,12 +170,31 @@ SAP_CODE_FIELDS = frozenset("""
     PSPNR PSPID POSID PSPHI NPLNR VORNR ARBPL PLNBEZ PLNNR
 
     PERNR BNAME UNAME USNAM ERNAM AENAM
+
+    KAPPL KSCHL ESOKZ KNUMH KNUMV KNUMA
+
+    ANLKL ANLAR INVNR TYPBZ SERNR IZWEK KFZKZ LIEFE EAUFN GDLGRP
+    AIBN1 AIBN2
+
+    MONAT POPER BUPER PERIO SPMON TCODE BVORG DBBLG STBLG KZWRS BSTAT
+    GLVOR GRPID FIKRS HWAER HWAE2 HWAE3 AUGLV PPNAM BRNCH RLDNR LDGRP
+    IBLAR DOCCAT KTOPL VERSN ERGSL TXJCD XREF1 XREF2 XREF3
+    FISTL FIPOS GEBER KDAUF KDPOS PROJK AUFPL APLZL PRODH
 """.split())
+
+# 標準欄位太多，列不完。這幾條欄名規則接住沒列到的，一樣只看名字不看值。
+CODE_PATTERNS = re.compile(r"""
+    ^KNUM                   # KNUMH KNUMV KNUMA 條件記錄號
+  | ^ORD\d+$                # ORD41-44 資產評估欄位
+  | (?:JHR|JAH|JAHR|GJA)$   # URJHR STJAH GJAHR MJAHR LFGJA 年度
+  | NR\d?$                  # INVNR SERNR AUFNR PERNR 之類的號碼欄位
+""", re.X)
 
 
 def is_code_field(name):
     """欄名是不是 SAP 的代碼欄位。大小寫與前後空白都不計。"""
-    return str(name).strip().upper() in SAP_CODE_FIELDS
+    n = str(name).strip().upper()
+    return n in SAP_CODE_FIELDS or bool(CODE_PATTERNS.search(n))
 
 NUM_RE = re.compile(r"""^
     (?P<sign>[-+])?

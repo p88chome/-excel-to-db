@@ -244,3 +244,24 @@ def test_sniff_marks_code_fields(tmp_path):
              for i, name in enumerate(header)}
     assert codes["BUKRS"] == "T!" and codes["BELNR"] == "T!"
     assert codes["WRBTR"] == "N-" and codes["MENGE"] == "N"
+
+
+@pytest.mark.parametrize("name, why", [
+    ("KNUMH", "條件記錄號"), ("KNUMV", "條件記錄號"),
+    ("ORD41", "資產評估欄位"), ("ORD44", "資產評估欄位"),
+    ("STJAH", "反轉年度"), ("URJHR", "原始年度"), ("LFGJA", "收貨年度"),
+    ("INVNR", "庫存號碼"), ("SERNR", "序號"), ("ANLKL", "資產類別"),
+    ("EAUFN", "投資訂單"), ("STBLG", "反轉憑證"), ("MONAT", "會計期間"),
+])
+def test_patterns_and_additions_catch_code_fields(name, why):
+    assert core.is_code_field(name), why
+
+
+@pytest.mark.parametrize("name, why", [
+    ("WRBTR", "金額"), ("DMBTR", "金額"), ("KURSF", "匯率"),
+    ("MENGE", "數量"), ("URWRT", "原始價值"),
+    ("BUDAT", "過帳日"), ("BLDAT", "憑證日"), ("AEDAT", "異動日"),
+    ("TXT50", "資產說明"), ("BKTXT", "憑證抬頭文字"),
+])
+def test_patterns_do_not_swallow_amounts_dates_or_text(name, why):
+    assert not core.is_code_field(name), why
