@@ -497,3 +497,50 @@ def test_no_date_amount_or_text_is_treated_as_a_code(table):
     wrong = [c for c in sorted(set(TABLES[table].split()))
              if core.is_code_field(c) and (c in NOT_CODES or c in KEEP_TYPED)]
     assert not wrong, f"{table} 誤判成代碼：{' '.join(wrong)}"
+
+
+# --- Excel 也要套代碼欄位清單 -------------------------------------------
+
+def test_excel_code_columns_become_text(tmp_path):
+    # Excel 存成數字的憑證號碼，pandas 會讀成 int64。清單要把它轉回文字，
+    # 否則同一個 BELNR 在 txt 是文字、在 Excel 是整數，兩張表 JOIN 不起來。
+    pd.DataFrame({
+        "BELNR": [1449008934, 1597714383],
+        "BUKRS": [8104, 1763],
+        "MANDANT": [800, 800],
+        "WRBTR": [1234.56, -1000.0],
+        "MENGE": [12, 34],
+    }).to_excel(tmp_path / "ZTM80.xlsx", index=False)
+
+    df = core.read(tmp_path / "ZTM80.xlsx")
+    assert df["BELNR"].tolist() == ["1449008934", "1597714383"]
+    assert df["BUKRS"].tolist() == ["8104", "1763"]
+    assert df["MANDANT"].tolist() == ["800", "800"]
+    assert df["WRBTR"].tolist() == [1234.56, -1000.0]    # 金額不動
+    assert df["MENGE"].tolist() == [12, 34]              # 已知數字欄位不動
+
+
+def test_excel_code_column_with_blanks_has_no_float_tail(tmp_path):
+    # 有空值時整數欄會變 float64，直接轉字串會變成 "1449008934.0"
+    pd.DataFrame({"BELNR": [1449008934, None], "SGTXT": ["A", "B"]}).to_excel(
+        tmp_path / "ZTM80.xlsx", index=False)
+    df = core.read(tmp_path / "ZTM80.xlsx")
+    assert df["BELNR"].iloc[0] == "1449008934"      # 不是 "1449008934.0"
+    assert pd.isna(df["BELNR"].iloc[1])
+
+
+def test_excel_and_txt_agree_on_code_column_type(tmp_path):
+    root = tmp_path / "data" / "BKPF"
+    root.mkdir(parents=True)
+    write(root, "jan.txt",
+          "Dynamic List Display\n\nBUKRS\tBELNR\tWRBTR\n"
+          "8104\t1449008934\t1.234,56\n")
+    pd.DataFrame({"BUKRS": [1763], "BELNR": [1597714383],
+                  "WRBTR": [99.0]}).to_excel(root / "feb.xlsx", index=False)
+
+    t = core.scan(tmp_path / "data")[0]
+    assert t.ok, t.error
+    assert t.dtypes["BELNR"].startswith("NVARCHAR")
+    assert t.dtypes["BUKRS"].startswith("NVARCHAR")
+    df = core.load(t.files)                     # 檔案依檔名排序，feb 在 jan 前
+    assert sorted(df["BELNR"]) == ["1449008934", "1597714383"]

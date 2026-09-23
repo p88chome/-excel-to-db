@@ -414,15 +414,44 @@ def read_txt(path, encoding=None, sep=None, skiprows=0):
 
 # --- 讀檔 ---------------------------------------------------------------
 
+def code_columns_to_text(df):
+    """代碼欄位一律轉回文字。
+
+    Excel 與 CSV 走 pandas 自己的型別推斷，憑證號碼會被讀成 int64，
+    所以 txt 之外的格式也要補這一刀，否則同一個 BELNR 在 txt 是文字、
+    在 Excel 是整數，兩張表就 JOIN 不起來。
+
+    注意：Excel 儲存格如果本來就存成數字，前導零在 SAP 匯出那一刻
+    就沒了，這裡救不回來——能保證的是型別每次都一致。
+    """
+    out = df.copy()
+    for col in out.columns:
+        if not is_code_field(col):
+            continue
+        s = out[col]
+        if s.dtype.kind in "iu":
+            out[col] = s.astype("string")
+        elif s.dtype.kind == "f":
+            whole = s.dropna()
+            # 有空值時整數欄會變 float，直接轉字串會多一個 .0
+            if whole.empty or whole.mod(1).eq(0).all():
+                out[col] = s.astype("Int64").astype("string")
+            else:
+                out[col] = s.astype("string")
+    return out
+
+
 def read(path, nrows=None, opts=None):
     """讀一個檔案。nrows 只讀前幾列，給預覽用。opts 是 txt 的解析覆寫。"""
     ext = Path(path).suffix.lower()
     if ext == ".txt":
         df = read_txt(path, **(opts or {}))
-        return df.head(nrows) if nrows else df
-    if ext == ".csv":
-        return pd.read_csv(path, nrows=nrows)
-    return pd.read_excel(path, nrows=nrows)
+        df = df.head(nrows) if nrows else df
+    elif ext == ".csv":
+        df = pd.read_csv(path, nrows=nrows)
+    else:
+        df = pd.read_excel(path, nrows=nrows)
+    return code_columns_to_text(df)
 
 
 def count_rows(path, opts=None):

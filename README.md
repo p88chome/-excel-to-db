@@ -94,6 +94,20 @@ python app.pyw
 python import_data.py              # 用 config.json 裡的資料夾與模式
 python import_data.py data         # 指定資料夾
 python import_data.py data append  # 指定資料夾與寫入模式
+python import_data.py data --check # 只檢查不寫入，也不連資料庫
+```
+
+`--check` 列出每張表的欄位型別與可疑欄位，是 Excel 的探路工具——
+`sniff.py` 只看得懂 txt：
+
+```
+ZTM80（1 個檔案，2 列）
+  MANDT                NVARCHAR(20)
+  EKORG                NVARCHAR(20)
+  EBELN                NVARCHAR(20)
+  ZZDOCNO              BIGINT
+  NETWR                DECIMAL(18,2)
+  注意：ZZDOCNO 被推斷成整數，但欄名不在 SAP 代碼欄位清單。
 ```
 
 兩個版本共用 `config.json`，連線字串與型別覆寫只需設定一次。
@@ -127,7 +141,15 @@ JOIN 不到；還有同一欄位這個月的檔案沒有前導零、下個月有
 每次重建表，欄位型別就在 INT 與 NVARCHAR 之間跳，下游跟著爛。
 
 所以 `core.py` 帶一張 SAP 標準代碼欄位清單（`SAP_CODE_FIELDS`），
-**只看欄名、不看值**，命中就當文字。目前 576 個欄名，逐一比對過這 32 張表：
+**只看欄名、不看值**，命中就當文字。**Excel、CSV、txt 都套用**——
+不然同一個 `BELNR` 在 txt 是文字、在 Excel 被 pandas 讀成 int64，
+兩張表就 JOIN 不起來。
+
+因為只看欄名，自訂表（ZTM 開頭那種）只要欄名是標準的
+（`MANDT` `EKORG` `IHREZ` `EBELN`…）一樣認得出來，不必另外設定。
+
+Excel 有個救不回來的情況：儲存格本來就存成數字時，前導零在 SAP
+匯出那一刻就沒了。這裡能保證的是**型別每次都一致**。目前 576 個欄名，逐一比對過這 32 張表：
 
 ```
 A017  ANLA  BKPF  BSEG  CDHDR CDPOS T001  EBAN  EBKN  EINA  EINE
