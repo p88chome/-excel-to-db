@@ -192,3 +192,55 @@ def test_txt_and_excel_land_in_one_table(tmp_path):
             "SELECT MATNR, WERT FROM ZMM001 ORDER BY MATNR").fetchall()
     assert rows[0] == ("000000000010001234", 1234.56)
     assert rows[1][1] == -1000.0
+
+
+# --- SAP 代碼欄位清單 ---------------------------------------------------
+
+SAP_FI_TXT = (
+    "Dynamic List Display\n"
+    "\n"
+    "BUKRS\tBELNR\tGJAHR\tWRBTR\tZFBDT\tMENGE\n"
+    "8104\t1449008934\t2026\t1.234,56\t31.12.2026\t12\n"
+    "1763\t1597714383\t2026\t70.319,87-\t01.01.2026\t34\n"
+)
+
+
+def test_code_field_stays_text_even_when_it_looks_numeric(tmp_path):
+    df = core.read(write(tmp_path, "BESG.txt", SAP_FI_TXT))
+    assert df["BUKRS"].tolist() == ["8104", "1763"]
+    assert df["BELNR"].tolist() == ["1449008934", "1597714383"]
+    assert df["GJAHR"].tolist() == ["2026", "2026"]
+
+
+def test_field_not_in_list_still_converts(tmp_path):
+    df = core.read(write(tmp_path, "BESG.txt", SAP_FI_TXT))
+    assert df["WRBTR"].tolist() == [1234.56, -70319.87]
+    assert df["MENGE"].tolist() == [12, 34]
+    assert df["ZFBDT"].iloc[0] == pd.Timestamp("2026-12-31")
+
+
+@pytest.mark.parametrize("name", ["bukrs", " BUKRS ", "Bukrs"])
+def test_code_field_ignores_case_and_spaces(name):
+    assert core.is_code_field(name)
+
+
+def test_dtypes_override_can_force_a_code_field_back_to_number(tmp_path):
+    t = core.scan(write(tmp_path, "BESG.txt", SAP_FI_TXT).parent)[0]
+    assert t.dtypes["BUKRS"].startswith("NVARCHAR")
+    df = core.coerce(core.load(t.files), {**t.dtypes, "BUKRS": "INT"})
+    assert df["BUKRS"].tolist() == [8104, 1763]
+
+
+def test_sniff_reuses_the_list_instead_of_copying_it():
+    import sniff
+    assert sniff.SAP_CODE_FIELDS is core.SAP_CODE_FIELDS
+
+
+def test_sniff_marks_code_fields(tmp_path):
+    import sniff
+    p = write(tmp_path, "BESG.txt", SAP_FI_TXT)
+    _, _, _, sep, header, data, _ = sniff.layout_of(p)
+    codes = {name: sniff.guess_type([r[i] for r in data], name)[2]
+             for i, name in enumerate(header)}
+    assert codes["BUKRS"] == "T!" and codes["BELNR"] == "T!"
+    assert codes["WRBTR"] == "N-" and codes["MENGE"] == "N"

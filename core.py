@@ -140,6 +140,43 @@ def parse(text, sep=None, skiprows=0):
 NULL_TOKENS = {"", "#", "-", "--", "n/a", "na", "null", "none",
                "00000000", "0000-00-00", "00.00.0000", "00/00/0000"}
 
+# SAP 標準的代碼欄位。這些在 SAP 裡本來就是 CHAR，只是長得像數字：
+# 憑證號碼 1449008934、公司代碼 8104、年度 2026。當成數字會掉前導零
+# （0000001000 變 1000），跟主檔 JOIN 就對不起來，而且同一欄位在不同
+# 月份的檔案可能一次有前導零一次沒有，型別會跟著跳。
+# 一律當文字，靠欄名判斷，不看值。
+#
+# 認不出來的情況：Z 開頭的自訂欄位、以及匯出時用中文/英文說明當欄名的
+# 報表。那些欄位走原本的猜值邏輯，必要時用 config.json 的 dtypes 釘死。
+# 反過來要把這裡的某一欄當數字，也是用 dtypes 指定 INT/DECIMAL。
+SAP_CODE_FIELDS = frozenset("""
+    MANDT BUKRS WERKS LGORT GSBER KOKRS PRCTR SEGMENT BUPLA VBUND
+    VKORG VTWEG SPART EKORG EKGRP LAND1 WAERS SPRAS
+
+    BELNR BUZEI BUZID DOCLN GJAHR BLART BSCHL SHKZG KOART UMSKZ MWSKZ
+    HKONT SAKNR ALTKT KOSTL LSTAR KSTAR AUFNR ANLN1 ANLN2
+    AUGBL AUGGJ ZUONR XBLNR XBLNR1 ZTERM ZLSCH ZLSPR ZLSCH RSTGR
+    KTOSL FILKD HBKID HKTID BVTYP AWKEY AWTYP
+
+    LIFNR KUNNR KUNAG KUNWE KTOKK KTOKD STCD1 STCD2 STCD3 STCEG
+    PSTLZ TELF1 TELF2 TELFX
+
+    MATNR MATKL MTART MEINS MSEHI CHARG BWTAR SOBKZ
+    EBELN EBELP BANFN BNFPO BSART PSTYP KNTTP INFNR RESWK
+    MBLNR MJAHR ZEILE BWART LFBNR LFGJA LFPOS
+
+    VBELN POSNR AUART VBTYP FKART FKTYP LFART VGBEL VGPOS ANGNR
+
+    PSPNR PSPID POSID PSPHI NPLNR VORNR ARBPL PLNBEZ PLNNR
+
+    PERNR BNAME UNAME USNAM ERNAM AENAM
+""".split())
+
+
+def is_code_field(name):
+    """欄名是不是 SAP 的代碼欄位。大小寫與前後空白都不計。"""
+    return str(name).strip().upper() in SAP_CODE_FIELDS
+
 NUM_RE = re.compile(r"""^
     (?P<sign>[-+])?
     (?P<body>\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d+)?|\d+(?:[.,]\d+)?)
@@ -265,6 +302,9 @@ def sap_convert(df):
         s = df[col].map(lambda x: cell(x) if isinstance(x, str) else x)
         s = s.mask(s.map(
             lambda x: isinstance(x, str) and x.lower() in NULL_TOKENS))
+        if is_code_field(col):      # 欄名說了算，不看值
+            out[col] = s
+            continue
         converted = sap_dates(s)
         if converted is None:
             converted = sap_numbers(s)

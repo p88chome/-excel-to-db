@@ -44,9 +44,20 @@ NULL_TOKENS = {"", "#", "-", "--", "n/a", "na", "null", "none",
                "00000000", "0000-00-00", "00.00.0000", "00/00/0000"}
 
 SHORT_LEGEND = (
-    "代碼：T=文字 T0=文字有前導零 N=數字 N-=有尾綴負號 N?=千分位待確認 "
-    "D:iso=YYYY-MM-DD D:dot=DD.MM.YYYY D:slash?=日月順序待確認 "
-    "D:8=YYYYMMDD _=整欄空白")
+    "代碼：T=文字 T0=文字有前導零 T!=SAP代碼欄位強制文字 N=數字 "
+    "N-=有尾綴負號 N?=千分位待確認 D:iso=YYYY-MM-DD D:dot=DD.MM.YYYY "
+    "D:slash?=日月順序待確認 D:8=YYYYMMDD _=整欄空白")
+
+# SAP 代碼欄位清單放在 core.py，這裡不複製一份，免得兩邊改到不一致。
+# 只複製了 sniff.py 到遠端、或那台沒裝 pandas 時，清單就不套用——
+# 版面與編碼的判斷不受影響，只是代碼欄位不會標成 T!。
+try:
+    from core import SAP_CODE_FIELDS, is_code_field
+except Exception:                                   # noqa: BLE001
+    SAP_CODE_FIELDS = frozenset()
+
+    def is_code_field(name):
+        return False
 
 
 # 舊版 Windows 主控台是 cp950，印到不支援的符號會整支掛掉。
@@ -108,11 +119,13 @@ def header_line_no(lines, sep, header):
     return 1
 
 
-def guess_type(values):
+def guess_type(values, name=""):
     """從一欄的值推斷型別，回 (說明, 提醒, 短代碼)。"""
     real = [v for v in values if v.lower() not in NULL_TOKENS]
     if not real:
         return "（整欄空白）", "", "_"
+    if is_code_field(name):
+        return "文字（SAP 代碼欄位）", "欄名在 SAP 代碼欄位清單，一律當文字", "T!"
     for rx, name, code in DATE_RES:
         if all(rx.fullmatch(v.split(" ")[0]) for v in real):
             note = "!! 日月順序看不出來，預設當 DD/MM" if "或" in name else ""
@@ -158,7 +171,7 @@ def short_report(path):
     print(f"{path.stem} | {enc} | {SHORT_SEPS.get(sep, sep)} | "
           f"{len(header)}col | skip{skip} | {len(data)}row")
     print(" ".join(
-        f"{name or f'COL{i + 1}'}:{guess_type([r[i] for r in data[:200]])[2]}"
+        f"{name or f'COL{i + 1}'}:{guess_type([r[i] for r in data[:200]], name)[2]}"
         for i, name in enumerate(header)))
 
 
@@ -191,7 +204,7 @@ def report(path):
     print("-" * 70)
     for i, name in enumerate(header):
         values = [r[i] for r in data[:200]]
-        kind, note, _ = guess_type(values)
+        kind, note, _ = guess_type(values, name)
         shown = " / ".join(v[:18] or "(空)" for v in values[:3])
         print(f"{(name or f'COL{i + 1}').ljust(width)} | {kind.ljust(18)} | {shown}")
         if note:
@@ -216,6 +229,8 @@ def main(*argv):
         sys.exit(f"{p} 底下沒有 .txt")
     if short:
         print(SHORT_LEGEND)
+    if not SAP_CODE_FIELDS:
+        print("注意：讀不到 core.py，SAP 代碼欄位清單這次沒套用。")
     for f in files:
         try:
             short_report(f) if short else report(f)

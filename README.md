@@ -113,10 +113,37 @@ SAP 的 txt 不是乾淨的 CSV，檔頭有報表標題、檔尾有統計列、�
 | `31.12.2026` | `2026-12-31` |
 | `00000000`、`#`、`n/a` | `NULL` |
 | `000000000010001234` | 保持文字，不轉數字（前導零是料號的一部分） |
+| `BUKRS` `BELNR` `GJAHR` 等 SAP 代碼欄位 | 一律文字，見下方 |
 | UTF-8 BOM / UTF-16 / ANSI | 看 BOM 自動判斷編碼 |
 
 千分位與小數點是整欄一起判斷的：欄裡只要有一個 `1.234,56`
 就知道逗號是小數點。整欄都長得像 `1.234` 時無從判斷，一律當千分位（= 1234）。
+
+### SAP 代碼欄位一律當文字
+
+`BELNR` 1449008934、`BUKRS` 8104、`GJAHR` 2026 —— 這些在 SAP 裡是 CHAR，
+只是長得像數字。當成數字會出兩種事：前導零掉了（`0000001000` 變 `1000`）跟主檔
+JOIN 不到；還有同一欄位這個月的檔案沒有前導零、下個月有，`replace` 模式
+每次重建表，欄位型別就在 INT 與 NVARCHAR 之間跳，下游跟著爛。
+
+所以 `core.py` 帶一張 SAP 標準代碼欄位清單（`SAP_CODE_FIELDS`），
+**只看欄名、不看值**，命中就當文字。涵蓋 FI／MM／SD／CO 常見的組織、
+憑證、主檔、採購、銷售欄位，十幾張報表不用各設定一次。
+
+清單認不出來的兩種情況：
+
+- **Z 開頭的自訂欄位** —— 標準清單不可能有
+- **用中文或英文說明當欄名的報表**（欄名是「憑證編號」而不是 `BELNR`）
+
+這兩種走原本的猜值邏輯；真的猜錯就用 `dtypes` 釘死。反過來要把清單裡的
+某一欄當數字，也是用 `dtypes` 指定 `INT` 或 `DECIMAL`：
+
+```json
+{ "dtypes": { "BESG": { "AUGBL": "BIGINT" } } }
+```
+
+要加新欄名，改 `core.py` 的 `SAP_CODE_FIELDS`。`sniff.py` 直接引用同一份，
+不會有兩邊不同步的問題。
 
 ### 先探一下格式
 
@@ -136,11 +163,12 @@ python sniff.py D:\SAP --short          每個檔壓成兩行
 機器之間沒連通、輸出只能用手抄時用 `--short`，一個檔兩行：
 
 ```
-ZMM001 | utf-8-sig | TAB | 5col | skip2 | 1234row
-MATNR:T0 MAKTX:T MENGE:N? WERT:N- ERDAT:D:dot
+BESG | utf-8-sig | TAB | 20col | skip3 | 406537row
+COL1:_ BUZEI:T! LIFNR:T! ZUONR:T! SGTXT:T HKONT:T! WRBTR:N- ZFBDT:D:slash?
 ```
 
-代碼：`T` 文字、`T0` 文字有前導零、`N` 數字、`N-` 有尾綴負號、
+代碼：`T` 文字、`T0` 文字有前導零、`T!` SAP 代碼欄位（強制文字）、
+`N` 數字、`N-` 有尾綴負號、
 `N?` 千分位待確認、`D:iso`／`D:dot`／`D:8` 日期格式、
 `D:slash?` 日月順序待確認、`_` 整欄空白。
 帶 `?` 的就是程式猜不準、需要人決定的欄位。
@@ -239,5 +267,7 @@ ODBC Driver 17 仍需另外安裝，打包帶不走。
 - [x] `import_data.py` — 早期的命令列版本，保留
 - [x] `sniff.py` — SAP txt 格式診斷，零相依單檔
 - [x] `test_sap.py` — SAP txt 解析與 .env 的測試（`python -m pytest`）
+
+實測：406,537 列、55.7 MB 的 txt，掃描 10 秒、匯入 30 秒。
 
 設計文件：[docs/design.md](docs/design.md)
