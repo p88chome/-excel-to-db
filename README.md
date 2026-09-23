@@ -72,7 +72,34 @@ copy .env.example .env
 reg query "HKLM\SOFTWARE\ODBC\ODBCINST.INI\ODBC Drivers"
 ```
 
-看不到 `ODBC Driver 17 for SQL Server` 就要先去微軟官網裝。
+看不到任何 `ODBC Driver ... for SQL Server` 就要先去微軟官網裝。
+
+**版本不必是 17**。程式會挑機器上實際裝的、版號最高的那個，所以裝 18
+也能用，`.env` 不用改。要指定特定版本才設 `SQL_DRIVER`。
+
+連線報 `IM002`「找不到資料來源名稱且未指定預設的驅動程式」，幾乎都是
+驅動名稱對不上（裝了 18 卻寫死 17，差一個字就連不上）。這個錯誤發生時，
+程式會把實際裝了哪些驅動一起印出來：
+
+```
+連線失敗：(pyodbc.InterfaceError) ('IM002', ... 找不到資料來源名稱且未指定預設的驅動程式)
+
+這台機器上裝的驅動：
+  ODBC Driver 17 for SQL Server
+  ODBC Driver 11 for SQL Server
+目前使用：ODBC Driver 99 for SQL Server
+名字要一字不差；要指定別的就在 .env 設 SQL_DRIVER。
+```
+
+用 Python 列同一份清單：
+
+```
+python -c "import pyodbc; print('
+'.join(pyodbc.drivers()))"
+```
+
+Driver 18 預設強制加密。憑證不受信任時連線會被擋，要改用 `SQL_CONN`
+自己寫字串並補上 `&TrustServerCertificate=yes`。
 
 ## 使用
 

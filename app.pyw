@@ -226,9 +226,11 @@ class App(Tk):
                 core.connect(self.cfg["conn"]).connect().close()
                 self.q.put(("info", ("連線成功", "資料庫連線正常。")))
             except Exception as e:
-                self.q.put(("error", ("連線失敗", str(e))))
+                # IM002「找不到資料來源名稱且未指定預設的驅動程式」多半是
+                # 驅動名稱對不上（裝了 18 卻寫 17），原始訊息看不出來，
+                # 把實際裝了哪些驅動一起顯示。
+                self.q.put(("error", ("連線失敗", core.explain_conn_error(e))))
         self.bg(work)
-
     def do_import(self):
         ready = [t for t in self.tables if t.ok]
         if not ready:

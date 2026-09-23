@@ -54,6 +54,11 @@ def main(*argv):
             sys.exit(missing)
 
     engine = core.connect(cfg["conn"])
+    try:
+        engine.connect().close()          # 先確認連得上，免得掃完才失敗
+    except Exception as e:
+        sys.exit("連線失敗：" + core.explain_conn_error(e))
+
     tables = core.apply_overrides(core.scan(root, cfg), cfg)
     if not tables:
         sys.exit(f"{root} 底下沒有 .csv/.xlsx/.xls/.txt 檔案")

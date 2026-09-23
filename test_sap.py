@@ -544,3 +544,53 @@ def test_excel_and_txt_agree_on_code_column_type(tmp_path):
     assert t.dtypes["BUKRS"].startswith("NVARCHAR")
     df = core.load(t.files)                     # 檔案依檔名排序，feb 在 jan 前
     assert sorted(df["BELNR"]) == ["1449008934", "1597714383"]
+
+
+# --- ODBC 驅動 ----------------------------------------------------------
+
+def fake_drivers(monkeypatch, names):
+    monkeypatch.setattr(core.pyodbc, "drivers", lambda: names)
+
+
+def test_best_driver_prefers_the_highest_version(monkeypatch):
+    fake_drivers(monkeypatch, [
+        "SQL Server", "ODBC Driver 11 for SQL Server",
+        "ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"])
+    assert core.best_driver() == "ODBC Driver 18 for SQL Server"
+
+
+def test_best_driver_falls_back_when_none_installed(monkeypatch):
+    fake_drivers(monkeypatch, ["SQL Server Native Client 11.0"])
+    assert core.best_driver() == core.DEFAULT_DRIVER
+    assert core.missing_driver()          # 應該要提醒去安裝
+
+
+def test_env_uses_the_installed_driver_not_a_hardcoded_17(monkeypatch):
+    # 寫死 17 但機器上只有 18，就是使用者遇到的 IM002 成因
+    fake_drivers(monkeypatch, ["ODBC Driver 18 for SQL Server"])
+    monkeypatch.setenv("SQL_SERVER", "SRV01")
+    monkeypatch.setenv("SQL_DATABASE", "UMC")
+    monkeypatch.delenv("SQL_DRIVER", raising=False)
+    assert "ODBC+Driver+18+for+SQL+Server" in core.conn_from_env()
+
+
+def test_env_driver_still_wins(monkeypatch):
+    fake_drivers(monkeypatch, ["ODBC Driver 18 for SQL Server"])
+    monkeypatch.setenv("SQL_SERVER", "SRV01")
+    monkeypatch.setenv("SQL_DATABASE", "UMC")
+    monkeypatch.setenv("SQL_DRIVER", "ODBC Driver 17 for SQL Server")
+    assert "ODBC+Driver+17+for+SQL+Server" in core.conn_from_env()
+
+
+def test_im002_error_gets_the_driver_list_appended(monkeypatch):
+    fake_drivers(monkeypatch, ["ODBC Driver 17 for SQL Server"])
+    err = Exception("('IM002', '[IM002] 找不到資料來源名稱且未指定預設的驅動程式')")
+    out = core.explain_conn_error(err)
+    assert "ODBC Driver 17 for SQL Server" in out
+    assert "SQL_DRIVER" in out
+
+
+def test_other_errors_are_left_alone(monkeypatch):
+    fake_drivers(monkeypatch, ["ODBC Driver 17 for SQL Server"])
+    out = core.explain_conn_error(Exception("('08001', '登入逾時終止')"))
+    assert out == "('08001', '登入逾時終止')"

@@ -662,14 +662,61 @@ def import_table(engine, table, mode="replace", overrides=None):
     return len(df)
 
 
+DEFAULT_DRIVER = "ODBC Driver 17 for SQL Server"
+
+
+def installed_drivers():
+    """機器上裝的 SQL Server ODBC 驅動，版本高的排前面。"""
+    found = [d for d in pyodbc.drivers()
+             if "ODBC Driver" in d and "SQL Server" in d]
+    return sorted(found, key=lambda d: int(re.search(r"\d+", d).group())
+                  if re.search(r"\d+", d) else 0, reverse=True)
+
+
+def best_driver():
+    """挑機器上實際裝的驅動。
+
+    連線字串寫死 17、機器上裝的卻是 18，ODBC 會回 IM002
+    「找不到資料來源名稱且未指定預設的驅動程式」——名字差一個字就連不上，
+    而且錯誤訊息完全看不出是版本號的問題。
+    """
+    found = installed_drivers()
+    return found[0] if found else DEFAULT_DRIVER
+
+
 def missing_driver():
     """回傳提示字串；沒問題就回傳空字串。"""
-    if any("ODBC Driver" in d and "SQL Server" in d for d in pyodbc.drivers()):
+    if installed_drivers():
         return ""
     return ("找不到 ODBC Driver for SQL Server。\n"
             "請先安裝「ODBC Driver 17 for SQL Server」再使用本程式。\n"
             "檢查指令：reg query "
             '"HKLM\\SOFTWARE\\ODBC\\ODBCINST.INI\\ODBC Drivers"')
+
+
+def driver_hint():
+    """連線失敗時附在錯誤訊息後面的提示。"""
+    found = installed_drivers()
+    if not found:
+        return missing_driver()
+    using = os.environ.get("SQL_DRIVER") or best_driver()
+    return ("這台機器上裝的驅動：\n  " + "\n  ".join(found)
+            + f"\n目前使用：{using}"
+            + "\n名字要一字不差；要指定別的就在 .env 設 SQL_DRIVER。"
+            + "\nDriver 18 預設強制加密，憑證不受信任時連線字串要補上"
+            " TrustServerCertificate=yes。")
+
+
+def explain_conn_error(err):
+    """把連線例外變成人看得懂的訊息。
+
+    IM002「找不到資料來源名稱且未指定預設的驅動程式」是最常見的一種，
+    原始訊息完全看不出問題出在驅動名稱，所以把實際裝了哪些一起附上。
+    """
+    msg = str(err)
+    if any(k in msg for k in ("IM002", "資料來源名稱", "Data source name")):
+        return msg + "\n\n" + driver_hint()
+    return msg
 
 
 # --- 設定 ---------------------------------------------------------------
@@ -681,8 +728,6 @@ DEFAULTS = {
     "dtypes": {},
     "txt": {},
 }
-
-DEFAULT_DRIVER = "ODBC Driver 17 for SQL Server"
 
 
 def load_env(path=".env"):
@@ -706,7 +751,8 @@ def conn_from_env():
     database = os.environ.get("SQL_DATABASE")
     if not (server and database):
         return ""
-    driver = os.environ.get("SQL_DRIVER", DEFAULT_DRIVER)
+    # 沒指定就用機器上實際裝的，免得寫死 17 卻裝了 18
+    driver = os.environ.get("SQL_DRIVER") or best_driver()
     query = f"driver={quote_plus(driver)}"
     user = os.environ.get("SQL_USER")
     if user:
