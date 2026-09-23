@@ -127,10 +127,23 @@ SAP 的 txt 不是乾淨的 CSV，檔頭有報表標題、檔尾有統計列、�
 python sniff.py D:\SAP\ZMM001.txt      單一檔案
 python sniff.py D:\SAP                  整個資料夾的 txt
 python sniff.py D:\SAP > sniff.txt      存成檔案方便貼給別人看
+python sniff.py D:\SAP --short          每個檔壓成兩行
 ```
 
 會印出編碼、分隔符、欄名在第幾行、每欄推斷的型別與前 3 筆值，
 以及一段可以直接貼進 `config.json` 的設定。
+
+機器之間沒連通、輸出只能用手抄時用 `--short`，一個檔兩行：
+
+```
+ZMM001 | utf-8-sig | TAB | 5col | skip2 | 1234row
+MATNR:T0 MAKTX:T MENGE:N? WERT:N- ERDAT:D:dot
+```
+
+代碼：`T` 文字、`T0` 文字有前導零、`N` 數字、`N-` 有尾綴負號、
+`N?` 千分位待確認、`D:iso`／`D:dot`／`D:8` 日期格式、
+`D:slash?` 日月順序待確認、`_` 整欄空白。
+帶 `?` 的就是程式猜不準、需要人決定的欄位。
 
 ### 自動偵測猜錯時
 

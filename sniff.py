@@ -4,11 +4,12 @@
 只要複製這一個檔案就能診斷格式，不必先把整個專案裝起來。
 
 用法：
-    python sniff.py D:\\SAP\\ZMM001.txt      # 看單一檔案
-    python sniff.py D:\\SAP                  # 看整個資料夾裡的 txt
+    python sniff.py D:\\SAP\\ZMM001.txt          # 看單一檔案
+    python sniff.py D:\\SAP                      # 看整個資料夾裡的 txt
+    python sniff.py D:\\SAP --short              # 每個檔壓成兩行
 
-把輸出整段貼回來，就能確認解析設定對不對。
-輸出最後會附一段可以直接貼進 config.json 的 txt 設定。
+完整輸出貼得回來的話，整段貼就好。遠端跟這邊沒連通、只能用手打的時候，
+用 --short，一個檔兩行、六十幾個字，打得完。
 """
 import codecs
 import json
@@ -28,17 +29,24 @@ PIPE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 RULE_ROW = re.compile(r"^[\s|+\-=_]*$")
 AUTO_SEPS = ("\t", ";", ",")
 SEP_NAMES = {"\t": "Tab", ";": "分號 ;", ",": "逗號 ,", "|": "管線 |"}
+# 短報告用 | 當欄位分界，分隔符名稱裡不能再有 |
+SHORT_SEPS = {"\t": "TAB", ";": "SEMI", ",": "COMMA", "|": "PIPE"}
 
 NUM_RE = re.compile(r"^[-+]?(?:\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d+)?|\d+(?:[.,]\d+)?)[-+]?$")
 CODE_RE = re.compile(r"0\d+")
 DATE_RES = [
-    (re.compile(r"\d{4}-\d{1,2}-\d{1,2}"), "YYYY-MM-DD"),
-    (re.compile(r"\d{1,2}\.\d{1,2}\.\d{4}"), "DD.MM.YYYY"),
-    (re.compile(r"\d{1,2}/\d{1,2}/\d{4}"), "DD/MM/YYYY 或 MM/DD/YYYY"),
-    (re.compile(r"(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])"), "YYYYMMDD"),
+    (re.compile(r"\d{4}-\d{1,2}-\d{1,2}"), "YYYY-MM-DD", "D:iso"),
+    (re.compile(r"\d{1,2}\.\d{1,2}\.\d{4}"), "DD.MM.YYYY", "D:dot"),
+    (re.compile(r"\d{1,2}/\d{1,2}/\d{4}"), "DD/MM/YYYY 或 MM/DD/YYYY", "D:slash?"),
+    (re.compile(r"(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])"), "YYYYMMDD", "D:8"),
 ]
 NULL_TOKENS = {"", "#", "-", "--", "n/a", "na", "null", "none",
                "00000000", "0000-00-00", "00.00.0000", "00/00/0000"}
+
+SHORT_LEGEND = (
+    "代碼：T=文字 T0=文字有前導零 N=數字 N-=有尾綴負號 N?=千分位待確認 "
+    "D:iso=YYYY-MM-DD D:dot=DD.MM.YYYY D:slash?=日月順序待確認 "
+    "D:8=YYYYMMDD _=整欄空白")
 
 
 # 舊版 Windows 主控台是 cp950，印到不支援的符號會整支掛掉。
@@ -101,55 +109,78 @@ def header_line_no(lines, sep, header):
 
 
 def guess_type(values):
-    """從一欄的值推斷型別，附帶要提醒的事。"""
+    """從一欄的值推斷型別，回 (說明, 提醒, 短代碼)。"""
     real = [v for v in values if v.lower() not in NULL_TOKENS]
     if not real:
-        return "（整欄空白）", ""
-    for rx, name in DATE_RES:
+        return "（整欄空白）", "", "_"
+    for rx, name, code in DATE_RES:
         if all(rx.fullmatch(v.split(" ")[0]) for v in real):
             note = "!! 日月順序看不出來，預設當 DD/MM" if "或" in name else ""
-            return f"日期 {name}", note
+            return f"日期 {name}", note, code
     if any(CODE_RE.fullmatch(v) for v in real):
-        return "文字（有前導零）", "保持文字，轉數字會掉開頭的 0"
+        return "文字（有前導零）", "保持文字，轉數字會掉開頭的 0", "T0"
     if all(NUM_RE.fullmatch(v) for v in real):
-        note = "尾綴負號已辨識" if any(v.endswith("-") for v in real) else ""
+        note, code = "", "N"
+        if any(v.endswith("-") for v in real):
+            note, code = "尾綴負號已辨識", "N-"
         ambiguous = [v for v in real
                      if (v.count(".") == 1 and len(v.split(".")[1]) == 3
                          and "," not in v)]
         if ambiguous and not any("," in v for v in real):
             note = f"!! 像 {ambiguous[0]} 這種看不出是千分位還是小數點，預設當千分位"
-        return "數字", note
-    return f"文字（最長 {max(len(v) for v in real)} 字）", ""
+            code = "N?"
+        return "數字", note, code
+    return f"文字（最長 {max(len(v) for v in real)} 字）", "", "T"
+
+
+def layout_of(path):
+    """回傳 (編碼, 怎麼判的, 原始行, 分隔符, 標題列, 資料列, 前面跳幾行)。"""
+    raw = path.read_bytes()
+    enc, why = sniff_encoding(raw)
+    lines = raw.decode(enc, errors="replace").splitlines()
+    sep, rows = find_layout(lines)
+    if not sep:
+        return enc, why, lines, None, [], [], 0
+    n = Counter(len(r) for r in rows).most_common(1)[0][0]
+    rows = [r for r in rows if len(r) == n]
+    header = rows[0]
+    data = [r for r in rows[1:] if r != header]     # ALV 分頁會重印標題
+    skip = header_line_no(lines, sep, header) - 1
+    return enc, why, lines, sep, header, data, skip
+
+
+def short_report(path):
+    """壓成兩行，給沒辦法複製檔案、只能用手打的情況。"""
+    enc, _, _, sep, header, data, skip = layout_of(path)
+    if not sep:
+        print(f"{path.stem} | {enc} | 認不出分隔符（可能是固定寬度）")
+        return
+    print(f"{path.stem} | {enc} | {SHORT_SEPS.get(sep, sep)} | "
+          f"{len(header)}col | skip{skip} | {len(data)}row")
+    print(" ".join(
+        f"{name or f'COL{i + 1}'}:{guess_type([r[i] for r in data[:200]])[2]}"
+        for i, name in enumerate(header)))
 
 
 def report(path):
-    raw = path.read_bytes()
-    enc, why = sniff_encoding(raw)
-    text = raw.decode(enc, errors="replace")
-    lines = text.splitlines()
+    enc, why, lines, sep, header, data, skip = layout_of(path)
 
     print("=" * 70)
     print(f"檔案　　：{path}")
-    print(f"大小　　：{len(raw):,} bytes，{len(lines):,} 行")
+    print(f"大小　　：{path.stat().st_size:,} bytes，{len(lines):,} 行")
     print(f"編碼　　：{enc}（{why}）")
 
     print("\n--- 原始前 8 行（[TAB]）---")
     for i, ln in enumerate(lines[:8], 1):
         print(f"{i:>3} | {ln.replace(chr(9), '[TAB]')[:160]}")
 
-    sep, rows = find_layout(lines)
     if not sep:
         print("\nX 認不出分隔符。可能是固定寬度格式，請把上面前 8 行貼回來。")
         return
-    n = Counter(len(r) for r in rows).most_common(1)[0][0]
-    rows = [r for r in rows if len(r) == n]
-    header = rows[0]
-    data = [r for r in rows[1:] if r != header]     # ALV 分頁會重印標題
-    skip = header_line_no(lines, sep, header) - 1
 
-    print(f"\n--- 版面 ---")
+    print("\n--- 版面 ---")
     print(f"分隔符　：{SEP_NAMES.get(sep, sep)}")
-    print(f"欄位數　：{n}")
+    print(f"欄位數　：{len(header)}")
     print(f"標題列　：第 {skip + 1} 行（前面 {skip} 行是報表標題/空行，跳過）")
     print(f"資料列　：{len(data):,} 筆"
           f"（檔尾另有 {len(lines) - skip - 1 - len(data):,} 行被當成統計列丟掉）")
@@ -160,9 +191,9 @@ def report(path):
     print("-" * 70)
     for i, name in enumerate(header):
         values = [r[i] for r in data[:200]]
-        kind, note = guess_type(values)
+        kind, note, _ = guess_type(values)
         shown = " / ".join(v[:18] or "(空)" for v in values[:3])
-        print(f"{(name or f'COL{i+1}').ljust(width)} | {kind.ljust(18)} | {shown}")
+        print(f"{(name or f'COL{i + 1}').ljust(width)} | {kind.ljust(18)} | {shown}")
         if note:
             print(f"{' ' * width} | {note}")
 
@@ -172,19 +203,26 @@ def report(path):
         indent=2, ensure_ascii=False))
     print("（skiprows 只在標題列被認錯時才要調；sep 用 \\t 代表 Tab）")
 
+    print("\n--- 沒辦法複製檔案時，手打這兩行就夠 ---")
+    short_report(path)
 
-def main(target="."):
-    p = Path(target)
+
+def main(*argv):
+    short = "--short" in argv or "-s" in argv
+    args = [a for a in argv if not a.startswith("-")]
+    p = Path(args[0] if args else ".")
     files = sorted(p.glob("*.txt")) if p.is_dir() else [p]
     if not files:
         sys.exit(f"{p} 底下沒有 .txt")
+    if short:
+        print(SHORT_LEGEND)
     for f in files:
         try:
-            report(f)
+            short_report(f) if short else report(f)
         except Exception as e:
             print(f"X {f}：{type(e).__name__}: {e}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(*sys.argv[1:2]))
+    sys.exit(main(*sys.argv[1:]))
