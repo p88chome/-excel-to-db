@@ -1179,42 +1179,46 @@ def test_second_batch_with_thousands_appends_to_first(tmp_path):
 
 # --- 小數位上限 ---------------------------------------------------------
 
-# 金額 2 位、數量 3 位是 SAP 的常態。再多的猜 DECIMAL 只會被 SQL Server
-# 安靜地四捨五入掉，所以留成文字——值是完整的，要算再在 SQL 端 CAST。
+# 金額 2 位、數量 3 位、匯率 5 位蓋得住 SAP 的常態欄位。再多的猜 DECIMAL
+# 只會被 SQL Server 安靜地四捨五入掉，所以留成文字——值是完整的，
+# 要算再在 SQL 端 CAST。
 
 @pytest.mark.parametrize("values, spec", [
     ([1.5, 2.25], "DECIMAL(18,2)"),
     ([1.5, 2.125], "DECIMAL(18,3)"),
     ([12.500, 3.125], "DECIMAL(18,3)"),
+    ([1.1234], "DECIMAL(18,4)"),
+    ([1.12345], "DECIMAL(18,5)"),
 ])
-def test_two_and_three_decimals_stay_decimal(values, spec):
+def test_decimals_up_to_the_cap_stay_decimal(values, spec):
     assert core.infer(pd.Series(values)) == spec
 
 
-@pytest.mark.parametrize("values", [[1.1234], [1.123456], [1.12345678901]])
-def test_more_than_three_decimals_becomes_text(values):
+@pytest.mark.parametrize("values", [[1.123456], [1.1234567], [1.12345678901]])
+def test_more_decimals_than_the_cap_becomes_text(values):
     assert core.infer(pd.Series(values)).startswith("NVARCHAR")
 
 
-def test_three_decimals_is_in_the_dropdown():
-    assert "DECIMAL(18,3)" in core.TYPE_CHOICES
+def test_dropdown_lists_every_decimal_the_scan_can_produce():
+    for scale in range(2, core.MAX_SCALE + 1):
+        assert f"DECIMAL(18,{scale})" in core.TYPE_CHOICES
     assert "FLOAT" in core.TYPE_CHOICES      # 不自動判，但還是選得到
 
 
-def test_widening_stops_at_three_decimals():
-    # DECIMAL(18,2) 放不下 4 位，但也不放寬成 DECIMAL(18,4)
-    _, changed, _ = core.fit_types(pd.DataFrame({"KBETR": [1.1234]}),
+def test_widening_stops_at_the_cap():
+    # DECIMAL(18,2) 放不下 6 位，但也不放寬成 DECIMAL(18,6)
+    _, changed, _ = core.fit_types(pd.DataFrame({"KBETR": [1.123456]}),
                                    {"KBETR": "DECIMAL(18,2)"})
     assert changed["KBETR"].startswith("NVARCHAR")
 
 
-def test_explicit_four_decimals_is_still_honoured():
-    # 上限只管「用猜的」。config.json 指定死 DECIMAL(18,4) 就照做，
+def test_explicit_scale_past_the_cap_is_still_honoured():
+    # 上限只管「用猜的」。config.json 指定死 DECIMAL(18,8) 就照做，
     # 不報衝突也不改掉——那是使用者明確的選擇。
     fitted, changed, conflicts = core.fit_types(
-        pd.DataFrame({"KBETR": [1.1234]}), {"KBETR": "DECIMAL(18,4)"},
+        pd.DataFrame({"KBETR": [1.12345678]}), {"KBETR": "DECIMAL(18,8)"},
         pinned={"KBETR"})
-    assert fitted["KBETR"] == "DECIMAL(18,4)"
+    assert fitted["KBETR"] == "DECIMAL(18,8)"
     assert not changed and not conflicts
 
 
@@ -1234,12 +1238,13 @@ def test_three_decimal_quantity_survives_import(tmp_path):
             == [(1087.125,), (23456.5,)]
 
 
-def test_four_decimal_column_keeps_every_digit(tmp_path):
-    # 留成文字的重點是不能掉位數，不是型別好不好看
+def test_column_past_the_cap_keeps_every_digit(tmp_path):
+    # 留成文字的重點是不能掉位數，不是型別好不好看。逗號也要拆掉，
+    # 不然 SQL 端 CAST 回 DECIMAL 會爆。
     root = tmp_path / "data" / "KONV"
     root.mkdir(parents=True)
     pd.DataFrame({"KNUMV": ["0000012345"],
-                  "KBETR": ["1,087.1234"]}).to_excel(
+                  "KBETR": ["1,087.123456"]}).to_excel(
                       root / "jan.xlsx", index=False)
     t = core.scan(tmp_path / "data")[0]
     assert t.dtypes["KBETR"].startswith("NVARCHAR")
@@ -1247,17 +1252,36 @@ def test_four_decimal_column_keeps_every_digit(tmp_path):
     db = tmp_path / "out.db"
     assert core.import_table(core.connect(f"sqlite:///{db}"), t) == 1
     with sqlite3.connect(db) as c:
-        assert c.execute("SELECT KBETR FROM KONV").fetchone()[0] == "1087.1234"
+        assert c.execute("SELECT KBETR FROM KONV").fetchone()[0] \
+            == "1087.123456"
 
 
 def test_pinned_decimal_conflict_offers_a_wider_decimal(tmp_path):
     # 訊息不能只說「需要 NVARCHAR」——自己指定 DECIMAL(18,4) 也是解法
     root = tmp_path / "data" / "KONV"
     root.mkdir(parents=True)
-    pd.DataFrame({"KNUMV": ["0000012345"], "KBETR": ["1,087.1234"]}).to_excel(
-        root / "jan.xlsx", index=False)
+    pd.DataFrame({"KNUMV": ["0000012345"],
+                  "KBETR": ["1,087.123456"]}).to_excel(
+                      root / "jan.xlsx", index=False)
     t = core.apply_overrides(core.scan(tmp_path / "data"),
                              {"dtypes": {"KONV": {"KBETR": "DECIMAL(18,2)"}}})[0]
-    with pytest.raises(ValueError, match=r"DECIMAL\(18,4\)") as e:
+    with pytest.raises(ValueError, match=r"DECIMAL\(18,6\)") as e:
         core.import_table(core.connect(f"sqlite:///{tmp_path / 'o.db'}"), t)
     assert "KBETR 指定 DECIMAL(18,2)" in str(e.value)
+
+
+def test_exchange_rate_five_decimals_stays_a_number(tmp_path):
+    # 上限開到 5 就是為了匯率欄：KURSF 常態是 5 位小數
+    root = tmp_path / "data" / "BKPF"
+    root.mkdir(parents=True)
+    pd.DataFrame({"BELNR": ["1000000001", "1000000002"],
+                  "KURSF": ["1.23456", "31.10500"]}).to_excel(
+                      root / "jan.xlsx", index=False)
+    t = core.scan(tmp_path / "data")[0]
+    assert t.dtypes["KURSF"] == "DECIMAL(18,5)"
+
+    db = tmp_path / "out.db"
+    assert core.import_table(core.connect(f"sqlite:///{db}"), t) == 2
+    with sqlite3.connect(db) as c:
+        assert c.execute("SELECT KURSF FROM BKPF ORDER BY BELNR").fetchall() \
+            == [(1.23456,), (31.105,)]

@@ -31,7 +31,8 @@ CONFIG = Path("config.json")
 
 # UI 下拉選單的選項。順序即顯示順序。
 TYPE_CHOICES = [
-    "INT", "BIGINT", "DECIMAL(18,2)", "DECIMAL(18,3)", "FLOAT", "BIT",
+    "INT", "BIGINT", "DECIMAL(18,2)", "DECIMAL(18,3)", "DECIMAL(18,4)",
+    "DECIMAL(18,5)", "FLOAT", "BIT",
     "DATE", "DATETIME",
     "NVARCHAR(50)", "NVARCHAR(255)", "NVARCHAR(4000)", "NVARCHAR(MAX)",
 ]
@@ -647,10 +648,10 @@ TEXT_FLOOR = 255
 TEXT_LIMIT = 4000
 
 
-# 小數位超過這個數就不猜 DECIMAL 了。金額 2 位、數量 3 位是 SAP 的常態，
-# 再多的多半是匯率或算出來的欄位，宣告幾位都會被 SQL Server 安靜地
-# 四捨五入掉。留成文字至少值是完整的，要算再在 SQL 端 CAST。
-MAX_SCALE = 3
+# 小數位超過這個數就不猜 DECIMAL 了。金額 2 位、數量 3 位、匯率 5 位
+# 蓋得住 SAP 的常態欄位；再多的多半是算出來的，宣告幾位都會被 SQL Server
+# 安靜地四捨五入掉。留成文字至少值是完整的，要算再在 SQL 端 CAST。
+MAX_SCALE = 5
 
 
 def scale_of(numbers):
@@ -1013,8 +1014,8 @@ def import_table(engine, table, mode="replace", overrides=None, progress=None):
                       and new.upper().startswith("NVARCHAR")
                       for old, new in conflicts.values())
         hint = (f"小數位超過 {MAX_SCALE} 位就不自動給 DECIMAL 了；"
-                "要留成數字就自己指定夠用的位數，例如 DECIMAL(18,4)。"
-                if rounded else "")
+                f"要留成數字就自己指定夠用的位數，例如 "
+                f"DECIMAL(18,{MAX_SCALE + 1})。" if rounded else "")
         raise ValueError(
             f"指定的型別放不下：{detail}。"
             "請在 config.json 的 dtypes 調整，或把該欄的指定拿掉讓程式自己判斷。"
