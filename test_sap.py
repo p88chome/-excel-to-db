@@ -1285,3 +1285,74 @@ def test_exchange_rate_five_decimals_stays_a_number(tmp_path):
     with sqlite3.connect(db) as c:
         assert c.execute("SELECT KURSF FROM BKPF ORDER BY BELNR").fetchall() \
             == [(1.23456,), (31.105,)]
+
+
+# --- SAP 的「無限期」9999-12-31 -----------------------------------------
+
+# EKKO 的有效期迄（KDATE）、合約、主檔失效日常常是 9999-12-31。
+# pandas 預設的 datetime64[ns] 只到 2262-04-11，整欄有一個就炸
+# Out of bounds nanosecond timestamp；SQL Server 的 DATE 收得下。
+
+EKKO_TXT = (
+    "Dynamic List Display\n"
+    "\n"
+    "EBELN\tKDATB\tKDATE\n"
+    "4500000001\t01.01.2026\t31.12.2026\n"
+    "4500000002\t01.01.2026\t31.12.9999\n"
+)
+
+
+def test_sentinel_date_in_txt_is_still_a_date(tmp_path):
+    df = core.read(write(tmp_path, "EKKO.txt", EKKO_TXT))
+    assert core.infer(df["KDATE"]) == "DATE"
+    assert df["KDATE"].tolist() == [
+        pd.Timestamp("2026-12-31"), pd.Timestamp("9999-12-31")]
+
+
+def test_sentinel_date_in_compact_form(tmp_path):
+    # SAP unconverted 匯出是 YYYYMMDD
+    assert core.sap_dates(pd.Series(["20261231", "99991231"])).tolist() == [
+        pd.Timestamp("2026-12-31"), pd.Timestamp("9999-12-31")]
+
+
+def test_eight_digit_code_still_is_not_a_date():
+    # 放行 9999-12-31 不能順便放行別的離譜年份，不然 8 位數代碼會被吃掉
+    assert core.sap_dates(pd.Series(["50000101", "50000102"])) is None
+    assert core.sap_dates(pd.Series(["10001234", "99991232"])) is None
+
+
+@pytest.mark.parametrize("values", [
+    ["2026-12-31", "9999-12-31"],
+    ["2026/12/31", "9999/12/31"],
+    ["2026/1/5", "9999/12/31"],
+])
+def test_sentinel_date_in_excel_is_still_a_date(values):
+    assert core.infer(pd.Series(values)) == "DATE"
+
+
+def test_sentinel_datetime_keeps_the_time_part():
+    s = pd.Series(["2026-01-01 14:30:00", "9999-12-31 00:00:00"])
+    assert core.infer(s) == "DATETIME"
+    assert core.coerce(pd.DataFrame({"K": s}), {"K": "DATETIME"})["K"].tolist() \
+        == [pd.Timestamp("2026-01-01 14:30"), pd.Timestamp("9999-12-31")]
+
+
+def test_pinning_date_on_a_sentinel_column_does_not_blow_up():
+    # 使用者在 UI 手動選 DATE 時炸的就是這裡
+    df = pd.DataFrame({"KDATE": ["2026-12-31", "9999-12-31"]})
+    assert core.coerce(df, {"KDATE": "DATE"})["KDATE"].tolist() == [
+        pd.Timestamp("2026-12-31"), pd.Timestamp("9999-12-31")]
+
+
+def test_sentinel_date_survives_import(tmp_path):
+    root = tmp_path / "data" / "EKKO"
+    root.mkdir(parents=True)
+    write(root, "jan.txt", EKKO_TXT)
+
+    t = core.scan(tmp_path / "data")[0]
+    assert t.dtypes["KDATE"] == "DATE"
+    db = tmp_path / "out.db"
+    assert core.import_table(core.connect(f"sqlite:///{db}"), t) == 2
+    with sqlite3.connect(db) as c:
+        assert c.execute("SELECT KDATE FROM EKKO ORDER BY EBELN").fetchall() \
+            == [("2026-12-31",), ("9999-12-31",)]

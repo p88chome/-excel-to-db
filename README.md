@@ -425,9 +425,18 @@ SQL_PASSWORD=
 |---|---|
 | 整數（int32 範圍內／超出） | `INT` / `BIGINT` |
 | 小數 | `DECIMAL(18, 實際小數位數)`，最多到 `DECIMAL(18,5)`；再多留成 `NVARCHAR` |
-| 日期／日期時間（含 CSV 裡的字串） | `DATE` / `DATETIME` |
+| 日期／日期時間（含 CSV 裡的字串） | `DATE` / `DATETIME`，含 SAP 的 `9999-12-31` |
 | 布林 | `BIT` |
 | 文字 | `NVARCHAR(最大長度 × 2)`，最少 255；超過 4000 給 `NVARCHAR(MAX)` |
+
+SAP 拿 `9999-12-31` 當「無限期」（`EKKO.KDATE`、合約與主檔的失效日常常是
+這個值），它是有意義的日期不是髒資料，所以照樣判成 `DATE`。pandas 預設的
+`datetime64[ns]` 只到 2262-04-11，整欄有一個就會炸
+`Out of bounds nanosecond timestamp`，程式偵測到就降成秒精度重來一次；
+SQL Server 的 `DATE` 與 `DATETIME` 上限正好也是 9999-12-31，存得進去。
+
+`YYYYMMDD` 這種沒有分隔符的格式仍然只認 1900–2100 加上 `99991231`，
+不然 8 位數的代碼會被當成日期吃掉。
 
 超過 5 位小數不自動給 `DECIMAL`：金額 2 位、數量 3 位、匯率 5 位蓋得住 SAP 的
 常態欄位，再多的多半是算出來的，宣告幾位都會被 SQL Server 安靜地四捨五入掉，

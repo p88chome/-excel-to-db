@@ -20,6 +20,7 @@ from urllib.parse import quote_plus
 import openpyxl
 import pandas as pd
 import pyodbc
+from pandas.errors import OutOfBoundsDatetime
 from sqlalchemy import create_engine
 from sqlalchemy.types import (
     NVARCHAR, BigInteger, Boolean, Date, DateTime, Float, Integer, Numeric,
@@ -374,8 +375,14 @@ def sap_numbers(s):
     return out
 
 
+# SAP 拿 9999-12-31 當「無限期」：EKKO 的有效期迄（KDATE）、合約、
+# 主檔的失效日都常常是這個值。它不是髒資料，是有意義的日期。
+SENTINEL_DATE = (9999, 12, 31)
+
+
 def valid_date(y, mo, dy):
-    return 1900 <= y <= 2100 and 1 <= mo <= 12 and 1 <= dy <= 31
+    return (y, mo, dy) == SENTINEL_DATE or (
+        1900 <= y <= 2100 and 1 <= mo <= 12 and 1 <= dy <= 31)
 
 
 def split_time(v):
@@ -396,6 +403,34 @@ def norm_date(v, rx, layout):
     if not valid_date(y, mo, dy):
         return None
     return f"{y:04d}-{mo:02d}-{dy:02d}" + (f" {t}" if t else "")
+
+
+# pandas 預設的 datetime64[ns] 最多只到 2262-04-11，整欄只要有一個
+# 9999-12-31 就炸 Out of bounds nanosecond timestamp，而且訊息不會說是
+# 哪一欄。降到秒精度放得下，SQL Server 的 DATE 與 DATETIME 上限也正好
+# 是 9999-12-31，存得進去。
+DT64 = "datetime64[s]"
+
+# numpy 的字串轉日期只吃補零的 ISO，pd.to_datetime 寬鬆得多。
+# 只有走到秒精度那條路才需要先補齊。
+ISO_PARTS = re.compile(r"^\s*(\d{4})[-/](\d{1,2})[-/](\d{1,2})(.*?)\s*$")
+
+
+def iso_pad(v):
+    m = ISO_PARTS.match(v)
+    if not m:
+        return v
+    return (f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+            f"{m.group(4)}")
+
+
+def parse_dates(s):
+    """整欄轉成 datetime。放不進 ns 精度的才降到秒精度重試。"""
+    try:
+        return pd.to_datetime(s)
+    except OutOfBoundsDatetime:
+        return s.map(
+            lambda x: iso_pad(x) if isinstance(x, str) else None).astype(DT64)
 
 
 def date_layout(values):
@@ -422,7 +457,7 @@ def sap_dates(s):
     if not found:
         return None
     rx, layout = found
-    return pd.to_datetime(s.map(lambda x: norm_date(x, rx, layout)))
+    return parse_dates(s.map(lambda x: norm_date(x, rx, layout)))
 
 
 def sap_convert(df, int_codes=True):
@@ -677,7 +712,7 @@ def as_datetime(s):
     if not text.str.fullmatch(DATE_RE).all():
         return None
     try:
-        return pd.to_datetime(text)
+        return parse_dates(text)
     except (ValueError, TypeError):
         return None
 
@@ -881,7 +916,7 @@ def coerce(df, types):
                 out[col] = cleaned
         try:
             if name in ("DATE", "DATETIME"):
-                out[col] = pd.to_datetime(out[col])
+                out[col] = parse_dates(out[col])
                 if name == "DATE":
                     out[col] = out[col].dt.normalize()
             elif name in ("INT", "BIGINT"):
