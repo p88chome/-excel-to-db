@@ -1356,3 +1356,75 @@ def test_sentinel_date_survives_import(tmp_path):
     with sqlite3.connect(db) as c:
         assert c.execute("SELECT KDATE FROM EKKO ORDER BY EBELN").fetchall() \
             == [("2026-12-31",), ("9999-12-31",)]
+
+
+# --- 前導零在讀檔那一刻就沒了 -------------------------------------------
+
+# 零好好地寫在檔案裡（CSV 是純文字，Excel 那格也真的是字串儲存格），
+# 是 pandas 把整欄判成 int64 時吃掉的，之後再轉字串只剩 10001234。
+
+def text_xlsx(path, rows):
+    """寫一個儲存格真的是文字的 xlsx，不經過 to_excel（它會幫忙轉數字）。"""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for row in rows:
+        ws.append(list(row))
+    wb.save(path)
+    return path
+
+
+CODE_ROWS = [("BELNR", "ZZMYNUM", "MENGE"),
+             ("0010001234", "0055000001", 1.234),
+             ("0010001235", "0055000002", 2.500)]
+
+
+def test_csv_keeps_leading_zeros(tmp_path):
+    p = tmp_path / "BSEG.csv"
+    p.write_text("BELNR,ZZMYNUM\n0010001234,0055000001\n", encoding="utf-8")
+    df = core.read(p)
+    assert df["BELNR"].tolist() == ["0010001234"]      # 欄名認得出來
+    assert df["ZZMYNUM"].tolist() == ["0055000001"]    # 欄名認不出來，靠整數規則
+
+
+def test_excel_keeps_leading_zeros(tmp_path):
+    df = core.read(text_xlsx(tmp_path / "BSEG.xlsx", CODE_ROWS))
+    assert df["BELNR"].tolist() == ["0010001234", "0010001235"]
+    assert df["ZZMYNUM"].tolist() == ["0055000001", "0055000002"]
+
+
+def test_keeping_zeros_does_not_turn_numbers_into_text(tmp_path):
+    # 重點是別為了救零把真的數字也當成文字：1.234 不能變成 1234
+    df = core.read(text_xlsx(tmp_path / "BSEG.xlsx", CODE_ROWS))
+    assert df["MENGE"].tolist() == [1.234, 2.5]
+    assert core.infer(df["MENGE"]) == "DECIMAL(18,3)"
+
+
+def test_int_codes_off_skips_the_reread(tmp_path):
+    # int_codes=False 時不猜代碼，也就不用多讀一趟
+    df = core.read(text_xlsx(tmp_path / "BSEG.xlsx", CODE_ROWS),
+                   int_codes=False)
+    assert df["BELNR"].tolist() == ["0010001234", "0010001235"]   # 欄名還是算數
+    assert df["ZZMYNUM"].tolist() == [55000001, 55000002]
+
+
+def test_known_numeric_field_is_not_reread_as_text(tmp_path):
+    # MENGE 在已知數字清單裡，就算整欄剛好都是整數也不能變成文字
+    df = core.read(text_xlsx(tmp_path / "EKBE.xlsx",
+                             [("EBELN", "MENGE"), ("4500000001", 12),
+                              ("4500000002", 34)]))
+    assert df["MENGE"].tolist() == [12, 34]
+    assert core.infer(df["MENGE"]) == "INT"
+
+
+def test_leading_zeros_survive_import(tmp_path):
+    root = tmp_path / "data" / "BSEG"
+    root.mkdir(parents=True)
+    text_xlsx(root / "jan.xlsx", CODE_ROWS)
+    t = core.scan(tmp_path / "data")[0]
+    db = tmp_path / "out.db"
+    assert core.import_table(core.connect(f"sqlite:///{db}"), t) == 2
+    with sqlite3.connect(db) as c:
+        assert c.execute("SELECT BELNR, ZZMYNUM FROM BSEG "
+                         "ORDER BY BELNR").fetchall() == [
+            ("0010001234", "0055000001"), ("0010001235", "0055000002")]

@@ -594,6 +594,9 @@ def code_columns_to_text(df, int_codes=True):
     所以 txt 之外的格式也要補這一刀，否則同一個 BELNR 在 txt 是文字、
     在 Excel 是整數，兩張表就 JOIN 不起來。
 
+    這一刀只管型別一致，救不了前導零——到這裡零已經被 pandas 吃掉了。
+    保零是 read_sheet() 的事，它在讀檔時就把代碼欄指定成 dtype=str。
+
     注意：Excel 儲存格如果本來就存成數字，前導零在 SAP 匯出那一刻
     就沒了，這裡救不回來——能保證的是型別每次都一致。
     """
@@ -637,6 +640,42 @@ def numbers_from_text(df):
     return out
 
 
+def sheet(path, ext, nrows=None, dtype=None, usecols=None):
+    """讀 csv 或 excel，兩邊參數一致。"""
+    if ext == ".csv":
+        return pd.read_csv(path, nrows=nrows, dtype=dtype, usecols=usecols)
+    return pd.read_excel(path, nrows=nrows, dtype=dtype, usecols=usecols)
+
+
+def read_sheet(path, ext, nrows=None, int_codes=True):
+    """讀 csv/excel，代碼欄一律當文字讀。
+
+    pandas 在讀檔那一刻就把 0010001234 判成 int64，前導零當場沒了，
+    之後 code_columns_to_text 再怎麼轉回字串都只剩 10001234。零明明
+    好好地寫在檔案裡（CSV 是純文字，Excel 那格也真的是字串儲存格），
+    是我們自己丟掉的。
+
+    所以先只讀標題列，欄名認得出來是代碼的就指定 dtype=str。只讀標題
+    很便宜（5 萬列的 xlsx 約 0.2 秒，整份要 0.8 秒），比讀完再重讀划算。
+    """
+    names = list(sheet(path, ext, nrows=0).columns)
+    forced = {c: str for c in names if is_code_field(c)}
+    df = sheet(path, ext, nrows, dtype=forced or None)
+
+    # 欄名沒認出來、值又是整數的，code_columns_to_text 一樣會當代碼。
+    # 那些欄的零已經被吃掉了，只能把它們重讀一次——多讀一趟不便宜，
+    # 但單號少一個零是安靜的錯，比慢更糟。
+    rest = [c for c in df.columns
+            if c not in forced and df[c].dtype.kind in "iu"
+            and int_codes and not is_numeric_field(c)]
+    if rest:
+        again = sheet(path, ext, nrows, dtype=dict.fromkeys(rest, str),
+                      usecols=rest)
+        for c in rest:
+            df[c] = again[c]
+    return df
+
+
 def read(path, nrows=None, opts=None, int_codes=True):
     """讀一個檔案。nrows 只讀前幾列，給預覽用。opts 是 txt 的解析覆寫。"""
     ext = Path(path).suffix.lower()
@@ -644,12 +683,8 @@ def read(path, nrows=None, opts=None, int_codes=True):
         df = read_txt(path, int_codes=int_codes, **(opts or {}))
         df = df.head(nrows) if nrows else df
     else:
-        if ext == ".xml":
-            df = read_xml(path, nrows)
-        elif ext == ".csv":
-            df = pd.read_csv(path, nrows=nrows)
-        else:
-            df = pd.read_excel(path, nrows=nrows)
+        df = (read_xml(path, nrows) if ext == ".xml"
+              else read_sheet(path, ext, nrows, int_codes))
         df = numbers_from_text(df)          # txt 已經在 sap_convert 做過了
     return code_columns_to_text(df, int_codes)
 
