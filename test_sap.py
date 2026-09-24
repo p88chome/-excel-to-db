@@ -1056,3 +1056,122 @@ def test_chunked_write_lands_every_row(tmp_path, monkeypatch):
         assert c.execute("SELECT COUNT(*) FROM EKBE").fetchone()[0] == 25
     assert [m for m in seen if m.startswith("寫入")] == [
         "寫入 10 / 25 列", "寫入 20 / 25 列", "寫入 25 / 25 列"]
+
+
+# --- Excel 與 CSV 的千分位 ----------------------------------------------
+
+# SAP 匯出成 Excel／CSV 時金額常常帶千分位，pandas 只能把整欄留成字串。
+# 第一批金額都小於一千就沒逗號、讀成 float，第二批冒出 "1,087.00" 整欄
+# 就變文字，指定 DECIMAL 會炸 unable to parse string "1,087.00"。
+
+def test_excel_thousands_separator_becomes_number(tmp_path):
+    pd.DataFrame({"BELNR": ["1449008934"],
+                  "WRBTR": ["1,087.00"]}).to_excel(
+                      tmp_path / "BSEG.xlsx", index=False)
+    df = core.read(tmp_path / "BSEG.xlsx")
+    assert df["WRBTR"].tolist() == [1087.0]
+
+
+def test_csv_thousands_separator_becomes_number(tmp_path):
+    (tmp_path / "BSEG.csv").write_text(
+        'BELNR,WRBTR\n1449008934,"1,087.00"\n1449008935,"23,456.78"\n',
+        encoding="utf-8")
+    df = core.read(tmp_path / "BSEG.csv")
+    assert df["WRBTR"].tolist() == [1087.0, 23456.78]
+
+
+def test_excel_thousands_column_infers_decimal(tmp_path):
+    pd.DataFrame({"BELNR": ["1449008934", "1449008935"],
+                  "WRBTR": ["1,087.00", "23,456.78"]}).to_excel(
+                      tmp_path / "BSEG.xlsx", index=False)
+    t = core.scan(tmp_path)[0]
+    assert t.dtypes["WRBTR"] == "DECIMAL(18,2)"
+
+
+def test_excel_thousands_survives_import(tmp_path):
+    root = tmp_path / "data" / "BSEG"
+    root.mkdir(parents=True)
+    pd.DataFrame({"BELNR": ["1449008934", "1449008935"],
+                  "WRBTR": ["1,087.00", "23,456.78"]}).to_excel(
+                      root / "feb.xlsx", index=False)
+    t = core.scan(tmp_path / "data")[0]
+    db = tmp_path / "out.db"
+    assert core.import_table(core.connect(f"sqlite:///{db}"), t) == 2
+    with sqlite3.connect(db) as c:
+        assert c.execute("SELECT WRBTR FROM BSEG ORDER BY BELNR").fetchall() \
+            == [(1087.0,), (23456.78,)]
+
+
+def test_excel_german_thousands_separator(tmp_path):
+    # SAP 德式版面：句點是千分位、逗號是小數點，尾綴負號
+    pd.DataFrame({"BELNR": ["1449008934", "1449008935"],
+                  "WRBTR": ["1.087,00", "70.319,87-"]}).to_excel(
+                      tmp_path / "BSEG.xlsx", index=False)
+    df = core.read(tmp_path / "BSEG.xlsx")
+    assert df["WRBTR"].tolist() == [1087.0, -70319.87]
+
+
+def test_leading_zero_code_is_not_a_number():
+    # 有前導零就是代碼，欄名沒列到也不能因為看起來像數字就轉掉
+    df = core.numbers_from_text(
+        pd.DataFrame({"ZZCODE": ["0010001234", "0010001235"],
+                      "WRBTR": ["1,087.00", "23,456.78"]}))
+    assert df["ZZCODE"].tolist() == ["0010001234", "0010001235"]
+    assert df["WRBTR"].tolist() == [1087.0, 23456.78]
+
+
+def test_excel_thousands_on_code_field_stays_text(tmp_path):
+    # 欄名說了算：BELNR 是代碼欄，就算整欄長得像數字也不轉
+    pd.DataFrame({"BELNR": ["1,449,008,934"], "SGTXT": ["A"]}).to_excel(
+        tmp_path / "BSEG.xlsx", index=False)
+    df = core.read(tmp_path / "BSEG.xlsx")
+    assert df["BELNR"].tolist() == ["1,449,008,934"]
+
+
+def test_excel_mixed_text_and_number_still_errors(tmp_path):
+    # 真的看不懂的值不能安靜變成 NULL，要照樣報出是哪一欄
+    pd.DataFrame({"WRBTR": ["1,087.00", "待確認"]}).to_excel(
+        tmp_path / "BSEG.xlsx", index=False)
+    df = core.read(tmp_path / "BSEG.xlsx")
+    assert df["WRBTR"].tolist() == ["1,087.00", "待確認"]
+    with pytest.raises(ValueError, match="WRBTR"):
+        core.coerce(df, {"WRBTR": "DECIMAL(18,2)"})
+
+
+def test_pinned_decimal_forces_thousands_text_column(tmp_path):
+    # 混著代碼所以讀檔那關不肯轉，使用者指定 DECIMAL 就要照做
+    df = pd.DataFrame({"WRBTR": ["1,087.00", "0123"]})
+    out = core.coerce(df, {"WRBTR": "DECIMAL(18,2)"})
+    assert out["WRBTR"].tolist() == [1087.0, 123.0]
+
+
+def test_thousands_text_column_still_gets_widened(tmp_path):
+    # 指定 DECIMAL(18,2) 但實際有 4 位小數，不能讓 SQL Server 安靜四捨五入
+    df = pd.DataFrame({"KBETR": ["1,087.1234"]})
+    types, changed, conflicts = core.fit_types(df, {"KBETR": "DECIMAL(18,2)"})
+    assert changed["KBETR"] == "DECIMAL(18,4)"
+
+
+def test_second_batch_with_thousands_appends_to_first(tmp_path):
+    # 使用者實際遇到的：第一批金額都小於一千、讀成 float，第二批冒出
+    # "1,087.00" 整欄變字串，append 進已經建好的 DECIMAL 欄。
+    first = tmp_path / "b1" / "A"
+    first.mkdir(parents=True)
+    pd.DataFrame({"BELNR": ["1000000001"], "WRBTR": [987.65]}).to_excel(
+        first / "jan.xlsx", index=False)
+    second = tmp_path / "b2" / "A"
+    second.mkdir(parents=True)
+    pd.DataFrame({"BELNR": ["1000000002", "1000000003"],
+                  "WRBTR": ["1,087.00", "23,456.78"]}).to_excel(
+                      second / "feb.xlsx", index=False)
+
+    db = tmp_path / "out.db"
+    engine = core.connect(f"sqlite:///{db}")
+    core.import_table(engine, core.scan(tmp_path / "b1")[0], "replace")
+    t2 = core.scan(tmp_path / "b2")[0]
+    assert t2.dtypes["WRBTR"] == "DECIMAL(18,2)"
+    core.import_table(engine, t2, "append")
+
+    with sqlite3.connect(db) as c:
+        assert c.execute("SELECT WRBTR FROM A ORDER BY BELNR").fetchall() \
+            == [(987.65,), (1087.0,), (23456.78,)]

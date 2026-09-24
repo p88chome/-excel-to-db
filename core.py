@@ -343,16 +343,30 @@ def to_number(v, dec):
     return -n if "-" in signs else n
 
 
+def numeric_text(s):
+    """帶千分位的文字轉成數字，不是文字的原樣留著。整欄一起判小數點。
+
+    有一格文字轉不出來就回 None，讓呼叫端原本的錯誤照樣浮出來——
+    安靜地把看不懂的值變成 NULL 比報錯更糟。
+    """
+    if s.dtype.kind != "O":         # 已經是數字/日期，幾十萬列不用白跑 map
+        return None
+    text = s.dropna().map(lambda x: x if isinstance(x, str) else None).dropna()
+    if text.empty or not text.map(lambda x: bool(NUM_RE.match(x))).all():
+        return None
+    dec = decimal_sep(text)
+    return s.map(lambda x: to_number(x, dec) if isinstance(x, str) else x)
+
+
 def sap_numbers(s):
     """整欄都是 SAP 數字才轉換，否則回 None 讓它留著當文字。"""
     v = s.dropna()
-    if v.empty or v.map(lambda x: bool(CODE_RE.fullmatch(x))).any():
+    if v.map(lambda x: isinstance(x, str) and bool(CODE_RE.fullmatch(x))).any():
         return None
-    if not v.map(lambda x: bool(NUM_RE.match(x))).all():
+    converted = numeric_text(s)
+    if converted is None:
         return None
-    dec = decimal_sep(v)
-    out = pd.to_numeric(
-        s.map(lambda x: to_number(x, dec) if isinstance(x, str) else None))
+    out = pd.to_numeric(converted)
     kept = out.dropna()
     if not kept.empty and kept.mod(1).eq(0).all() and kept.abs().lt(2**63).all():
         return out.astype("Int64")
@@ -566,18 +580,41 @@ def code_columns_to_text(df, int_codes=True):
     return out
 
 
+def numbers_from_text(df):
+    """讀成文字的數字欄還原成數字。
+
+    千分位（"1,087.00"）會讓 pandas 把整欄留成字串，使用者在 UI 指定
+    DECIMAL 就炸在 coerce：unable to parse string "1,087.00"。txt 走
+    sap_convert 有處理，Excel、CSV、XML 沒有，跟代碼欄一樣要補這一刀，
+    否則同一個 WRBTR 在 txt 是數字、在 Excel 是文字。
+
+    代碼欄不碰——欄名說了算，跟 sap_convert 同一條規則。
+    """
+    out = df.copy()
+    for col in out.columns:
+        if out[col].dtype.kind != "O" or is_code_field(col):
+            continue
+        converted = sap_numbers(
+            out[col].map(lambda x: cell(x) if isinstance(x, str) else x))
+        if converted is not None:
+            out[col] = converted
+    return out
+
+
 def read(path, nrows=None, opts=None, int_codes=True):
     """讀一個檔案。nrows 只讀前幾列，給預覽用。opts 是 txt 的解析覆寫。"""
     ext = Path(path).suffix.lower()
     if ext == ".txt":
         df = read_txt(path, int_codes=int_codes, **(opts or {}))
         df = df.head(nrows) if nrows else df
-    elif ext == ".xml":
-        df = read_xml(path, nrows)
-    elif ext == ".csv":
-        df = pd.read_csv(path, nrows=nrows)
     else:
-        df = pd.read_excel(path, nrows=nrows)
+        if ext == ".xml":
+            df = read_xml(path, nrows)
+        elif ext == ".csv":
+            df = pd.read_csv(path, nrows=nrows)
+        else:
+            df = pd.read_excel(path, nrows=nrows)
+        df = numbers_from_text(df)          # txt 已經在 sap_convert 做過了
     return code_columns_to_text(df, int_codes)
 
 
@@ -823,6 +860,12 @@ def coerce(df, types):
         if col not in out.columns:
             continue
         name = spec.split("(")[0].strip().upper()
+        if name in ("INT", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT"):
+            # 讀檔那一關 sap_numbers 不肯轉的欄（混著代碼、混著數字），
+            # 使用者指定了數字型別還是要照做，那是他明確的選擇。
+            cleaned = numeric_text(out[col])
+            if cleaned is not None:
+                out[col] = cleaned
         try:
             if name in ("DATE", "DATETIME"):
                 out[col] = pd.to_datetime(out[col])
@@ -845,6 +888,13 @@ def connect(conn_str):
     is_mssql = conn_str.startswith("mssql")
     return create_engine(conn_str, fast_executemany=True) if is_mssql \
         else create_engine(conn_str)
+
+
+def as_numbers(values):
+    """轉成數字好量範圍與小數位；帶千分位的文字欄也要量得出來。"""
+    cleaned = numeric_text(values)          # 不是文字欄會直接回 None
+    return pd.to_numeric(values if cleaned is None else cleaned,
+                         errors="coerce").dropna()
 
 
 NVARCHAR_RE = re.compile(r"NVARCHAR\((\d+)\)")
@@ -872,12 +922,12 @@ def better_spec(series, spec):
         return text_spec(longest) if longest > int(m.group(1)) else None
 
     if name in ("INT", "BIGINT"):
-        numbers = pd.to_numeric(values, errors="coerce").dropna()
+        numbers = as_numbers(values)
         if numbers.empty:
             return None
         if not numbers.mod(1).eq(0).all():
             # 數量欄位常常是 12.500 這種，前 200 列剛好都整數就會判成 INT
-            return infer(pd.to_numeric(series, errors="coerce"))
+            return infer(as_numbers(series))
         if name == "INT" and (numbers.min() < -2**31 or numbers.max() >= 2**31):
             return "BIGINT"
         return None
@@ -886,7 +936,7 @@ def better_spec(series, spec):
         m = DECIMAL_RE.fullmatch(spec.strip().upper())
         if not m:
             return None
-        numbers = pd.to_numeric(values, errors="coerce").dropna()
+        numbers = as_numbers(values)
         if numbers.empty:
             return None
         used = numbers.astype(str).str.extract(r"\.(\d+)$")[0].str.len().max()
