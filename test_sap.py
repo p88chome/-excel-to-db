@@ -6,6 +6,7 @@
 
 不需要連資料庫，最後一個測試用 sqlite 驗證整條路走得通。
 """
+import datetime
 import sqlite3
 from pathlib import Path
 
@@ -1428,3 +1429,54 @@ def test_leading_zeros_survive_import(tmp_path):
         assert c.execute("SELECT BELNR, ZZMYNUM FROM BSEG "
                          "ORDER BY BELNR").fetchall() == [
             ("0010001234", "0055000001"), ("0010001235", "0055000002")]
+
+
+def date_xlsx(path, rows):
+    """寫一個日期儲存格是真的 datetime 的 xlsx。"""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for row in rows:
+        ws.append(list(row))
+    wb.save(path)
+    return path
+
+
+A017_ROWS = [
+    ("KNUMH", "DATAB", "DATBI"),
+    ("0000012345", datetime.datetime(2026, 1, 1), datetime.datetime(2026, 12, 31)),
+    ("0000012346", datetime.datetime(2026, 1, 1), datetime.datetime(9999, 12, 31)),
+]
+
+
+def test_excel_date_cells_with_sentinel_are_not_wiped(tmp_path):
+    # Excel 的日期格讀進來是 datetime 物件不是字串。整欄有一個 9999
+    # 時 pandas 放不進 datetime64[ns]，整欄留成 object；秒精度那條路
+    # 如果只認字串，整欄就會變 NaT——值全沒了還不報錯。
+    df = core.read(date_xlsx(tmp_path / "A017.xlsx", A017_ROWS))
+    assert core.infer(df["DATBI"]) == "DATE"
+    assert core.coerce(df, {"DATBI": "DATE"})["DATBI"].tolist() == [
+        pd.Timestamp("2026-12-31"), pd.Timestamp("9999-12-31")]
+
+
+def test_sentinel_column_with_blanks_keeps_the_blanks_null(tmp_path):
+    rows = A017_ROWS + [("0000012347", datetime.datetime(2026, 1, 1), None)]
+    df = core.read(date_xlsx(tmp_path / "A017.xlsx", rows))
+    out = core.coerce(df, {"DATBI": "DATE"})["DATBI"]
+    assert out.tolist()[:2] == [pd.Timestamp("2026-12-31"),
+                                pd.Timestamp("9999-12-31")]
+    assert pd.isna(out.iloc[2])
+
+
+def test_excel_date_cells_with_sentinel_survive_import(tmp_path):
+    root = tmp_path / "data" / "A017"
+    root.mkdir(parents=True)
+    date_xlsx(root / "jan.xlsx", A017_ROWS)
+    t = core.scan(tmp_path / "data")[0]
+    assert t.dtypes["DATBI"] == "DATE"
+
+    db = tmp_path / "out.db"
+    assert core.import_table(core.connect(f"sqlite:///{db}"), t) == 2
+    with sqlite3.connect(db) as c:
+        assert c.execute("SELECT DATBI FROM A017 ORDER BY KNUMH").fetchall() \
+            == [("2026-12-31",), ("9999-12-31",)]

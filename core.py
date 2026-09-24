@@ -424,13 +424,28 @@ def iso_pad(v):
             f"{m.group(4)}")
 
 
+def iso_text(v):
+    """一格轉成 numpy 看得懂的 ISO 字串，空值回 None。
+
+    這一欄不一定是字串：Excel 的日期儲存格讀進來是 datetime 物件，
+    而整欄只要有一個 9999-12-31，pandas 就放不進 datetime64[ns]，
+    整欄會留成 object。把非字串一律當空值會整欄變 NULL。
+    """
+    if v is None or v is pd.NaT:
+        return None
+    if isinstance(v, str):
+        return iso_pad(v)
+    if hasattr(v, "isoformat"):             # date / datetime / Timestamp
+        return v.isoformat()
+    return None if pd.isna(v) else str(v)
+
+
 def parse_dates(s):
     """整欄轉成 datetime。放不進 ns 精度的才降到秒精度重試。"""
     try:
         return pd.to_datetime(s)
     except OutOfBoundsDatetime:
-        return s.map(
-            lambda x: iso_pad(x) if isinstance(x, str) else None).astype(DT64)
+        return s.map(iso_text).astype(DT64)
 
 
 def date_layout(values):
