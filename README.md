@@ -337,6 +337,38 @@ ANLA（1 個檔案，406,537 列）
 | `BUKRS` `BELNR` 等 | 欄名就認得出來 |
 | `0000001000` 有前導零 | 百分之百是代碼，沒什麼好確認的 |
 
+### 副檔名是 .xls，內容其實是 XML
+
+SAP 的「匯出成試算表」常常把 SpreadsheetML 存成 `.xls`（日文系統尤其常見）。
+Excel 只會跳一個「格式與副檔名不符」的警告照樣開得起來，`pandas.read_excel`
+則是直接死在：
+
+```
+Excel file format cannot be determined, you must specify an engine manually
+```
+
+所以程式**認內容不認副檔名**：讀檔前先看前 4KB 有沒有 SpreadsheetML 的
+namespace，有就走 XML 那條路，`.xls`／`.xlsx`／`.xml` 都一樣。
+
+注意這跟「Excel 說檔案毀損、修復也開不起來」是兩回事。那個代表檔案本身
+壞了（下載中斷、或內容根本是 MHTML／HTML），不是副檔名的問題。先跑
+`python sniff.py <檔案>` 看它到底是什麼。
+
+### 日文系統的編碼
+
+SAP 日文系統的 txt 匯出是 **Shift-JIS（cp932）**。自動偵測的順序是
+`utf-8` → `cp950` → `cp932` → `cp1252`，最後才是不會失敗的 `latin-1`。
+
+cp932 排在 cp950 後面是有意的：中文的 Big5 檔 cp950 會先接走，而日文的
+Shift-JIS 檔 cp950 會直接拒絕（`illegal multibyte sequence`），輪得到 cp932。
+少了 cp932 的話會一路掉到 `latin-1`，**整份變亂碼而且不報錯**。
+
+判錯的話在 `config.json` 指定死：
+
+```json
+"txt": { "EKPO": { "encoding": "cp932" } }
+```
+
 ### 匯出成 .xml 的情況
 
 SAP 的「匯出成試算表」在某些版本吐的是 **Excel 2003 XML（SpreadsheetML）**：

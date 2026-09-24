@@ -47,7 +47,10 @@ BOMS = [
     (codecs.BOM_UTF16_LE, "utf-16"),
     (codecs.BOM_UTF16_BE, "utf-16"),
 ]
-FALLBACKS = ("utf-8", "cp950", "cp1252")
+# cp932 排在 cp950 後面：中文的 Big5 檔 cp950 會先接走，而日文的
+# Shift-JIS 檔 cp950 會直接拒絕（illegal multibyte sequence），輪得到
+# cp932。沒有 cp932 的話會一路掉到最後的 latin-1，整份變亂碼還不報錯。
+FALLBACKS = ("utf-8", "cp950", "cp932", "cp1252")
 
 
 def decode(raw, encoding=None):
@@ -572,6 +575,19 @@ def xml_row(el):
     return cells
 
 
+# SAP 的「匯出成試算表」常常把 SpreadsheetML 存成 .xls（日文系統尤其
+# 常見）。Excel 只會跳一個「格式與副檔名不符」的警告照樣開得起來，
+# pandas.read_excel 則是直接死在「Excel file format cannot be
+# determined, you must specify an engine manually」。認內容不認副檔名。
+SML_NS = b"urn:schemas-microsoft-com:office:spreadsheet"
+
+
+def is_spreadsheetml(path):
+    """內容是 SpreadsheetML 就回 True，不管副檔名叫什麼。"""
+    with open(path, "rb") as f:
+        return SML_NS in f.read(4096)
+
+
 def read_xml(path, nrows=None):
     """讀 SpreadsheetML，只取第一個有資料的工作表。"""
     rows = []
@@ -698,7 +714,8 @@ def read(path, nrows=None, opts=None, int_codes=True):
         df = read_txt(path, int_codes=int_codes, **(opts or {}))
         df = df.head(nrows) if nrows else df
     else:
-        df = (read_xml(path, nrows) if ext == ".xml"
+        df = (read_xml(path, nrows)
+              if ext == ".xml" or is_spreadsheetml(path)
               else read_sheet(path, ext, nrows, int_codes))
         df = numbers_from_text(df)          # txt 已經在 sap_convert 做過了
     return code_columns_to_text(df, int_codes)
@@ -711,7 +728,7 @@ def count_rows(path, opts=None):
         o = dict(opts or {})
         text = decode(Path(path).read_bytes(), o.pop("encoding", None))
         return len(parse(text, **o))
-    if ext == ".xml":
+    if ext == ".xml" or is_spreadsheetml(path):
         return len(read_xml(path))
     if ext == ".csv":
         with open(path, "rb") as f:

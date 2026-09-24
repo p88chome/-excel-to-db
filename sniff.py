@@ -7,6 +7,11 @@
     python sniff.py D:\\SAP\\ZMM001.txt          # 看單一檔案
     python sniff.py D:\\SAP                      # 看整個資料夾裡的 txt
     python sniff.py D:\\SAP --short              # 每個檔壓成兩行
+    python sniff.py D:\\SAP\\下載.xls --what       # 這個檔到底是什麼格式
+
+Excel 說「發現部分內容有問題」、復原又失敗的時候用 --what：它認內容
+不認副檔名，會告訴你那是 zip、OLE2、SpreadsheetML、MHTML 還是被截斷的
+半個檔。
 
 完整輸出貼得回來的話，整段貼就好。遠端跟這邊沒連通、只能用手打的時候，
 用 --short，一個檔兩行、六十幾個字，打得完。
@@ -23,7 +28,7 @@ BOMS = [
     (codecs.BOM_UTF16_LE, "utf-16"),
     (codecs.BOM_UTF16_BE, "utf-16"),
 ]
-FALLBACKS = ("utf-8", "cp950", "cp1252")
+FALLBACKS = ("utf-8", "cp950", "cp932", "cp1252")
 
 PIPE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 RULE_ROW = re.compile(r"^[\s|+\-=_]*$")
@@ -237,10 +242,108 @@ def report(path):
     short_report(path)
 
 
+
+# --- 這個檔到底是什麼 ---------------------------------------------------
+
+# Excel 說「我們發現部分內容有問題，要盡可能嘗試復原嗎」然後復原也失敗，
+# 代表檔案本身壞了或根本不是 Excel 格式，跟副檔名無關。SAP 下載會吐出
+# 好幾種東西：真的 xlsx（zip）、舊版 .xls（OLE2）、SpreadsheetML（XML）、
+# MHTML、純 HTML 表格。最常見的壞法是下載中斷，檔案被截掉一半。
+
+ZIP_SIG = b"PK\x03\x04"
+ZIP_END = b"PK\x05\x06"                 # 中央目錄結尾，被截掉就找不到
+OLE2_SIG = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+SML_NS = b"urn:schemas-microsoft-com:office:spreadsheet"
+
+
+def peek(path, size=65536):
+    """只讀頭尾，別把幾百 MB 的檔整個吞進記憶體。"""
+    with open(path, "rb") as f:
+        head = f.read(size)
+        f.seek(0, 2)
+        total = f.tell()
+        f.seek(max(total - size, 0))
+        return head, f.read(size), total
+
+
+def file_kind(path):
+    """認內容不認副檔名。回 (代號, 說明, 問題清單)。"""
+    head, tail, total = peek(path)
+    bad = []
+    if total == 0:
+        return "empty", "空檔案（0 bytes）", ["下載沒成功，重抓一次"]
+
+    if head.startswith(ZIP_SIG):
+        if ZIP_END not in tail:
+            bad.append("找不到 zip 的中央目錄結尾——檔案被截斷了，重抓一次")
+        return "xlsx", "真的 xlsx（zip）", bad
+
+    if head.startswith(OLE2_SIG):
+        return "xls", "舊版 .xls（OLE2 複合文件），需要 xlrd 才讀得了", bad
+
+    low = head.lower()
+    if SML_NS in head:
+        if b"</workbook>" not in tail.lower():
+            bad.append("XML 沒有收尾的 </Workbook>——檔案被截斷了，重抓一次")
+        return "sml", "Excel 2003 XML（SpreadsheetML），本工具讀得了", bad
+
+    if b"mime-version:" in low or b"multipart/related" in low:
+        bad.append("本工具讀不了 MHTML。在 SAP 匯出時改選"
+                   "「試算表」而不是「Excel（MHTML 格式）」")
+        return "mhtml", "MHTML（Excel 的網頁封存格式）", bad
+
+    if b"<html" in low or b"<!doctype html" in low or b"<table" in low:
+        bad.append("本工具讀不了 HTML。在 SAP 改用「Unconverted」"
+                   "存成 txt，或改選「試算表」")
+        return "html", "HTML 表格（副檔名叫 .xls 只是騙 Excel 開）", bad
+
+    for bom, enc in BOMS:
+        if head.startswith(bom):
+            return "text", f"純文字（{enc}，看 BOM）", bad
+    for enc in FALLBACKS:
+        try:
+            head.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        return "text", f"純文字（看起來像 {enc}）", bad
+
+    return "binary", "認不出來的二進位內容", [
+        "不是 zip、不是 OLE2、不是 XML／HTML，也解不成文字。"
+        "十之八九是下載壞掉，重抓一次"]
+
+
+def kind_report(path):
+    kind, what, bad = file_kind(path)
+    print("=" * 70)
+    print(f"檔案　　：{path}")
+    print(f"大小　　：{path.stat().st_size:,} bytes")
+    print(f"實際格式：{what}")
+    print(f"副檔名　：{path.suffix or '（沒有）'}")
+    if path.suffix.lower() == ".xls" and kind in ("sml", "html", "mhtml"):
+        print("　　　　　→ 副檔名跟內容不符。Excel 會抱怨，但這是正常的 SAP 行為")
+    for line in bad:
+        print(f"問題　　：{line}")
+    if not bad:
+        print("問題　　：沒看出明顯毛病")
+    return kind
+
+
 def main(*argv):
     short = "--short" in argv or "-s" in argv
+    what = "--what" in argv or "-w" in argv
     args = [a for a in argv if not a.startswith("-")]
     p = Path(args[0] if args else ".")
+    if what:
+        files = sorted(f for f in p.iterdir() if f.is_file()) \
+            if p.is_dir() else [p]
+        if not files:
+            sys.exit(f"{p} 底下沒有檔案")
+        for f in files:
+            try:
+                kind_report(f)
+            except Exception as e:
+                print(f"X {f}：{type(e).__name__}: {e}")
+        return 0
     files = sorted(p.glob("*.txt")) if p.is_dir() else [p]
     if not files:
         sys.exit(f"{p} 底下沒有 .txt")

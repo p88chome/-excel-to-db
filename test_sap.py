@@ -1480,3 +1480,149 @@ def test_excel_date_cells_with_sentinel_survive_import(tmp_path):
     with sqlite3.connect(db) as c:
         assert c.execute("SELECT DATBI FROM A017 ORDER BY KNUMH").fetchall() \
             == [("2026-12-31",), ("9999-12-31",)]
+
+
+# --- 日文系統：副檔名騙人、編碼是 Shift-JIS -----------------------------
+
+# SAP 的「匯出成試算表」常常把 SpreadsheetML 存成 .xls。Excel 只跳一個
+# 「格式與副檔名不符」照樣開得起來，pandas.read_excel 直接死在
+# 「Excel file format cannot be determined」——使用者看到的就是「開不了」。
+
+JP_SML = """<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+ <Worksheet ss:Name="EKPO">
+  <Table>
+   <Row>
+    <Cell><Data ss:Type="String">EBELN</Data></Cell>
+    <Cell><Data ss:Type="String">TXZ01</Data></Cell>
+   </Row>
+   <Row>
+    <Cell><Data ss:Type="String">4500000001</Data></Cell>
+    <Cell><Data ss:Type="String">ウエハー 12インチ</Data></Cell>
+   </Row>
+   <Row>
+    <Cell><Data ss:Type="String">4500000002</Data></Cell>
+    <Cell><Data ss:Type="String">半導体製造装置</Data></Cell>
+   </Row>
+  </Table>
+ </Worksheet>
+</Workbook>
+"""
+
+JAPANESE = ["ウエハー 12インチ", "半導体製造装置"]
+
+
+@pytest.mark.parametrize("name", ["EKPO.xls", "EKPO.xlsx", "EKPO.xml"])
+def test_spreadsheetml_is_read_whatever_the_extension_says(tmp_path, name):
+    p = tmp_path / name
+    p.write_text(JP_SML, encoding="utf-8")
+    assert core.read(p)["TXZ01"].tolist() == JAPANESE
+    assert core.count_rows(p) == 2
+
+
+def test_real_xlsx_is_not_mistaken_for_spreadsheetml(tmp_path):
+    p = tmp_path / "real.xlsx"
+    pd.DataFrame({"EBELN": ["4500000001"], "TXZ01": ["WAFER"]}).to_excel(
+        p, index=False)
+    assert core.is_spreadsheetml(p) is False
+    assert core.read(p)["TXZ01"].tolist() == ["WAFER"]
+
+
+def test_spreadsheetml_named_xls_survives_import(tmp_path):
+    root = tmp_path / "data" / "EKPO"
+    root.mkdir(parents=True)
+    (root / "jan.xls").write_text(JP_SML, encoding="utf-8")
+
+    t = core.scan(tmp_path / "data")[0]
+    assert t.ok, t.error
+    assert t.rows == 2
+    db = tmp_path / "out.db"
+    assert core.import_table(core.connect(f"sqlite:///{db}"), t) == 2
+    with sqlite3.connect(db) as c:
+        assert [r[0] for r in c.execute(
+            "SELECT TXZ01 FROM EKPO ORDER BY EBELN")] == JAPANESE
+
+
+JP_TXT = ("Dynamic List Display\n"
+          "\n"
+          "EBELN\tTXZ01\n"
+          "4500000001\tウエハー 12インチ\n"
+          "4500000002\t半導体製造装置\n")
+
+
+@pytest.mark.parametrize("encoding", ["cp932", "utf-8-sig", "utf-16", "utf-8"])
+def test_japanese_txt_decodes(tmp_path, encoding):
+    # cp932 少了的話 cp950 會拒絕、cp1252 也拒絕，一路掉到 latin-1，
+    # 整份變亂碼而且不報錯
+    p = tmp_path / "EKPO.txt"
+    p.write_bytes(JP_TXT.encode(encoding))
+    assert core.read(p)["TXZ01"].tolist() == JAPANESE
+
+
+def test_traditional_chinese_still_wins_over_cp932(tmp_path):
+    # cp932 排在 cp950 後面，中文檔不能被日文編碼接走
+    text = ("Dynamic List Display\n\nEBELN\tTXZ01\n"
+            "4500000001\t晶圓十二吋\n4500000002\t半導體製造設備\n")
+    p = tmp_path / "EKPO.txt"
+    p.write_bytes(text.encode("cp950"))
+    assert core.read(p)["TXZ01"].tolist() == ["晶圓十二吋", "半導體製造設備"]
+
+
+# --- 這個檔到底是什麼（sniff.py --what）--------------------------------
+
+# Excel 說「我們發現部分內容有問題，要盡可能嘗試復原嗎」然後復原也失敗，
+# 代表檔案本身壞了或根本不是 Excel 格式。認內容不認副檔名才問得出來。
+
+def test_file_kind_tells_real_format_from_extension(tmp_path):
+    import sniff
+    sml = ('<?xml version="1.0"?>\n<Workbook '
+           'xmlns="urn:schemas-microsoft-com:office:spreadsheet">'
+           '<Worksheet><Table><Row><Cell><Data>A</Data></Cell></Row>'
+           '</Table></Worksheet></Workbook>')
+    cases = {
+        "sml.xls": (sml, "sml"),
+        "mhtml.xls": ("MIME-Version: 1.0\nContent-Type: multipart/related;"
+                      " boundary=x\n", "mhtml"),
+        "page.xls": ("<html><body><table><tr><td>A</td></tr></table>"
+                     "</body></html>", "html"),
+    }
+    for name, (body, want) in cases.items():
+        p = tmp_path / name
+        p.write_text(body, encoding="utf-8")
+        assert sniff.file_kind(p)[0] == want, name
+
+    real = tmp_path / "real.xlsx"
+    pd.DataFrame({"A": [1]}).to_excel(real, index=False)
+    assert sniff.file_kind(real)[0] == "xlsx"
+
+
+def test_file_kind_spots_a_truncated_download(tmp_path):
+    import sniff
+    real = tmp_path / "real.xlsx"
+    pd.DataFrame({"A": [1]}).to_excel(real, index=False)
+
+    cut = tmp_path / "cut.xlsx"
+    cut.write_bytes(real.read_bytes()[:400])
+    kind, _, bad = sniff.file_kind(cut)
+    assert kind == "xlsx" and any("截斷" in b for b in bad)
+
+    half = tmp_path / "half.xls"
+    half.write_text('<?xml version="1.0"?>\n<Workbook '
+                    'xmlns="urn:schemas-microsoft-com:office:spreadsheet">'
+                    "<Worksheet><Table><Row>", encoding="utf-8")
+    kind, _, bad = sniff.file_kind(half)
+    assert kind == "sml" and any("截斷" in b for b in bad)
+
+    empty = tmp_path / "empty.xls"
+    empty.write_bytes(b"")
+    assert sniff.file_kind(empty)[0] == "empty"
+
+
+def test_sniff_knows_shift_jis_too(tmp_path):
+    import sniff
+    p = tmp_path / "jp.txt"
+    p.write_bytes("EBELN\tTXZ01\n4500000001\tウエハー\n".encode("cp932"))
+    assert sniff.file_kind(p)[0] == "text"
+    assert sniff.sniff_encoding(p.read_bytes())[0] == "cp932"

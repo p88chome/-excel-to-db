@@ -4,3 +4,4 @@ pandas==2.3.3
 SQLAlchemy==2.0.52
 pyodbc==5.3.0
 openpyxl==3.1.5
+xlrd==2.0.2                      # 舊版 .xls（BIFF），SAP 也會吐這種
