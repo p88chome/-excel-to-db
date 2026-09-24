@@ -881,6 +881,29 @@ def groups(root):
             yield p.stem, [p], []
 
 
+def broken_files(files):
+    """讀不了的檔案到底是什麼格式，講人話。沒有就回空字串。
+
+    「Excel file format cannot be determined」這種訊息對使用者沒有意義，
+    尤其是拿到打包版、不會開終端機的人。診斷邏輯在 sniff.py（那支刻意
+    只用標準函式庫，好單獨複製到遠端機器），這裡延後 import：sniff 會
+    反過來跟 core 拿代碼欄位清單，寫在模組層會繞成迴圈。
+    """
+    try:
+        from sniff import file_kind
+    except Exception:                               # noqa: BLE001
+        return ""
+    notes = []
+    for f in files:
+        try:
+            _, what, bad = file_kind(f)
+        except OSError:
+            continue
+        if bad:
+            notes.append(f"{f.name} 其實是{what}。{bad[0]}")
+    return "\n".join(notes)
+
+
 def scan(root, cfg=None):
     """掃描資料夾，每個檔只讀前 PREVIEW_ROWS 列，回傳每張表的預覽資訊。"""
     txt_opts = (cfg or {}).get("txt", {})
@@ -914,6 +937,9 @@ def scan(root, cfg=None):
                 t.rows = sum(count_rows(f, t.opts) for f in files)
         except Exception as e:
             t.error = f"{type(e).__name__}: {e}"
+            why = broken_files(files)
+            if why:
+                t.error += "\n" + why
         tables.append(t)
     return tables
 
