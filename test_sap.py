@@ -1147,9 +1147,9 @@ def test_pinned_decimal_forces_thousands_text_column(tmp_path):
 
 def test_thousands_text_column_still_gets_widened(tmp_path):
     # 指定 DECIMAL(18,2) 但實際有 4 位小數，不能讓 SQL Server 安靜四捨五入
-    df = pd.DataFrame({"KBETR": ["1,087.1234"]})
+    df = pd.DataFrame({"KBETR": ["1,087.125"]})
     types, changed, conflicts = core.fit_types(df, {"KBETR": "DECIMAL(18,2)"})
-    assert changed["KBETR"] == "DECIMAL(18,4)"
+    assert changed["KBETR"] == "DECIMAL(18,3)"
 
 
 def test_second_batch_with_thousands_appends_to_first(tmp_path):
@@ -1175,3 +1175,89 @@ def test_second_batch_with_thousands_appends_to_first(tmp_path):
     with sqlite3.connect(db) as c:
         assert c.execute("SELECT WRBTR FROM A ORDER BY BELNR").fetchall() \
             == [(987.65,), (1087.0,), (23456.78,)]
+
+
+# --- 小數位上限 ---------------------------------------------------------
+
+# 金額 2 位、數量 3 位是 SAP 的常態。再多的猜 DECIMAL 只會被 SQL Server
+# 安靜地四捨五入掉，所以留成文字——值是完整的，要算再在 SQL 端 CAST。
+
+@pytest.mark.parametrize("values, spec", [
+    ([1.5, 2.25], "DECIMAL(18,2)"),
+    ([1.5, 2.125], "DECIMAL(18,3)"),
+    ([12.500, 3.125], "DECIMAL(18,3)"),
+])
+def test_two_and_three_decimals_stay_decimal(values, spec):
+    assert core.infer(pd.Series(values)) == spec
+
+
+@pytest.mark.parametrize("values", [[1.1234], [1.123456], [1.12345678901]])
+def test_more_than_three_decimals_becomes_text(values):
+    assert core.infer(pd.Series(values)).startswith("NVARCHAR")
+
+
+def test_three_decimals_is_in_the_dropdown():
+    assert "DECIMAL(18,3)" in core.TYPE_CHOICES
+    assert "FLOAT" in core.TYPE_CHOICES      # 不自動判，但還是選得到
+
+
+def test_widening_stops_at_three_decimals():
+    # DECIMAL(18,2) 放不下 4 位，但也不放寬成 DECIMAL(18,4)
+    _, changed, _ = core.fit_types(pd.DataFrame({"KBETR": [1.1234]}),
+                                   {"KBETR": "DECIMAL(18,2)"})
+    assert changed["KBETR"].startswith("NVARCHAR")
+
+
+def test_explicit_four_decimals_is_still_honoured():
+    # 上限只管「用猜的」。config.json 指定死 DECIMAL(18,4) 就照做，
+    # 不報衝突也不改掉——那是使用者明確的選擇。
+    fitted, changed, conflicts = core.fit_types(
+        pd.DataFrame({"KBETR": [1.1234]}), {"KBETR": "DECIMAL(18,4)"},
+        pinned={"KBETR"})
+    assert fitted["KBETR"] == "DECIMAL(18,4)"
+    assert not changed and not conflicts
+
+
+def test_three_decimal_quantity_survives_import(tmp_path):
+    root = tmp_path / "data" / "LIPS"
+    root.mkdir(parents=True)
+    pd.DataFrame({"VBELN": ["0080001234", "0080001235"],
+                  "LFIMG": ["1,087.125", "23,456.500"]}).to_excel(
+                      root / "jan.xlsx", index=False)
+    t = core.scan(tmp_path / "data")[0]
+    assert t.dtypes["LFIMG"] == "DECIMAL(18,3)"
+
+    db = tmp_path / "out.db"
+    assert core.import_table(core.connect(f"sqlite:///{db}"), t) == 2
+    with sqlite3.connect(db) as c:
+        assert c.execute("SELECT LFIMG FROM LIPS ORDER BY VBELN").fetchall() \
+            == [(1087.125,), (23456.5,)]
+
+
+def test_four_decimal_column_keeps_every_digit(tmp_path):
+    # 留成文字的重點是不能掉位數，不是型別好不好看
+    root = tmp_path / "data" / "KONV"
+    root.mkdir(parents=True)
+    pd.DataFrame({"KNUMV": ["0000012345"],
+                  "KBETR": ["1,087.1234"]}).to_excel(
+                      root / "jan.xlsx", index=False)
+    t = core.scan(tmp_path / "data")[0]
+    assert t.dtypes["KBETR"].startswith("NVARCHAR")
+
+    db = tmp_path / "out.db"
+    assert core.import_table(core.connect(f"sqlite:///{db}"), t) == 1
+    with sqlite3.connect(db) as c:
+        assert c.execute("SELECT KBETR FROM KONV").fetchone()[0] == "1087.1234"
+
+
+def test_pinned_decimal_conflict_offers_a_wider_decimal(tmp_path):
+    # 訊息不能只說「需要 NVARCHAR」——自己指定 DECIMAL(18,4) 也是解法
+    root = tmp_path / "data" / "KONV"
+    root.mkdir(parents=True)
+    pd.DataFrame({"KNUMV": ["0000012345"], "KBETR": ["1,087.1234"]}).to_excel(
+        root / "jan.xlsx", index=False)
+    t = core.apply_overrides(core.scan(tmp_path / "data"),
+                             {"dtypes": {"KONV": {"KBETR": "DECIMAL(18,2)"}}})[0]
+    with pytest.raises(ValueError, match=r"DECIMAL\(18,4\)") as e:
+        core.import_table(core.connect(f"sqlite:///{tmp_path / 'o.db'}"), t)
+    assert "KBETR 指定 DECIMAL(18,2)" in str(e.value)

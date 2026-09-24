@@ -424,10 +424,15 @@ SQL_PASSWORD=
 | 資料 | 推斷結果 |
 |---|---|
 | 整數（int32 範圍內／超出） | `INT` / `BIGINT` |
-| 小數 | `DECIMAL(18, 實際小數位數)`，超過 6 位則用 `FLOAT` |
+| 小數 | `DECIMAL(18,2)` / `DECIMAL(18,3)`；超過 3 位小數留成 `NVARCHAR` |
 | 日期／日期時間（含 CSV 裡的字串） | `DATE` / `DATETIME` |
 | 布林 | `BIT` |
 | 文字 | `NVARCHAR(最大長度 × 2)`，最少 255；超過 4000 給 `NVARCHAR(MAX)` |
+
+超過 3 位小數不自動給 `DECIMAL`：金額 2 位、數量 3 位是 SAP 的常態，再多的
+多半是匯率或算出來的欄位，宣告幾位都會被 SQL Server 安靜地四捨五入掉，留成
+文字至少值是完整的，要算再在 SQL 端 `CAST`。真的要留成數字，在 `config.json`
+的 `dtypes` 自己指定 `DECIMAL(18,4)`，程式就照做，不會改掉也不會報衝突。
 
 ### 型別是抽樣判的，會再校正一次
 

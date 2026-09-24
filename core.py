@@ -31,7 +31,7 @@ CONFIG = Path("config.json")
 
 # UI 下拉選單的選項。順序即顯示順序。
 TYPE_CHOICES = [
-    "INT", "BIGINT", "DECIMAL(18,2)", "FLOAT", "BIT",
+    "INT", "BIGINT", "DECIMAL(18,2)", "DECIMAL(18,3)", "FLOAT", "BIT",
     "DATE", "DATETIME",
     "NVARCHAR(50)", "NVARCHAR(255)", "NVARCHAR(4000)", "NVARCHAR(MAX)",
 ]
@@ -647,6 +647,18 @@ TEXT_FLOOR = 255
 TEXT_LIMIT = 4000
 
 
+# 小數位超過這個數就不猜 DECIMAL 了。金額 2 位、數量 3 位是 SAP 的常態，
+# 再多的多半是匯率或算出來的欄位，宣告幾位都會被 SQL Server 安靜地
+# 四捨五入掉。留成文字至少值是完整的，要算再在 SQL 端 CAST。
+MAX_SCALE = 3
+
+
+def scale_of(numbers):
+    """整欄實際用到幾位小數。整欄都沒有小數點回 None。"""
+    used = numbers.astype(str).str.extract(r"\.(\d+)$")[0].str.len().max()
+    return None if pd.isna(used) else int(used)
+
+
 def text_spec(longest):
     """依實際最長長度決定文字型別。留一倍成長空間。"""
     if longest > TEXT_LIMIT:
@@ -694,12 +706,12 @@ def infer(series):
         return "INT" if s.min() >= -2**31 and s.max() < 2**31 else "BIGINT"
     if kind == "f":
         # 量實際用到幾位小數，避免金額被 DECIMAL(18,2) 截掉。
-        decimals = s.astype(str).str.extract(r"\.(\d+)$")[0].str.len().max()
-        if pd.isna(decimals):
+        used = scale_of(s)
+        if used is None:
             return "DECIMAL(18,2)"
-        if decimals > 6:
-            return "FLOAT"
-        return f"DECIMAL(18,{max(int(decimals), 2)})"
+        if used > MAX_SCALE:
+            return text_spec(int(s.astype(str).str.len().max()))
+        return f"DECIMAL(18,{max(used, 2)})"
     if kind == "M":
         return "DATE" if (s.dt.normalize() == s).all() else "DATETIME"
 
@@ -939,11 +951,13 @@ def better_spec(series, spec):
         numbers = as_numbers(values)
         if numbers.empty:
             return None
-        used = numbers.astype(str).str.extract(r"\.(\d+)$")[0].str.len().max()
-        if pd.isna(used) or int(used) <= int(m.group(2)):
+        used = scale_of(numbers)
+        if used is None or used <= int(m.group(2)):
             return None
         # 小數位不夠不會報錯，SQL Server 會安靜地四捨五入掉
-        return "FLOAT" if int(used) > 6 else f"DECIMAL(18,{int(used)})"
+        if used > MAX_SCALE:
+            return text_spec(int(values.astype(str).str.len().max()))
+        return f"DECIMAL(18,{used})"
 
     return None
 
@@ -993,9 +1007,18 @@ def import_table(engine, table, mode="replace", overrides=None, progress=None):
     if conflicts:
         detail = "、".join(f"{c} 指定 {old}，但實際資料需要 {new}"
                            for c, (old, new) in conflicts.items())
+        # 小數位太多而被推去 NVARCHAR 的，改成文字不是唯一的解法——
+        # 訊息只寫「需要 NVARCHAR」會害人以為不能留成數字。
+        rounded = any(old.upper().startswith(("DECIMAL", "NUMERIC"))
+                      and new.upper().startswith("NVARCHAR")
+                      for old, new in conflicts.values())
+        hint = (f"小數位超過 {MAX_SCALE} 位就不自動給 DECIMAL 了；"
+                "要留成數字就自己指定夠用的位數，例如 DECIMAL(18,4)。"
+                if rounded else "")
         raise ValueError(
             f"指定的型別放不下：{detail}。"
-            "請在 config.json 的 dtypes 調整，或把該欄的指定拿掉讓程式自己判斷。")
+            "請在 config.json 的 dtypes 調整，或把該欄的指定拿掉讓程式自己判斷。"
+            + hint)
     table.dtypes.update(table.widened)
 
     say("轉換型別…")
