@@ -1,4 +1,4 @@
--- 檢查 stg 表（excel-to-db 匯進來的 SAP 原表）齊不齊。
+﻿-- 檢查 stg 表（excel-to-db 匯進來的 SAP 原表）齊不齊。
 -- 在 02_load_procedures.sql 之前跑：程序引用了不存在的欄位會建不起來，
 -- 錯誤訊息只說 Invalid column name，不會說是哪張表少了什麼。
 --
