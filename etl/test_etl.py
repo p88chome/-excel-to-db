@@ -226,6 +226,13 @@ r = one("SELECT LineItem, PoNumber, PoItem, DebitCreditInd FROM fin.AccountsPaya
 check("AP 只留供應商行", len(r), 1)
 check("AP 從 GR/IR 行帶 PO 號", (r[0].PoNumber, r[0].PoItem), ("4500000001", "00010"))
 
+# ---- MARD 有一筆儲位被弄空：照樣載入，StorLoc 存空字串 ----
+ins("MARD", [dict(MATNR="000000000000012345", WERKS="1200", LGORT=None, LABST=7)])
+cur.execute("EXEC etl.Load_InventoryBalance")
+r = one("SELECT StockQty FROM inv.InventoryBalance WHERE StorLoc = ''")
+check("儲位 NULL 的庫存不會讓整張失敗、數量留著", [float(x.StockQty) for x in r], [7.0])
+cur.execute("DELETE dbo.MARD WHERE LGORT IS NULL")
+
 # ---- 補上 T024D 再跑一次 ----
 cur.execute("CREATE TABLE dbo.T024D (WERKS NVARCHAR(4), DISPO NVARCHAR(3), DSNAM NVARCHAR(18))")
 cur.execute("INSERT dbo.T024D VALUES ('1100', '001', N'陳控制員')")

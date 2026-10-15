@@ -428,7 +428,9 @@ BEGIN
         PriceUnit, PriceControl, SafetyStock, ReorderPoint, MaxStockLevel, MrpType,
         MrpController, ProcurementType, Planner, AbcIndicator, SnapshotDate)
     SELECT
-        d.MATNR, d.WERKS, d.LGORT, t.MAKTX, m.MATKL, m.MEINS, d.LABST,
+        -- 正常不會有空白，但匯入時可能被弄空（例如儲位代碼剛好是 NA）；
+        -- 存成空字串讓這筆庫存留下來、查得到，而不是整張表失敗
+        ISNULL(d.MATNR, ''), ISNULL(d.WERKS, ''), ISNULL(d.LGORT, ''), t.MAKTX, m.MATKL, m.MEINS, d.LABST,
         d.INSME, d.SPEME, d.UMLME, b.SALK3, b.STPRS, b.VERPR,
         b.PEINH, b.VPRSV, c.EISBE, c.MINBE, c.MABST, c.DISMM,
         c.DISPO, c.BESKZ, NULL, c.MAABC, CAST(GETDATE() AS date)
