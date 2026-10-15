@@ -3,10 +3,17 @@
 -- 錯誤訊息只說 Invalid column name，不會說是哪張表少了什麼。
 --
 -- 結果是空的就代表都齊了。少的欄位要回 SAP 重新下載時勾選。
+--
+-- 還沒辦法重新下載、想先組起來的話，把 @fill 改成 1 再跑一次：
+-- 「表在、欄位不在」的會補成空欄（ALTER TABLE ADD ... NULL），程序就建得起來，
+-- 那幾欄的資料先是 NULL。之後重新匯入時 excel-to-db 會整張重建 stg 表，補的空欄跟著消失。
+-- 整張表不存在的不會補，要先匯入。
+--
 -- excel-to-db 預設匯到 dbo；放在別的 schema 就改下面的 @stg。
 
 SET NOCOUNT ON;
 DECLARE @stg sysname = N'dbo';
+DECLARE @fill bit = 0;      -- 1 = 把缺的欄位補成空欄
 
 DECLARE @need TABLE (tbl sysname, col sysname, optional bit DEFAULT 0);
 INSERT @need (tbl, col) VALUES
@@ -87,19 +94,52 @@ INSERT @need (tbl, col) VALUES
 ('BSEG','LIFNR'),('BSEG','ZUONR'),('BSEG','SGTXT'),('BSEG','HKONT'),('BSEG','KOSTL'),
 ('BSEG','WRBTR'),('BSEG','DMBTR'),('BSEG','SHKZG'),('BSEG','ZTERM'),('BSEG','ZFBDT'),
 ('BSEG','ZLSCH'),('BSEG','ZLSPR'),('BSEG','AUGBL'),('BSEG','AUGDT'),('BSEG','EBELN'),
-('BSEG','EBELP');
+('BSEG','EBELP'),
+-- KOART、SHKZG 沒有資料時用記帳碼推：21~39 是供應商行，2x 借、3x 貸
+('BSEG','BSCHL');
 
 -- 沒有也能跑，只是對應的欄位會是 NULL
 INSERT @need (tbl, col, optional) VALUES
 ('T024D','WERKS',1),('T024D','DISPO',1),('T024D','DSNAM',1);
 
-SELECT n.tbl AS [stg 表], n.col AS [欄位],
-       CASE WHEN t.object_id IS NULL THEN N'整張表不存在' ELSE N'缺欄位' END AS [狀況],
-       CASE WHEN n.optional = 1 THEN N'選用（沒有就留 NULL）' ELSE N'必要' END AS [影響]
+SELECT n.tbl, n.col, n.optional, t.object_id
+INTO #missing
 FROM @need n
 LEFT JOIN sys.tables t
        ON t.name = n.tbl AND t.schema_id = SCHEMA_ID(@stg)
 LEFT JOIN sys.columns c
        ON c.object_id = t.object_id AND c.name = n.col
-WHERE c.column_id IS NULL
-ORDER BY n.optional, n.tbl, n.col;
+WHERE c.column_id IS NULL;
+
+IF @fill = 1
+BEGIN
+    -- 型別照 excel-to-db 匯入的結果：日期 DATE、金額數量 DECIMAL、其餘文字
+    DECLARE @dates nvarchar(max) = N'BEDAT EINDT BUDAT BADAT LFDAT ERDAT CPUDT BLDAT UDATE ERSDA DATAB DATBI ZFBDT AUGDT',
+            @nums  nvarchar(max) = N'WKURS MENGE NETPR PEINH NETWR DMBTR PREIS BRGEW NTGEW VOLUM APLFZ NORBM KBETR KPEIN LABST INSME SPEME UMLME SALK3 STPRS VERPR EISBE MINBE MABST WRBTR',
+            @tbl sysname, @col sysname, @sql nvarchar(400);
+    DECLARE cols CURSOR LOCAL FAST_FORWARD FOR
+        SELECT tbl, col FROM #missing WHERE object_id IS NOT NULL;
+    OPEN cols;
+    FETCH NEXT FROM cols INTO @tbl, @col;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @sql = N'ALTER TABLE ' + QUOTENAME(@stg) + N'.' + QUOTENAME(@tbl) + N' ADD ' + QUOTENAME(@col) + N' '
+                 + CASE WHEN @col IN (SELECT value FROM STRING_SPLIT(@dates, N' ')) THEN N'DATE'
+                        WHEN @col IN (SELECT value FROM STRING_SPLIT(@nums, N' ')) THEN N'DECIMAL(18,3)'
+                        ELSE N'NVARCHAR(100)' END
+                 + N' NULL';
+        EXEC (@sql);
+        FETCH NEXT FROM cols INTO @tbl, @col;
+    END;
+    CLOSE cols;
+END;
+
+SELECT tbl AS [stg 表], col AS [欄位],
+       CASE WHEN object_id IS NULL THEN N'整張表不存在'
+            WHEN @fill = 1         THEN N'缺欄位 → 已補成空欄'
+            ELSE N'缺欄位' END AS [狀況],
+       CASE WHEN optional = 1 THEN N'選用（沒有就留 NULL）' ELSE N'必要' END AS [影響]
+FROM #missing
+ORDER BY optional, tbl, col;
+
+DROP TABLE #missing;

@@ -428,6 +428,8 @@ GO
 -- ======================================================================
 -- fin.AccountsPayable：只留供應商行
 -- 供應商行本身不帶 PO 號，PO 號在同一張傳票的 GR/IR 行上，從那裡帶過來。
+-- KOART、SHKZG 沒下載到時從記帳碼 BSCHL 推（21~39 是供應商行，2x 借、3x 貸）；
+-- BSCHL 也沒有，就用「LIFNR 不為空」當供應商行，借貸別留 NULL。
 -- ======================================================================
 CREATE OR ALTER PROCEDURE etl.Load_AccountsPayable AS
 BEGIN
@@ -450,7 +452,7 @@ BEGIN
     SELECT
         h.BUKRS, h.BELNR, h.GJAHR, s.BUZEI, h.BLART, h.BUDAT,
         h.BLDAT, h.CPUDT, h.USNAM, s.LIFNR, v.NAME1, h.XBLNR, s.ZUONR,
-        s.SGTXT, s.HKONT, s.KOSTL, h.WAERS, s.WRBTR, s.DMBTR, s.SHKZG,
+        s.SGTXT, s.HKONT, s.KOSTL, h.WAERS, s.WRBTR, s.DMBTR, x.shkzg,
         s.ZTERM, s.ZFBDT, s.ZLSCH, s.ZLSPR, s.AUGBL, s.AUGDT,
         COALESCE(NULLIF(s.EBELN, ''), po.EBELN),
         IIF(ISNULL(s.EBELN, '') <> '', s.EBELP, po.EBELP)
@@ -459,7 +461,15 @@ BEGIN
     LEFT JOIN dbo.LFA1 v ON v.LIFNR = s.LIFNR
     LEFT JOIN po         ON po.BUKRS = s.BUKRS AND po.BELNR = s.BELNR AND po.GJAHR = s.GJAHR
                         AND po.rn = 1
-    WHERE s.KOART = 'K';
+    CROSS APPLY (SELECT
+        COALESCE(NULLIF(s.KOART, ''),
+                 CASE WHEN s.BSCHL BETWEEN '21' AND '39' THEN 'K'
+                      WHEN ISNULL(s.BSCHL, '') <> ''     THEN '-' END,
+                 IIF(ISNULL(s.LIFNR, '') <> '', 'K', '-')) AS koart,
+        COALESCE(NULLIF(s.SHKZG, ''),
+                 CASE LEFT(s.BSCHL, 1) WHEN '2' THEN 'S' WHEN '3' THEN 'H' END) AS shkzg
+    ) x
+    WHERE x.koart = 'K';
 
     COMMIT;
 END;

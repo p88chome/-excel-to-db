@@ -237,6 +237,39 @@ print("  錯誤訊息：", bad[0][3])
 check("失敗的表沒有被清空成半套（交易回滾）",
       one("SELECT COUNT(*) FROM fin.AccountsPayable")[0][0], 1)
 
+# ---- 欄位沒下載齊：BSEG 沒有 KOART/SHKZG、EBAN 少一堆，用 @fill = 1 補空欄先組起來 ----
+cur.execute("EXEC sp_rename 'dbo.BSEG_x', 'BSEG'")
+cur.execute("ALTER TABLE dbo.BSEG DROP COLUMN KOART, SHKZG")
+cur.execute("UPDATE dbo.BSEG SET BSCHL = IIF(BUZEI = '001', '31', '86')")
+EBAN_GONE = ["BADAT", "EKORG", "FLIEF", "KNTTP", "LFDAT", "MEINS", "MENGE", "PREIS", "WAERS"]
+cur.execute(f"ALTER TABLE dbo.EBAN DROP COLUMN {', '.join(EBAN_GONE)}")
+cur.execute("DROP TABLE dbo.T024D")
+fill = Path(__file__).with_name("_fill.sql")
+fill.write_text((SQL / "00_check_staging.sql").read_text("utf-8-sig")
+                .replace("DECLARE @fill bit = 0;", "DECLARE @fill bit = 1;"), "utf-8-sig")
+try:
+    out = sqlcmd("-i", str(fill), "-h", "-1", "-W", "-s", "|", db=DB)
+finally:
+    fill.unlink()
+filled = sorted(l.split("|")[:2] for l in out.splitlines() if "已補成空欄" in l)
+check("@fill 補上缺的欄位", filled,
+      sorted([["BSEG", "KOART"], ["BSEG", "SHKZG"]] + [["EBAN", c] for c in EBAN_GONE]))
+check("補了之後只剩選用的 T024D", all("T024D" in l for l in out.splitlines()
+                                      if "|" in l and "已補成空欄" not in l), True)
+sqlcmd("-i", str(SQL / "02_load_procedures.sql"), db=DB)      # 程序建得起來
+res = cur.execute("EXEC etl.LoadAll").fetchall()
+check("缺欄位時全部照樣載入", [r[0] for r in res if r[3] != "OK"], [])
+r = one("SELECT LineItem, DebitCreditInd, PoNumber FROM fin.AccountsPayable")
+check("沒有 KOART 時用 BSCHL 31 判定供應商行、推出貸方", [(x.LineItem, x.DebitCreditInd) for x in r],
+      [("001", "H")])
+cur.execute("UPDATE dbo.BSEG SET BSCHL = NULL")
+cur.execute("EXEC etl.Load_AccountsPayable")
+r = one("SELECT LineItem, DebitCreditInd FROM fin.AccountsPayable")
+check("BSCHL 也沒有時用 LIFNR 判定，借貸別留 NULL", [(x.LineItem, x.DebitCreditInd) for x in r],
+      [("001", None)])
+r = one("SELECT ReqQty, PrDate, Vendor FROM prc.PurchaseRequisition WHERE PrNumber='1000000001'")[0]
+check("EBAN 缺的欄位是 NULL", (r.ReqQty, r.PrDate, r.Vendor), (None, None, None))
+
 cn.close()
 sqlcmd("-Q", f"ALTER DATABASE {DB} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {DB};")
 print(f"\n{sum(checks)}/{len(checks)} 通過")
