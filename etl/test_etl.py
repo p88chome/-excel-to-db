@@ -72,7 +72,9 @@ ins("LFA1", [dict(LIFNR="0000100001", NAME1="台灣測試股份有限公司", LA
              dict(LIFNR="0000100002", NAME1="日本テスト株式会社", LAND1="JP")])
 ins("LFB1", [dict(LIFNR="0000100001", BUKRS=b, ZTERM="NT30", ZAHLS="A" if b == "1000" else None)
              for b in ("1000", "2000", "3000")])
-ins("LFM1", [dict(LIFNR="0000100001", EKORG=e, SPERM=None, VERKF="王小明") for e in ("TW01", "TW02")])
+ins("LFM1", [dict(LIFNR="0000100001", EKORG=e, ZTERM="NT60", VERKF="王小明") for e in ("TW01", "TW02")])
+# TW01 屬於公司別 1000；TW02 是跨公司的採購組織，沒有公司別
+ins("T024E", [dict(EKORG="TW01", BUKRS="1000"), dict(EKORG="TW02", BUKRS=None)])
 ins("MAKT", [dict(MATNR="000000000000012345", SPRAS="ZF", MAKTX="晶圓載具"),
              dict(MATNR="000000000000012345", SPRAS="E", MAKTX="Wafer carrier")])
 ins("MARA", [dict(MATNR="000000000000012345", MTART="ROH", MATKL="A01", MEINS="EA")])
@@ -186,14 +188,20 @@ r = one("SELECT Vendor, TableKey, FieldName, ChangeTime FROM mst.VendorChangeHis
 check("異動：同一次改兩個公司別不撞鍵、NAME1 被篩掉、MATERIAL 類被篩掉", len(r), 2)
 check("UTIME 134501 轉成時間", str(r[0].ChangeTime), "13:45:01")
 
-check("Vendor 一個供應商一列", one("SELECT COUNT(*) FROM mst.Vendor")[0][0], 2)
-check("VendorCompany = LFB1 列數（不是 3×2）", one("SELECT COUNT(*) FROM mst.VendorCompany")[0][0], 3)
-check("VendorPurchOrg = LFM1 列數", one("SELECT COUNT(*) FROM mst.VendorPurchOrg")[0][0], 2)
-check("PaymentBlock 來自 ZAHLS",
-      one("SELECT PaymentBlock FROM mst.VendorCompany WHERE CompanyCode='1000'")[0][0], "A")
-check("CentralPostingBlock 來自 LFA1.SPERR",
-      one("SELECT CentralPostingBlock FROM mst.Vendor WHERE Vendor='0000100001'")[0][0], "X")
-check("SalesPerson 中文", one("SELECT TOP 1 SalesPerson FROM mst.VendorPurchOrg")[0][0], "王小明")
+r = one("SELECT Vendor, PurchOrg, CompanyCode, PaymentTerms, PurchOrgPaymentTerms, PaymentBlock, "
+        "VendorRowNo, VendorName, SalesPerson, CentralPostingBlock FROM mst.Vendor ORDER BY Vendor, VendorRowNo")
+check("Vendor 只留真實組合（不是 3×2 笛卡兒積）",
+      [(x.Vendor[-1], x.PurchOrg, x.CompanyCode) for x in r],
+      [("1", "", "2000"), ("1", "", "3000"), ("1", "TW01", "1000"), ("1", "TW02", ""), ("2", "", "")])
+tw01 = next(x for x in r if x.PurchOrg == "TW01")
+check("TW01 帶到公司別 1000 的 LFB1 付款條件與 ZAHLS",
+      (tw01.PaymentTerms, tw01.PaymentBlock), ("NT30", "A"))
+check("PurchOrgPaymentTerms 來自 LFM1", tw01.PurchOrgPaymentTerms, "NT60")
+check("跨公司採購組織沒有 LFB1 資料", next(x for x in r if x.PurchOrg == "TW02").PaymentTerms, None)
+check("VendorRowNo = 1 算家數", sum(x.VendorRowNo == 1 for x in r), 2)
+check("沒有 LFB1/LFM1 的供應商也留著", r[-1].VendorName, "日本テスト株式会社")
+check("CentralPostingBlock 來自 LFA1.SPERR", tw01.CentralPostingBlock, "X")
+check("SalesPerson 中文", tw01.SalesPerson, "王小明")
 
 r = one("SELECT Plant FROM mst.PurchasingInfoRecord ORDER BY Plant")
 check("InfoRecord：空白工廠與 1100 各一列，不撞鍵", [x.Plant for x in r], ["", "1100"])

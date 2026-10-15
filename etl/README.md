@@ -1,6 +1,6 @@
 # 採購風險儀表板 ETL
 
-SAP 原表（excel-to-db 匯進 `dbo`）→ 規格表 v2.3 定義的 14 張業務表（`prc` / `mst` / `inv` / `fin`）。
+SAP 原表（excel-to-db 匯進 `dbo`）→ 規格表 v2.3 定義的 12 張業務表（`prc` / `mst` / `inv` / `fin`）。
 
 ## 在 SSMS 執行
 
@@ -9,7 +9,7 @@ SAP 原表（excel-to-db 匯進 `dbo`）→ 規格表 v2.3 定義的 14 張業�
 | 檔案 | 做什麼 | 什麼時候跑 |
 |---|---|---|
 | `sql/00_check_staging.sql` | 列出 stg 表缺的表或欄位，結果空白就是齊了 | 每次重新下載 SAP 資料後 |
-| `sql/01_create_tables.sql` | 建 schema 和 14 張目標表 | 第一次，或規格改了之後。**會 DROP 重建** |
+| `sql/01_create_tables.sql` | 建 schema 和 12 張目標表 | 第一次，或規格改了之後。**會 DROP 重建** |
 | `sql/02_load_procedures.sql` | 建 `etl.Load_*` 載入程序與 `etl.LoadAll` | 第一次，或程序改了之後 |
 
 之後每次要更新資料：

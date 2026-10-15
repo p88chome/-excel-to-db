@@ -156,59 +156,38 @@ GO
 
 IF OBJECT_ID(N'mst.Vendor', N'U') IS NOT NULL DROP TABLE mst.Vendor;
 CREATE TABLE mst.Vendor (
-    [Vendor]              NVARCHAR(10) NOT NULL,
-    [VendorName]          NVARCHAR(80) NULL,
-    [VendorName2]         NVARCHAR(80) NULL,
-    [SearchTerm]          NVARCHAR(20) NULL,
-    [Country]             NVARCHAR(3) NULL,
-    [Region]              NVARCHAR(3) NULL,
-    [City]                NVARCHAR(35) NULL,
-    [PostalCode]          NVARCHAR(10) NULL,
-    [Address]             NVARCHAR(60) NULL,
-    [Language]            NVARCHAR(2) NULL,
-    [Phone]               NVARCHAR(30) NULL,
-    [Fax]                 NVARCHAR(30) NULL,
-    [TaxNumber]           NVARCHAR(20) NULL,
-    [VendorAccountGroup]  NVARCHAR(4) NULL,
-    [CreatedOn]           DATE NULL,
-    [CreatedBy]           NVARCHAR(12) NULL,
-    [DeletionInd]         NVARCHAR(1) NULL,
-    [CentralPostingBlock] NVARCHAR(1) NULL,
-    [CentralPurchBlock]   NVARCHAR(1) NULL,
-    CONSTRAINT PK_mst_Vendor PRIMARY KEY ([Vendor])
-);
-GO
-
-IF OBJECT_ID(N'mst.VendorCompany', N'U') IS NOT NULL DROP TABLE mst.VendorCompany;
-CREATE TABLE mst.VendorCompany (
-    [Vendor]        NVARCHAR(10) NOT NULL,
-    [CompanyCode]   NVARCHAR(4) NOT NULL,
-    [VendorName]    NVARCHAR(80) NULL,
-    [PaymentTerms]  NVARCHAR(4) NULL,
-    [PaymentMethod] NVARCHAR(10) NULL,
-    [PaymentBlock]  NVARCHAR(1) NULL,
-    [PostingBlock]  NVARCHAR(1) NULL,
-    [DeletionInd]   NVARCHAR(1) NULL,
-    [CreatedOn]     DATE NULL,
-    [CreatedBy]     NVARCHAR(12) NULL,
-    CONSTRAINT PK_mst_VendorCompany PRIMARY KEY ([Vendor], [CompanyCode])
-);
-GO
-
-IF OBJECT_ID(N'mst.VendorPurchOrg', N'U') IS NOT NULL DROP TABLE mst.VendorPurchOrg;
-CREATE TABLE mst.VendorPurchOrg (
-    [Vendor]          NVARCHAR(10) NOT NULL,
-    [PurchOrg]        NVARCHAR(4) NOT NULL,
-    [VendorName]      NVARCHAR(80) NULL,
-    [PurchasingBlock] NVARCHAR(1) NULL,
-    [Incoterms]       NVARCHAR(3) NULL,
-    [OrderCurrency]   NVARCHAR(5) NULL,
-    [SalesPerson]     NVARCHAR(30) NULL,
-    [PaymentTerms]    NVARCHAR(4) NULL,
-    [DeletionInd]     NVARCHAR(1) NULL,
-    [CreatedOn]       DATE NULL,
-    [CreatedBy]       NVARCHAR(12) NULL,
-    CONSTRAINT PK_mst_VendorPurchOrg PRIMARY KEY ([Vendor], [PurchOrg])
+    [Vendor]               NVARCHAR(10) NOT NULL,
+    [CompanyCode]          NVARCHAR(4) NOT NULL,
+    [PurchOrg]             NVARCHAR(4) NOT NULL,
+    [VendorName]           NVARCHAR(80) NULL,
+    [VendorName2]          NVARCHAR(80) NULL,
+    [SearchTerm]           NVARCHAR(20) NULL,
+    [Country]              NVARCHAR(3) NULL,
+    [Region]               NVARCHAR(3) NULL,
+    [City]                 NVARCHAR(35) NULL,
+    [PostalCode]           NVARCHAR(10) NULL,
+    [Address]              NVARCHAR(60) NULL,
+    [Language]             NVARCHAR(2) NULL,
+    [Phone]                NVARCHAR(30) NULL,
+    [Fax]                  NVARCHAR(30) NULL,
+    [TaxNumber]            NVARCHAR(20) NULL,
+    [VendorAccountGroup]   NVARCHAR(4) NULL,
+    [CreatedOn]            DATE NULL,
+    [CreatedBy]            NVARCHAR(12) NULL,
+    [PaymentTerms]         NVARCHAR(4) NULL,
+    [PurchOrgPaymentTerms] NVARCHAR(4) NULL,
+    [PaymentMethod]        NVARCHAR(10) NULL,
+    [PaymentBlock]         NVARCHAR(1) NULL,
+    [PostingBlock]         NVARCHAR(1) NULL,
+    [PurchasingBlock]      NVARCHAR(1) NULL,
+    [DeletionInd]          NVARCHAR(1) NULL,
+    [CentralPostingBlock]  NVARCHAR(1) NULL,
+    [CentralPurchBlock]    NVARCHAR(1) NULL,
+    [Incoterms]            NVARCHAR(3) NULL,
+    [OrderCurrency]        NVARCHAR(5) NULL,
+    [SalesPerson]          NVARCHAR(30) NULL,
+    [VendorRowNo]          INT NULL,
+    CONSTRAINT PK_mst_Vendor PRIMARY KEY ([Vendor], [CompanyCode], [PurchOrg])
 );
 GO
 

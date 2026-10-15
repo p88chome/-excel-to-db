@@ -186,8 +186,12 @@ END;
 GO
 
 -- ======================================================================
--- mst.Vendor / mst.VendorCompany / mst.VendorPurchOrg
--- 原本一張表 LFA1 × LFB1 × LFM1 會變笛卡兒積，拆成三張各自的粒度。
+-- mst.Vendor：一列 = 供應商 × 採購組織 × 公司別，只留真實存在的組合
+--   1. LFM1 的每一列，用 T024E 對到採購組織所屬的公司別，再帶該公司別的 LFB1
+--   2. LFB1 裡沒有被第 1 種涵蓋的公司別（只付款不下 PO 的供應商），PurchOrg 空白
+--   3. LFB1、LFM1 都沒有的供應商，PurchOrg、CompanyCode 都空白
+-- 直接把 LFB1、LFM1 用 LIFNR 接起來會變笛卡兒積（3 個公司別 × 4 個採購組織 = 12 列）。
+-- 一家供應商仍會有多列：只用 Vendor JOIN 會重複，算家數請加 VendorRowNo = 1。
 -- ======================================================================
 CREATE OR ALTER PROCEDURE etl.Load_Vendor AS
 BEGIN
@@ -195,53 +199,40 @@ BEGIN
     BEGIN TRAN;
     TRUNCATE TABLE mst.Vendor;
 
+    WITH po AS (
+        SELECT m.LIFNR, m.EKORG, ISNULL(o.BUKRS, '') AS BUKRS,   -- 跨公司的採購組織沒有公司別
+               m.SPERM, m.INCO1, m.WAERS, m.VERKF, m.ZTERM
+        FROM dbo.LFM1 m
+        LEFT JOIN dbo.T024E o ON o.EKORG = m.EKORG
+    ), keys AS (
+        SELECT LIFNR, EKORG, BUKRS FROM po
+        UNION ALL
+        SELECT b.LIFNR, '', b.BUKRS
+        FROM dbo.LFB1 b
+        WHERE NOT EXISTS (SELECT 1 FROM po WHERE po.LIFNR = b.LIFNR AND po.BUKRS = b.BUKRS)
+        UNION ALL
+        SELECT a.LIFNR, '', ''
+        FROM dbo.LFA1 a
+        WHERE NOT EXISTS (SELECT 1 FROM dbo.LFM1 m WHERE m.LIFNR = a.LIFNR)
+          AND NOT EXISTS (SELECT 1 FROM dbo.LFB1 b WHERE b.LIFNR = a.LIFNR)
+    )
     INSERT INTO mst.Vendor (
-        Vendor, VendorName, VendorName2, SearchTerm, Country, Region, City, PostalCode,
-        Address, Language, Phone, Fax, TaxNumber, VendorAccountGroup, CreatedOn, CreatedBy,
-        DeletionInd, CentralPostingBlock, CentralPurchBlock)
+        Vendor, CompanyCode, PurchOrg, VendorName, VendorName2, SearchTerm, Country, Region,
+        City, PostalCode, Address, Language, Phone, Fax, TaxNumber, VendorAccountGroup,
+        CreatedOn, CreatedBy, PaymentTerms, PurchOrgPaymentTerms, PaymentMethod, PaymentBlock,
+        PostingBlock, PurchasingBlock, DeletionInd, CentralPostingBlock, CentralPurchBlock,
+        Incoterms, OrderCurrency, SalesPerson, VendorRowNo)
     SELECT
-        LIFNR, NAME1, NAME2, SORTL, LAND1, REGIO, ORT01, PSTLZ,
-        STRAS, SPRAS, TELF1, TELFX, STCD1, KTOKK, ERDAT, ERNAM,
-        LOEVM, SPERR, SPERM
-    FROM dbo.LFA1;
-
-    COMMIT;
-END;
-GO
-
-CREATE OR ALTER PROCEDURE etl.Load_VendorCompany AS
-BEGIN
-    SET NOCOUNT ON; SET XACT_ABORT ON;
-    BEGIN TRAN;
-    TRUNCATE TABLE mst.VendorCompany;
-
-    INSERT INTO mst.VendorCompany (
-        Vendor, CompanyCode, VendorName, PaymentTerms, PaymentMethod, PaymentBlock,
-        PostingBlock, DeletionInd, CreatedOn, CreatedBy)
-    SELECT
-        b.LIFNR, b.BUKRS, v.NAME1, b.ZTERM, b.ZWELS, b.ZAHLS,
-        b.SPERR, b.LOEVM, b.ERDAT, b.ERNAM
-    FROM dbo.LFB1 b
-    LEFT JOIN dbo.LFA1 v ON v.LIFNR = b.LIFNR;
-
-    COMMIT;
-END;
-GO
-
-CREATE OR ALTER PROCEDURE etl.Load_VendorPurchOrg AS
-BEGIN
-    SET NOCOUNT ON; SET XACT_ABORT ON;
-    BEGIN TRAN;
-    TRUNCATE TABLE mst.VendorPurchOrg;
-
-    INSERT INTO mst.VendorPurchOrg (
-        Vendor, PurchOrg, VendorName, PurchasingBlock, Incoterms, OrderCurrency,
-        SalesPerson, PaymentTerms, DeletionInd, CreatedOn, CreatedBy)
-    SELECT
-        m.LIFNR, m.EKORG, v.NAME1, m.SPERM, m.INCO1, m.WAERS,
-        m.VERKF, m.ZTERM, m.LOEVM, m.ERDAT, m.ERNAM
-    FROM dbo.LFM1 m
-    LEFT JOIN dbo.LFA1 v ON v.LIFNR = m.LIFNR;
+        k.LIFNR, k.BUKRS, k.EKORG, a.NAME1, a.NAME2, a.SORTL, a.LAND1, a.REGIO,
+        a.ORT01, a.PSTLZ, a.STRAS, a.SPRAS, a.TELF1, a.TELFX, a.STCD1, a.KTOKK,
+        a.ERDAT, a.ERNAM, b.ZTERM, p.ZTERM, b.ZWELS, b.ZAHLS,
+        b.SPERR, p.SPERM, a.LOEVM, a.SPERR, a.SPERM,
+        p.INCO1, p.WAERS, p.VERKF,
+        ROW_NUMBER() OVER (PARTITION BY k.LIFNR ORDER BY k.EKORG, k.BUKRS)
+    FROM keys k
+    LEFT JOIN dbo.LFA1 a ON a.LIFNR = k.LIFNR
+    LEFT JOIN po p       ON p.LIFNR = k.LIFNR AND p.EKORG = k.EKORG
+    LEFT JOIN dbo.LFB1 b ON b.LIFNR = k.LIFNR AND b.BUKRS = k.BUKRS;
 
     COMMIT;
 END;
@@ -483,8 +474,6 @@ BEGIN
     DECLARE @steps TABLE (seq int IDENTITY, proc_name sysname, target sysname);
     INSERT @steps (proc_name, target) VALUES
         ('etl.Load_Vendor',               'mst.Vendor'),
-        ('etl.Load_VendorCompany',        'mst.VendorCompany'),
-        ('etl.Load_VendorPurchOrg',       'mst.VendorPurchOrg'),
         ('etl.Load_Material',             'mst.Material'),
         ('etl.Load_PurchaseOrderDetail',  'prc.PurchaseOrderDetail'),
         ('etl.Load_PurchaseRequisition',  'prc.PurchaseRequisition'),

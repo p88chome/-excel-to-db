@@ -24,15 +24,16 @@ INSERT @need (tbl, col) VALUES
 ('EKBE','EBELN'),('EKBE','EBELP'),('EKBE','BEWTP'),('EKBE','SHKZG'),('EKBE','MENGE'),
 ('EKBE','DMBTR'),('EKBE','BUDAT'),
 ('MAKT','MATNR'),('MAKT','SPRAS'),('MAKT','MAKTX'),
--- mst.Vendor / VendorCompany / VendorPurchOrg
+-- mst.Vendor
 ('LFA1','LIFNR'),('LFA1','NAME1'),('LFA1','NAME2'),('LFA1','SORTL'),('LFA1','LAND1'),
 ('LFA1','REGIO'),('LFA1','ORT01'),('LFA1','PSTLZ'),('LFA1','STRAS'),('LFA1','SPRAS'),
 ('LFA1','TELF1'),('LFA1','TELFX'),('LFA1','STCD1'),('LFA1','KTOKK'),('LFA1','ERDAT'),
 ('LFA1','ERNAM'),('LFA1','LOEVM'),('LFA1','SPERR'),('LFA1','SPERM'),
 ('LFB1','LIFNR'),('LFB1','BUKRS'),('LFB1','ZTERM'),('LFB1','ZWELS'),('LFB1','ZAHLS'),
-('LFB1','SPERR'),('LFB1','LOEVM'),('LFB1','ERDAT'),('LFB1','ERNAM'),
+('LFB1','SPERR'),
 ('LFM1','LIFNR'),('LFM1','EKORG'),('LFM1','SPERM'),('LFM1','INCO1'),('LFM1','WAERS'),
-('LFM1','VERKF'),('LFM1','ZTERM'),('LFM1','LOEVM'),('LFM1','ERDAT'),('LFM1','ERNAM'),
+('LFM1','VERKF'),('LFM1','ZTERM'),
+('T024E','EKORG'),('T024E','BUKRS'),
 -- prc.PurchaseRequisition
 ('EBAN','BANFN'),('EBAN','BNFPO'),('EBAN','BSART'),('EBAN','BADAT'),('EBAN','ERNAM'),
 ('EBAN','MATNR'),('EBAN','TXZ01'),('EBAN','MATKL'),('EBAN','WERKS'),('EBAN','LGORT'),
