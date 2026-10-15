@@ -40,7 +40,6 @@ INSERT @need (tbl, col) VALUES
 ('LFB1','SPERR'),
 ('LFM1','LIFNR'),('LFM1','EKORG'),('LFM1','SPERM'),('LFM1','INCO1'),('LFM1','WAERS'),
 ('LFM1','VERKF'),('LFM1','ZTERM'),
-('T024E','EKORG'),('T024E','BUKRS'),
 -- prc.PurchaseRequisition
 ('EBAN','BANFN'),('EBAN','BNFPO'),('EBAN','BSART'),('EBAN','BADAT'),('EBAN','ERNAM'),
 ('EBAN','MATNR'),('EBAN','TXZ01'),('EBAN','MATKL'),('EBAN','WERKS'),('EBAN','LGORT'),
@@ -100,7 +99,9 @@ INSERT @need (tbl, col) VALUES
 
 -- 沒有也能跑，只是對應的欄位會是 NULL
 INSERT @need (tbl, col, optional) VALUES
-('T024D','WERKS',1),('T024D','DISPO',1),('T024D','DSNAM',1);
+('T024D','WERKS',1),('T024D','DISPO',1),('T024D','DSNAM',1),
+-- 沒有的話 mst.Vendor 改從 EKKO 推採購組織所屬的公司別
+('T024E','EKORG',1),('T024E','BUKRS',1);
 
 SELECT n.tbl, n.col, n.optional, t.object_id
 INTO #missing

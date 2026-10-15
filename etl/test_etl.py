@@ -55,7 +55,9 @@ for t, cols in tables.items():
 
 out = sqlcmd("-i", str(SQL / "00_check_staging.sql"), "-h", "-1", "-W", "-s", "|", db=DB)
 left = [l for l in out.splitlines() if "|" in l]
-assert left and all("T024D" in l and "選用" in l for l in left), out
+assert left and all("選用" in l for l in left), out
+# 先測有 T024E 的路線，後面再拿掉它測從 EKKO 推
+cur.execute("CREATE TABLE dbo.T024E (EKORG NVARCHAR(100), BUKRS NVARCHAR(100))")
 sqlcmd("-i", str(SQL / "01_create_tables.sql"), db=DB)
 sqlcmd("-i", str(SQL / "02_load_procedures.sql"), db=DB)
 
@@ -237,6 +239,16 @@ print("  錯誤訊息：", bad[0][3])
 check("失敗的表沒有被清空成半套（交易回滾）",
       one("SELECT COUNT(*) FROM fin.AccountsPayable")[0][0], 1)
 
+# ---- 沒有 T024E：從 EKKO 推採購組織的公司別 ----
+cur.execute("DROP TABLE dbo.T024E")
+ins("EKKO", [dict(EBELN="4500000002", BSTYP="F", BUKRS="1000", EKORG="TW01"),
+             dict(EBELN="4500000003", BSTYP="F", BUKRS="1000", EKORG="TW02"),
+             dict(EBELN="4500000004", BSTYP="F", BUKRS="2000", EKORG="TW02")])
+cur.execute("EXEC etl.Load_Vendor")
+r = one("SELECT PurchOrg, CompanyCode, PaymentTerms FROM mst.Vendor WHERE Vendor='0000100001' AND PurchOrg<>'' ORDER BY 1")
+check("沒有 T024E：TW01 只跟 1000 出現過 → 1000；TW02 跟兩個公司別出現過 → 跨公司",
+      [(x.PurchOrg, x.CompanyCode, x.PaymentTerms) for x in r], [("TW01", "1000", "NT30"), ("TW02", "", None)])
+
 # ---- 欄位沒下載齊：BSEG 沒有 KOART/SHKZG、EBAN 少一堆，用 @fill = 1 補空欄先組起來 ----
 cur.execute("EXEC sp_rename 'dbo.BSEG_x', 'BSEG'")
 cur.execute("ALTER TABLE dbo.BSEG DROP COLUMN KOART, SHKZG")
@@ -254,7 +266,7 @@ finally:
 filled = sorted(l.split("|")[:2] for l in out.splitlines() if "已補成空欄" in l)
 check("@fill 補上缺的欄位", filled,
       sorted([["BSEG", "KOART"], ["BSEG", "SHKZG"]] + [["EBAN", c] for c in EBAN_GONE]))
-check("補了之後只剩選用的 T024D", all("T024D" in l for l in out.splitlines()
+check("補了之後只剩選用的 T024D/T024E", all("選用" in l for l in out.splitlines()
                                       if "|" in l and "已補成空欄" not in l), True)
 sqlcmd("-i", str(SQL / "02_load_procedures.sql"), db=DB)      # 程序建得起來
 res = cur.execute("EXEC etl.LoadAll").fetchall()

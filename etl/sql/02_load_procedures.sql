@@ -187,7 +187,10 @@ GO
 
 -- ======================================================================
 -- mst.Vendor：一列 = 供應商 × 採購組織 × 公司別，只留真實存在的組合
---   1. LFM1 的每一列，用 T024E 對到採購組織所屬的公司別，再帶該公司別的 LFB1
+--   1. LFM1 的每一列，對到採購組織所屬的公司別，再帶該公司別的 LFB1
+--      採購組織 → 公司別：有 T024E（採購組織主檔）就用它；沒有的話從 EKKO 實際下過的
+--      PO 推，一個採購組織只跟一個公司別出現過就是它，跟多個出現過視為跨公司（空白）。
+--      EKKO 只有下載期間內的 PO，期間內沒下過單的採購組織會對不到公司別。
 --   2. LFB1 裡沒有被第 1 種涵蓋的公司別（只付款不下 PO 的供應商），PurchOrg 空白
 --   3. LFB1、LFM1 都沒有的供應商，PurchOrg、CompanyCode 都空白
 -- 直接把 LFB1、LFM1 用 LIFNR 接起來會變笛卡兒積（3 個公司別 × 4 個採購組織 = 12 列）。
@@ -199,11 +202,22 @@ BEGIN
     BEGIN TRAN;
     TRUNCATE TABLE mst.Vendor;
 
+    CREATE TABLE #org (EKORG nvarchar(10) PRIMARY KEY, BUKRS nvarchar(10) NOT NULL);
+    IF OBJECT_ID(N'dbo.T024E', N'U') IS NOT NULL
+        -- 動態 SQL：T024E 不存在時靜態寫法會在執行期報錯
+        EXEC (N'INSERT #org SELECT EKORG, ISNULL(BUKRS, '''') FROM dbo.T024E;');
+    ELSE
+        INSERT #org
+        SELECT EKORG, IIF(COUNT(DISTINCT BUKRS) = 1, MAX(BUKRS), '')
+        FROM dbo.EKKO
+        WHERE ISNULL(EKORG, '') <> ''
+        GROUP BY EKORG;
+
     WITH po AS (
-        SELECT m.LIFNR, m.EKORG, ISNULL(o.BUKRS, '') AS BUKRS,   -- 跨公司的採購組織沒有公司別
+        SELECT m.LIFNR, m.EKORG, ISNULL(o.BUKRS, '') AS BUKRS,   -- 跨公司或對不到的採購組織沒有公司別
                m.SPERM, m.INCO1, m.WAERS, m.VERKF, m.ZTERM
         FROM dbo.LFM1 m
-        LEFT JOIN dbo.T024E o ON o.EKORG = m.EKORG
+        LEFT JOIN #org o ON o.EKORG = m.EKORG
     ), keys AS (
         SELECT LIFNR, EKORG, BUKRS FROM po
         UNION ALL
