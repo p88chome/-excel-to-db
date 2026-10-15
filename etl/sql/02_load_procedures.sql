@@ -405,6 +405,8 @@ GO
 -- inv.InventoryBalance：每次執行就是一次快照
 -- MBEW 是工廠層級（評價範圍 BWKEY = 工廠），StockValue 同工廠的每個儲位都一樣，
 -- 不能直接加總。BWTAR 不空的是分割評價的子列，排除。
+-- 沒下載到 BWTAR 時改取同一料號＋工廠裡 SALK3 最大的那列：總額列是各子列的加總，一定最大。
+-- 沒下載到 PEINH 時用 SALK3 = LBKUM × 單價 ÷ PEINH 反推（沒有庫存的推不出來）。
 -- ======================================================================
 CREATE OR ALTER PROCEDURE etl.Load_InventoryBalance AS
 BEGIN
@@ -412,6 +414,14 @@ BEGIN
     BEGIN TRAN;
     TRUNCATE TABLE inv.InventoryBalance;
 
+    WITH mb AS (
+        SELECT MATNR, BWKEY, SALK3, STPRS, VERPR, VPRSV,
+               COALESCE(PEINH, CASE WHEN SALK3 <> 0 THEN ROUND(
+                   LBKUM * IIF(VPRSV = 'S', STPRS, VERPR) / SALK3, 0) END) AS PEINH,
+               ROW_NUMBER() OVER (PARTITION BY MATNR, BWKEY
+                                  ORDER BY IIF(ISNULL(BWTAR, '') = '', 0, 1), SALK3 DESC) AS rn
+        FROM dbo.MBEW
+    )
     INSERT INTO inv.InventoryBalance (
         Material, Plant, StorLoc, MaterialDesc, MaterialGroup, BaseUom, StockQty,
         QualityStock, BlockedStock, TransferStock, StockValue, StandardPrice, MovingAvgPrice,
@@ -425,7 +435,7 @@ BEGIN
     FROM dbo.MARD d
     LEFT JOIN dbo.MARC c ON c.MATNR = d.MATNR AND c.WERKS = d.WERKS
     LEFT JOIN dbo.MARA m ON m.MATNR = d.MATNR
-    LEFT JOIN dbo.MBEW b ON b.MATNR = d.MATNR AND b.BWKEY = d.WERKS AND ISNULL(b.BWTAR, '') = ''
+    LEFT JOIN mb b       ON b.MATNR = d.MATNR AND b.BWKEY = d.WERKS AND b.rn = 1
     LEFT JOIN (SELECT MATNR, MAX(MAKTX) AS MAKTX FROM dbo.MAKT
                WHERE SPRAS IN ('M', 'ZF') GROUP BY MATNR) t
                          ON t.MATNR = d.MATNR;

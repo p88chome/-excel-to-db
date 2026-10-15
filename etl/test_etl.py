@@ -19,7 +19,7 @@ DATES = {"BEDAT", "BUDAT", "BLDAT", "CPUDT", "EINDT", "BADAT", "LFDAT", "ERDAT",
          "UDATE", "DATAB", "DATBI", "ZFBDT", "AUGDT"}
 NUMS = {"MENGE", "DMBTR", "NETPR", "PEINH", "NETWR", "PREIS", "KBETR", "KPEIN",
         "LABST", "INSME", "SPEME", "UMLME", "SALK3", "STPRS", "VERPR", "EISBE", "MINBE",
-        "MABST", "BRGEW", "NTGEW", "VOLUM", "WRBTR", "NORBM", "APLFZ"}
+        "MABST", "LBKUM", "BRGEW", "NTGEW", "VOLUM", "WRBTR", "NORBM", "APLFZ"}
 
 
 def sqlcmd(*args, db="master"):
@@ -127,8 +127,11 @@ ins("A018", [dict(LIFNR="0000100001", MATNR="000000000000012345", EKORG="TW01",
 ins("MARD", [dict(MATNR="000000000000012345", WERKS=w, LGORT=l, LABST=10)
              for w, l in (("1100", "0001"), ("1100", "0002"), ("1200", "0001"))])
 ins("MARC", [dict(MATNR="000000000000012345", WERKS=w, DISPO="001") for w in ("1100", "1200")])
-ins("MBEW", [dict(MATNR="000000000000012345", BWKEY="1100", BWTAR=None, SALK3=1000, PEINH=1),
-             dict(MATNR="000000000000012345", BWKEY="1100", BWTAR="NEW", SALK3=600),
+# 1100 有分割評價：總額列 10 個、每 100 個 10000 元 = 1000；子列 NEW 6 個 = 600
+ins("MBEW", [dict(MATNR="000000000000012345", BWKEY="1100", BWTAR=None, SALK3=1000, LBKUM=10,
+                  VERPR=10000, PEINH=100),
+             dict(MATNR="000000000000012345", BWKEY="1100", BWTAR="NEW", SALK3=600, LBKUM=6,
+                  VERPR=10000, PEINH=100),
              dict(MATNR="000000000000012345", BWKEY="1200", BWTAR=None, SALK3=2000)])
 ins("BKPF", [dict(BUKRS="1000", BELNR="5100000001", GJAHR="2024", BLART="RE", WAERS="TWD")])
 ins("BSEG", [dict(BUKRS="1000", BELNR="5100000001", GJAHR="2024", BUZEI="001", KOART="K",
@@ -254,6 +257,7 @@ cur.execute("EXEC sp_rename 'dbo.BSEG_x', 'BSEG'")
 cur.execute("ALTER TABLE dbo.BSEG DROP COLUMN KOART, SHKZG")
 cur.execute("UPDATE dbo.BSEG SET BSCHL = IIF(BUZEI = '001', '31', '86')")
 cur.execute("ALTER TABLE dbo.EKPO DROP COLUMN PEINH")
+cur.execute("ALTER TABLE dbo.MBEW DROP COLUMN BWTAR, PEINH")
 cur.execute("ALTER TABLE dbo.EBKN DROP COLUMN ZEBKN")
 cur.execute("UPDATE dbo.EKPO SET NETWR = MENGE * NETPR / 100")   # 價格單位 100
 EBAN_GONE = ["BADAT", "EKORG", "FLIEF", "KNTTP", "LFDAT", "MEINS", "MENGE", "PREIS", "WAERS"]
@@ -268,7 +272,8 @@ finally:
     fill.unlink()
 filled = sorted(l.split("|")[:2] for l in out.splitlines() if "已補成空欄" in l)
 check("@fill 補上缺的欄位", filled,
-      sorted([["BSEG", "KOART"], ["BSEG", "SHKZG"], ["EBKN", "ZEBKN"], ["EKPO", "PEINH"]]
+      sorted([["BSEG", "KOART"], ["BSEG", "SHKZG"], ["EBKN", "ZEBKN"], ["EKPO", "PEINH"],
+              ["MBEW", "BWTAR"], ["MBEW", "PEINH"]]
              + [["EBAN", c] for c in EBAN_GONE]))
 check("補了之後只剩選用的 T024D/T024E", all("選用" in l for l in out.splitlines()
                                       if "|" in l and "已補成空欄" not in l), True)
@@ -283,6 +288,10 @@ cur.execute("EXEC etl.Load_AccountsPayable")
 r = one("SELECT LineItem, DebitCreditInd FROM fin.AccountsPayable")
 check("BSCHL 也沒有時用 LIFNR 判定，借貸別留 NULL", [(x.LineItem, x.DebitCreditInd) for x in r],
       [("001", None)])
+r = one("SELECT Plant, StockValue, PriceUnit FROM inv.InventoryBalance ORDER BY Plant, StorLoc")
+check("沒有 BWTAR 時分割評價不讓庫存重複、取總額列",
+      [(x.Plant, float(x.StockValue)) for x in r], [("1100", 1000.0), ("1100", 1000.0), ("1200", 2000.0)])
+check("沒有 MBEW.PEINH 時從 LBKUM、SALK3 反推", float(r[0].PriceUnit), 100.0)
 check("沒有 PEINH 時從 NETWR 反推 PriceUnit",
       float(one("SELECT PriceUnit FROM prc.PurchaseOrderDetail WHERE PoItem='00010'")[0][0]), 100.0)
 check("沒有 ZEBKN 時 EBKN 依成本中心排序，結果固定",
