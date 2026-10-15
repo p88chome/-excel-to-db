@@ -253,6 +253,9 @@ check("沒有 T024E：TW01 只跟 1000 出現過 → 1000；TW02 跟兩個公司
 cur.execute("EXEC sp_rename 'dbo.BSEG_x', 'BSEG'")
 cur.execute("ALTER TABLE dbo.BSEG DROP COLUMN KOART, SHKZG")
 cur.execute("UPDATE dbo.BSEG SET BSCHL = IIF(BUZEI = '001', '31', '86')")
+cur.execute("ALTER TABLE dbo.EKPO DROP COLUMN PEINH")
+cur.execute("ALTER TABLE dbo.EBKN DROP COLUMN ZEBKN")
+cur.execute("UPDATE dbo.EKPO SET NETWR = MENGE * NETPR / 100")   # 價格單位 100
 EBAN_GONE = ["BADAT", "EKORG", "FLIEF", "KNTTP", "LFDAT", "MEINS", "MENGE", "PREIS", "WAERS"]
 cur.execute(f"ALTER TABLE dbo.EBAN DROP COLUMN {', '.join(EBAN_GONE)}")
 cur.execute("DROP TABLE dbo.T024D")
@@ -265,7 +268,8 @@ finally:
     fill.unlink()
 filled = sorted(l.split("|")[:2] for l in out.splitlines() if "已補成空欄" in l)
 check("@fill 補上缺的欄位", filled,
-      sorted([["BSEG", "KOART"], ["BSEG", "SHKZG"]] + [["EBAN", c] for c in EBAN_GONE]))
+      sorted([["BSEG", "KOART"], ["BSEG", "SHKZG"], ["EBKN", "ZEBKN"], ["EKPO", "PEINH"]]
+             + [["EBAN", c] for c in EBAN_GONE]))
 check("補了之後只剩選用的 T024D/T024E", all("選用" in l for l in out.splitlines()
                                       if "|" in l and "已補成空欄" not in l), True)
 sqlcmd("-i", str(SQL / "02_load_procedures.sql"), db=DB)      # 程序建得起來
@@ -279,6 +283,10 @@ cur.execute("EXEC etl.Load_AccountsPayable")
 r = one("SELECT LineItem, DebitCreditInd FROM fin.AccountsPayable")
 check("BSCHL 也沒有時用 LIFNR 判定，借貸別留 NULL", [(x.LineItem, x.DebitCreditInd) for x in r],
       [("001", None)])
+check("沒有 PEINH 時從 NETWR 反推 PriceUnit",
+      float(one("SELECT PriceUnit FROM prc.PurchaseOrderDetail WHERE PoItem='00010'")[0][0]), 100.0)
+check("沒有 ZEBKN 時 EBKN 依成本中心排序，結果固定",
+      one("SELECT CostCenter FROM prc.PurchaseRequisition WHERE PrNumber='1000000001'")[0][0], "PR_FIRST")
 r = one("SELECT ReqQty, PrDate, Vendor FROM prc.PurchaseRequisition WHERE PrNumber='1000000001'")[0]
 check("EBAN 缺的欄位是 NULL", (r.ReqQty, r.PrDate, r.Vendor), (None, None, None))
 

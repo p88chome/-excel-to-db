@@ -22,7 +22,7 @@ BEGIN
 
     WITH kn AS (        -- 一個項目多筆科目分攤時取第一筆
         SELECT EBELN, EBELP, SAKTO, KOSTL, AUFNR,
-               ROW_NUMBER() OVER (PARTITION BY EBELN, EBELP ORDER BY ZEKKN) AS rn
+               ROW_NUMBER() OVER (PARTITION BY EBELN, EBELP ORDER BY ZEKKN, KOSTL, SAKTO) AS rn
         FROM dbo.EKKN
     ), et AS (          -- 第一個排程交貨日
         SELECT EBELN, EBELP, MIN(EINDT) AS EINDT
@@ -51,7 +51,9 @@ BEGIN
         k.EBELN, p.EBELP, k.BSART, k.BUKRS, k.EKORG, k.EKGRP, k.BEDAT, k.LIFNR,
         k.ZTERM, v.NAME1, v.LAND1, p.MATNR, t.MAKTX, p.MATKL,
         p.WERKS, p.LGORT, kn.SAKTO, kn.KOSTL, kn.AUFNR, p.MENGE, p.MEINS, p.NETPR,
-        p.PEINH, p.NETWR, k.WAERS, k.WKURS, et.EINDT, p.ELIKZ, p.WEPOS,
+        -- 沒下載到 PEINH 時用 NETWR = MENGE × NETPR ÷ PEINH 反推
+        COALESCE(p.PEINH, CASE WHEN p.NETWR <> 0 THEN ROUND(p.NETPR * p.MENGE / p.NETWR, 0) END),
+        p.NETWR, k.WAERS, k.WKURS, et.EINDT, p.ELIKZ, p.WEPOS,
         p.REPOS, p.LOEKZ, be.GrQty, be.GrAmount, be.LastGrDate, be.IrQty, be.IrAmount, be.LastIrDate,
         p.BANFN, p.BNFPO, p.KONNR, p.KTPNR
     FROM dbo.EKKO k
@@ -78,9 +80,9 @@ BEGIN
     BEGIN TRAN;
     TRUNCATE TABLE prc.PurchaseRequisition;
 
-    WITH kn AS (        -- 一個項目多筆科目分攤時取第一筆
+    WITH kn AS (        -- 一個項目多筆科目分攤時取第一筆；沒下載到序號時至少讓結果固定
         SELECT BANFN, BNFPO, KOSTL, SAKTO,
-               ROW_NUMBER() OVER (PARTITION BY BANFN, BNFPO ORDER BY ZEBKN) AS rn
+               ROW_NUMBER() OVER (PARTITION BY BANFN, BNFPO ORDER BY ZEBKN, KOSTL, SAKTO) AS rn
         FROM dbo.EBKN
     ), po AS (          -- 一筆 PR 轉多筆 PO 時取最小的一筆，另外記總數
         SELECT BANFN, BNFPO, EBELN, EBELP,
@@ -119,7 +121,7 @@ BEGIN
 
     WITH kn AS (
         SELECT EBELN, EBELP, SAKTO, KOSTL,
-               ROW_NUMBER() OVER (PARTITION BY EBELN, EBELP ORDER BY ZEKKN) AS rn
+               ROW_NUMBER() OVER (PARTITION BY EBELN, EBELP ORDER BY ZEKKN, KOSTL, SAKTO) AS rn
         FROM dbo.EKKN
     )
     INSERT INTO prc.GoodsReceipt (
