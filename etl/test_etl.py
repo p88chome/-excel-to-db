@@ -299,6 +299,16 @@ check("沒有 ZEBKN 時 EBKN 依成本中心排序，結果固定",
 r = one("SELECT ReqQty, PrDate, Vendor FROM prc.PurchaseRequisition WHERE PrNumber='1000000001'")[0]
 check("EBAN 缺的欄位是 NULL", (r.ReqQty, r.PrDate, r.Vendor), (None, None, None))
 
+# ---- 90_diagnose.sql：三行代號=數字 ----
+out = sqlcmd("-i", str(SQL / "90_diagnose.sql"), "-h", "-1", "-W", db=DB)
+lines = [l for l in out.splitlines() if "=" in l]
+for l in lines:
+    print("  " + l)
+got = dict(kv.split("=") for l in lines for kv in l.split())
+check("診斷輸出三行", len(lines), 3)
+check("診斷：AP 筆數、BSEG 無重複、MARA 無空白料號",
+      (got["T10"], got["B2"], got["M2"]), ("1", "0", "0"))
+
 cn.close()
 sqlcmd("-Q", f"ALTER DATABASE {DB} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {DB};")
 print(f"\n{sum(checks)}/{len(checks)} 通過")
