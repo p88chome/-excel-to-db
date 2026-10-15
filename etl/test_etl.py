@@ -17,7 +17,7 @@ SERVER = r"(localdb)\MSSQLLocalDB"
 DB = "etl_test_scratch"
 DATES = {"BEDAT", "BUDAT", "BLDAT", "CPUDT", "EINDT", "BADAT", "LFDAT", "ERDAT", "ERSDA",
          "UDATE", "DATAB", "DATBI", "ZFBDT", "AUGDT"}
-NUMS = {"MENGE", "DMBTR", "NETPR", "PEINH", "NETWR", "WKURS", "PREIS", "KBETR", "KPEIN",
+NUMS = {"MENGE", "DMBTR", "NETPR", "PEINH", "NETWR", "PREIS", "KBETR", "KPEIN",
         "LABST", "INSME", "SPEME", "UMLME", "SALK3", "STPRS", "VERPR", "EISBE", "MINBE",
         "MABST", "BRGEW", "NTGEW", "VOLUM", "WRBTR", "NORBM", "APLFZ"}
 
@@ -48,7 +48,8 @@ for t, c, optional in need:
         tables.setdefault(t, []).append(c)
 assert len(missing_before) == len(need), (len(missing_before), len(need))
 for t, cols in tables.items():
-    defs = ", ".join(f"[{c}] {'DATE' if c in DATES else 'DECIMAL(18,3)' if c in NUMS else 'NVARCHAR(100)'} NULL"
+    # 匯率有 5 位小數，excel-to-db 會給 DECIMAL(18,5)
+    defs = ", ".join(f"[{c}] {'DATE' if c in DATES else 'DECIMAL(18,5)' if c == 'WKURS' else 'DECIMAL(18,3)' if c in NUMS else 'NVARCHAR(100)'} NULL"
                      for c in cols)
     cur.execute(f"CREATE TABLE dbo.{t} ({defs})")
 
@@ -76,7 +77,7 @@ ins("MAKT", [dict(MATNR="000000000000012345", SPRAS="ZF", MAKTX="晶圓載具"),
              dict(MATNR="000000000000012345", SPRAS="E", MAKTX="Wafer carrier")])
 ins("MARA", [dict(MATNR="000000000000012345", MTART="ROH", MATKL="A01", MEINS="EA")])
 ins("EKKO", [dict(EBELN="4500000001", BSTYP="F", BSART="NB", BUKRS="1000", LIFNR="0000100001",
-                  BEDAT="2024-01-05", WAERS="TWD", WKURS=1),
+                  BEDAT="2024-01-05", WAERS="JPY", WKURS=0.21345),
              dict(EBELN="4600000001", BSTYP="K", BSART="MK", BUKRS="1000", LIFNR="0000100001",
                   BEDAT="2024-01-05", WAERS="TWD")])
 ins("EKPO", [dict(EBELN="4500000001", EBELP=p, MATNR="000000000000012345", MENGE=100, NETPR=250,
@@ -151,6 +152,11 @@ def check(name, got, want):
     print(f"{'PASS' if ok else 'FAIL'}  {name}: {got!r}" + ("" if ok else f"  (預期 {want!r})"))
 
 
+check("目標表沒有 VARCHAR（全部 NVARCHAR）",
+      one("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE DATA_TYPE = 'varchar' "
+          "AND TABLE_SCHEMA IN ('prc','mst','inv','fin')")[0][0], 0)
+check("ExchangeRate 5 位小數不被四捨五入",
+      float(one("SELECT ExchangeRate FROM prc.PurchaseOrderDetail WHERE PoItem='00010'")[0][0]), 0.21345)
 check("PO 只留 BSTYP=F，合約被排除", one("SELECT COUNT(*) FROM prc.PurchaseOrderDetail")[0][0], 2)
 r = one("SELECT CostCenter, DelivDate, GrQty, GrAmount, IrQty, LastGrDate, MaterialDesc, VendorName, PriceUnit "
         "FROM prc.PurchaseOrderDetail WHERE PoItem='00010'")[0]

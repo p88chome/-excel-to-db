@@ -4,6 +4,7 @@
     python etl/gen_ddl.py 規格.xlsx > etl/sql/01_create_tables.sql
 
 只讀「(SAP) schema.Table」這種分頁。灰底刪除線的列（規格上標為移除）不建。
+規格上的 VARCHAR 一律建成 NVARCHAR，長度不變（NVARCHAR(10) 一樣是 10 個字）。
 """
 import re
 import sys
@@ -20,6 +21,9 @@ def columns(ws):
         if not field or ws.cell(r, 2).font.strike:
             continue
         spec = str(ws.cell(r, 5).value).strip().upper()
+        # 規格寫 VARCHAR 的一律建成 NVARCHAR：stg 表全是 NVARCHAR，型別一致
+        # 才不會在 JOIN 時隱含轉換；中文、日文也不用一欄一欄判斷。
+        spec = re.sub(r"^VARCHAR\b", "NVARCHAR", spec)
         yield str(field).strip(), spec, ws.cell(r, 7).value == "Y"
 
 

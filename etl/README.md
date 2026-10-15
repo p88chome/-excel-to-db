@@ -27,7 +27,7 @@ EXEC etl.Load_PurchaseOrderDetail; -- 只跑一張
 python etl/gen_ddl.py 規格.xlsx > etl/sql/01_create_tables.sql
 ```
 
-DDL 從規格表產生（刪除線的列不建）。載入邏輯在 `02_load_procedures.sql` 手寫，
+DDL 從規格表產生（刪除線的列不建；規格上的 VARCHAR 一律建成 NVARCHAR）。載入邏輯在 `02_load_procedures.sql` 手寫，
 欄位有增減要跟著改，`00_check_staging.sql` 的清單也是。
 
 ## 測試
