@@ -1,31 +1,47 @@
--- 1. MARA、MARD 有沒有這些欄位（沒有的話就是 @fill 補的）
-SELECT OBJECT_NAME(object_id) AS 表, name AS 欄位
-FROM sys.columns
-WHERE object_id IN (OBJECT_ID(N'dbo.MARA'), OBJECT_ID(N'dbo.MARD'))
-  AND name IN ('MATNR', 'WERKS', 'LGORT');
+1. 確認是不是完全相同
 
--- 2. 主鍵空白的有幾筆
-SELECT 'MARA' AS 表, COUNT(*) AS 總筆數,
-       SUM(IIF(ISNULL(MATNR, '') = '', 1, 0)) AS 料號空白
-FROM dbo.MARA;
-SELECT 'MARD' AS 表, COUNT(*) AS 總筆數,
-       SUM(IIF(ISNULL(MATNR, '') = '', 1, 0)) AS 料號空白,
-       SUM(IIF(ISNULL(LGORT, '') = '', 1, 0)) AS 儲位空白
-FROM dbo.MARD;
+WITH d AS (
+    SELECT BUKRS, BELNR, GJAHR, BUZEI
+    FROM dbo.BSEG
+    GROUP BY BUKRS, BELNR, GJAHR, BUZEI
+    HAVING COUNT(*) > 1
+)
+SELECT COUNT(*) AS 不同的列數
+FROM (SELECT DISTINCT s.*
+      FROM dbo.BSEG s
+      JOIN d ON d.BUKRS = s.BUKRS AND d.BELNR = s.BELNR
+            AND d.GJAHR = s.GJAHR AND d.BUZEI = s.BUZEI) x;
 
--- 3. 空白的那幾列長什麼樣（看是不是合計列、垃圾列）
-SELECT TOP 5 * FROM dbo.MARA WHERE ISNULL(MATNR, '') = '';
-SELECT TOP 5 * FROM dbo.MARD WHERE ISNULL(LGORT, '') = '';
+- 結果是 247376： 每組的兩筆完全相同，可以刪。
+- 結果比 247376 大： 有些內容不一樣。先不要刪，把數字告訴我。
 
--- 4. BSEG、BKPF 重複的情況
-SELECT 'BSEG' AS 表, COUNT(*) AS 重複的鍵數, SUM(n) AS 涉及筆數 FROM (
-    SELECT COUNT(*) AS n FROM dbo.BSEG
-    GROUP BY BUKRS, BELNR, GJAHR, BUZEI HAVING COUNT(*) > 1) x;
-SELECT 'BKPF' AS 表, COUNT(*) AS 重複的鍵數, SUM(n) AS 涉及筆數 FROM (
-    SELECT COUNT(*) AS n FROM dbo.BKPF
-    GROUP BY BUKRS, BELNR, GJAHR HAVING COUNT(*) > 1) x;
+順便看看重複集中在哪一段，比較容易找出是哪個檔案匯了兩次：
 
--- 5. 重複的範例
-SELECT TOP 5 BUKRS, BELNR, GJAHR, BUZEI, COUNT(*) AS 次數
-FROM dbo.BSEG GROUP BY BUKRS, BELNR, GJAHR, BUZEI
-HAVING COUNT(*) > 1 ORDER BY 次數 DESC;
+SELECT GJAHR, BUKRS, COUNT(*) AS 重複的鍵數
+FROM (SELECT BUKRS, BELNR, GJAHR, BUZEI FROM dbo.BSEG
+      GROUP BY BUKRS, BELNR, GJAHR, BUZEI HAVING COUNT(*) > 1) d
+GROUP BY GJAHR, BUKRS
+ORDER BY GJAHR, BUKRS;
+
+2. 確認完全相同之後，備份再刪
+
+▎ 注意：DELETE 不能復原，所以先把要刪的那一份另存起來。
+
+-- 備份「多出來的那一份」（247,376 筆）
+WITH r AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY BUKRS, BELNR, GJAHR, BUZEI
+                                 ORDER BY (SELECT NULL)) AS rn
+    FROM dbo.BSEG
+)
+SELECT * INTO dbo.BSEG_deleted_dup FROM r WHERE rn > 1;
+
+-- 在交易裡刪，每組留一筆
+BEGIN TRAN;
+WITH r AS (
+    SELECT ROW_NUMBER() OVER (PARTITION BY BUKRS, BELNR, GJAHR, BUZEI
+                              ORDER BY (SELECT NULL)) AS rn
+    FROM dbo.BSEG
+)
+DELETE FROM r WHERE rn > 1;
+SELECT @@ROWCOUNT AS 刪除筆數;   -- 應該是 247376
+-- 是 247376 就執行：COMMIT;   不是就執行：ROLLBACK;
