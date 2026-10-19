@@ -52,7 +52,7 @@ CREATE TABLE kri.ValueList (
     CONSTRAINT PK_kri_ValueList PRIMARY KEY (KriCode, ListName, ListValue)
 );
 
--- 核決權限（K08 用，由 UMC 提供）。金額區間是 [MinAmount, MaxAmount)。
+-- 核決權限（K08 用，由客戶提供）。金額區間是 [MinAmount, MaxAmount)。
 IF OBJECT_ID(N'kri.ApprovalMatrix', N'U') IS NULL
 CREATE TABLE kri.ApprovalMatrix (
     DocType       NVARCHAR(10)  NOT NULL,   -- PR / PO

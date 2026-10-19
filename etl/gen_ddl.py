@@ -47,7 +47,8 @@ def main(path):
         if m:
             tables.append((m.group(1).lower(), m.group(2), list(columns(ws))))
 
-    out = [f"-- 由 etl/gen_ddl.py 從規格表產生，不要手改。\n-- 來源：{path.split(chr(92))[-1]}\n",
+    # 不寫規格檔名：檔名裡有客戶名稱，這份 SQL 會進版控
+    out = ["-- 由 etl/gen_ddl.py 從規格表產生，不要手改。\n",
            "-- 注意：會 DROP 掉同名的表重建，表裡的資料會不見。\n"]
     for schema in sorted({s for s, _, _ in tables}):
         out.append(f"IF SCHEMA_ID(N'{schema}') IS NULL EXEC(N'CREATE SCHEMA {schema}');\nGO\n")

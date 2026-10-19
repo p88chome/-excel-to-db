@@ -137,15 +137,15 @@ def test_infer_sees_real_types_after_sap_conversion(tmp_path):
 
 def test_env_builds_trusted_conn(monkeypatch):
     monkeypatch.setenv("SQL_SERVER", "SRV01")
-    monkeypatch.setenv("SQL_DATABASE", "UMC")
+    monkeypatch.setenv("SQL_DATABASE", "DEMO")
     conn = core.conn_from_env()
-    assert conn.startswith("mssql+pyodbc://@SRV01/UMC?")
+    assert conn.startswith("mssql+pyodbc://@SRV01/DEMO?")
     assert "trusted_connection=yes" in conn
 
 
 def test_env_escapes_password(monkeypatch):
     monkeypatch.setenv("SQL_SERVER", "SRV01")
-    monkeypatch.setenv("SQL_DATABASE", "UMC")
+    monkeypatch.setenv("SQL_DATABASE", "DEMO")
     monkeypatch.setenv("SQL_USER", "sa")
     monkeypatch.setenv("SQL_PASSWORD", "p@ss w/rd")
     assert "p%40ss+w%2Frd@SRV01" in core.conn_from_env()
@@ -154,16 +154,16 @@ def test_env_escapes_password(monkeypatch):
 def test_env_file_does_not_clobber_real_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("SQL_SERVER", "REAL")
     (tmp_path / ".env").write_text(
-        "# 註解\nSQL_SERVER=FROMFILE\nSQL_DATABASE = UMC \n", encoding="utf-8")
+        "# 註解\nSQL_SERVER=FROMFILE\nSQL_DATABASE = DEMO \n", encoding="utf-8")
     core.load_env(tmp_path / ".env")
     import os
     assert os.environ["SQL_SERVER"] == "REAL"
-    assert os.environ["SQL_DATABASE"] == "UMC"
+    assert os.environ["SQL_DATABASE"] == "DEMO"
 
 
 def test_config_prefers_env_over_json(tmp_path, monkeypatch):
     monkeypatch.setenv("SQL_SERVER", "SRV01")
-    monkeypatch.setenv("SQL_DATABASE", "UMC")
+    monkeypatch.setenv("SQL_DATABASE", "DEMO")
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text('{"conn": "sqlite:///x.db"}', encoding="utf-8")
     assert core.load_config(cfg_path)["conn"].startswith("mssql+pyodbc://@SRV01")
@@ -201,15 +201,15 @@ SAP_FI_TXT = (
     "Dynamic List Display\n"
     "\n"
     "BUKRS\tBELNR\tGJAHR\tWRBTR\tZFBDT\tMENGE\n"
-    "8104\t1449008934\t2026\t1.234,56\t31.12.2026\t12\n"
-    "1763\t1597714383\t2026\t70.319,87-\t01.01.2026\t34\n"
+    "1000\t1900000001\t2026\t1.234,56\t31.12.2026\t12\n"
+    "2000\t1900000003\t2026\t70.319,87-\t01.01.2026\t34\n"
 )
 
 
 def test_code_field_stays_text_even_when_it_looks_numeric(tmp_path):
     df = core.read(write(tmp_path, "BESG.txt", SAP_FI_TXT))
-    assert df["BUKRS"].tolist() == ["8104", "1763"]
-    assert df["BELNR"].tolist() == ["1449008934", "1597714383"]
+    assert df["BUKRS"].tolist() == ["1000", "2000"]
+    assert df["BELNR"].tolist() == ["1900000001", "1900000003"]
     assert df["GJAHR"].tolist() == ["2026", "2026"]
 
 
@@ -229,7 +229,7 @@ def test_dtypes_override_can_force_a_code_field_back_to_number(tmp_path):
     t = core.scan(write(tmp_path, "BESG.txt", SAP_FI_TXT).parent)[0]
     assert t.dtypes["BUKRS"].startswith("NVARCHAR")
     df = core.coerce(core.load(t.files), {**t.dtypes, "BUKRS": "INT"})
-    assert df["BUKRS"].tolist() == [8104, 1763]
+    assert df["BUKRS"].tolist() == [1000, 2000]
 
 
 def test_sniff_reuses_the_list_instead_of_copying_it():
@@ -274,8 +274,8 @@ SUSPECT_TXT = (
     "Dynamic List Display\n"
     "\n"
     "BUKRS\tDOCTYPE\tMENGE\tWRBTR\tBUDAT\n"
-    "8104\t4500000123\t12\t1.234,56\t31.12.2026\n"
-    "1763\t4500000124\t34\t70.319,87-\t01.01.2026\n"
+    "1000\t4500000123\t12\t1.234,56\t31.12.2026\n"
+    "2000\t4500000124\t34\t70.319,87-\t01.01.2026\n"
 )
 
 
@@ -506,27 +506,27 @@ def test_excel_code_columns_become_text(tmp_path):
     # Excel 存成數字的憑證號碼，pandas 會讀成 int64。清單要把它轉回文字，
     # 否則同一個 BELNR 在 txt 是文字、在 Excel 是整數，兩張表 JOIN 不起來。
     pd.DataFrame({
-        "BELNR": [1449008934, 1597714383],
-        "BUKRS": [8104, 1763],
+        "BELNR": [1900000001, 1900000003],
+        "BUKRS": [1000, 2000],
         "MANDANT": [800, 800],
         "WRBTR": [1234.56, -1000.0],
         "MENGE": [12, 34],
     }).to_excel(tmp_path / "ZTM80.xlsx", index=False)
 
     df = core.read(tmp_path / "ZTM80.xlsx")
-    assert df["BELNR"].tolist() == ["1449008934", "1597714383"]
-    assert df["BUKRS"].tolist() == ["8104", "1763"]
+    assert df["BELNR"].tolist() == ["1900000001", "1900000003"]
+    assert df["BUKRS"].tolist() == ["1000", "2000"]
     assert df["MANDANT"].tolist() == ["800", "800"]
     assert df["WRBTR"].tolist() == [1234.56, -1000.0]    # 金額不動
     assert df["MENGE"].tolist() == [12, 34]              # 已知數字欄位不動
 
 
 def test_excel_code_column_with_blanks_has_no_float_tail(tmp_path):
-    # 有空值時整數欄會變 float64，直接轉字串會變成 "1449008934.0"
-    pd.DataFrame({"BELNR": [1449008934, None], "SGTXT": ["A", "B"]}).to_excel(
+    # 有空值時整數欄會變 float64，直接轉字串會變成 "1900000001.0"
+    pd.DataFrame({"BELNR": [1900000001, None], "SGTXT": ["A", "B"]}).to_excel(
         tmp_path / "ZTM80.xlsx", index=False)
     df = core.read(tmp_path / "ZTM80.xlsx")
-    assert df["BELNR"].iloc[0] == "1449008934"      # 不是 "1449008934.0"
+    assert df["BELNR"].iloc[0] == "1900000001"      # 不是 "1900000001.0"
     assert pd.isna(df["BELNR"].iloc[1])
 
 
@@ -535,8 +535,8 @@ def test_excel_and_txt_agree_on_code_column_type(tmp_path):
     root.mkdir(parents=True)
     write(root, "jan.txt",
           "Dynamic List Display\n\nBUKRS\tBELNR\tWRBTR\n"
-          "8104\t1449008934\t1.234,56\n")
-    pd.DataFrame({"BUKRS": [1763], "BELNR": [1597714383],
+          "1000\t1900000001\t1.234,56\n")
+    pd.DataFrame({"BUKRS": [2000], "BELNR": [1900000003],
                   "WRBTR": [99.0]}).to_excel(root / "feb.xlsx", index=False)
 
     t = core.scan(tmp_path / "data")[0]
@@ -544,7 +544,7 @@ def test_excel_and_txt_agree_on_code_column_type(tmp_path):
     assert t.dtypes["BELNR"].startswith("NVARCHAR")
     assert t.dtypes["BUKRS"].startswith("NVARCHAR")
     df = core.load(t.files)                     # 檔案依檔名排序，feb 在 jan 前
-    assert sorted(df["BELNR"]) == ["1449008934", "1597714383"]
+    assert sorted(df["BELNR"]) == ["1900000001", "1900000003"]
 
 
 # --- ODBC 驅動 ----------------------------------------------------------
@@ -570,7 +570,7 @@ def test_env_uses_the_installed_driver_not_a_hardcoded_17(monkeypatch):
     # 寫死 17 但機器上只有 18，就是使用者遇到的 IM002 成因
     fake_drivers(monkeypatch, ["ODBC Driver 18 for SQL Server"])
     monkeypatch.setenv("SQL_SERVER", "SRV01")
-    monkeypatch.setenv("SQL_DATABASE", "UMC")
+    monkeypatch.setenv("SQL_DATABASE", "DEMO")
     monkeypatch.delenv("SQL_DRIVER", raising=False)
     assert "ODBC+Driver+18+for+SQL+Server" in core.conn_from_env()
 
@@ -578,7 +578,7 @@ def test_env_uses_the_installed_driver_not_a_hardcoded_17(monkeypatch):
 def test_env_driver_still_wins(monkeypatch):
     fake_drivers(monkeypatch, ["ODBC Driver 18 for SQL Server"])
     monkeypatch.setenv("SQL_SERVER", "SRV01")
-    monkeypatch.setenv("SQL_DATABASE", "UMC")
+    monkeypatch.setenv("SQL_DATABASE", "DEMO")
     monkeypatch.setenv("SQL_DRIVER", "ODBC Driver 17 for SQL Server")
     assert "ODBC+Driver+17+for+SQL+Server" in core.conn_from_env()
 
@@ -601,7 +601,7 @@ def test_other_errors_are_left_alone(monkeypatch):
 def test_trust_cert_switch_adds_the_flag(monkeypatch, value):
     fake_drivers(monkeypatch, ["ODBC Driver 18 for SQL Server"])
     monkeypatch.setenv("SQL_SERVER", "SRV01")
-    monkeypatch.setenv("SQL_DATABASE", "UMC")
+    monkeypatch.setenv("SQL_DATABASE", "DEMO")
     monkeypatch.setenv("SQL_TRUST_CERT", value)
     assert "TrustServerCertificate=yes" in core.conn_from_env()
 
@@ -610,7 +610,7 @@ def test_trust_cert_switch_adds_the_flag(monkeypatch, value):
 def test_trust_cert_is_off_unless_asked(monkeypatch, value):
     fake_drivers(monkeypatch, ["ODBC Driver 18 for SQL Server"])
     monkeypatch.setenv("SQL_SERVER", "SRV01")
-    monkeypatch.setenv("SQL_DATABASE", "UMC")
+    monkeypatch.setenv("SQL_DATABASE", "DEMO")
     monkeypatch.setenv("SQL_TRUST_CERT", value)
     assert "TrustServerCertificate" not in core.conn_from_env()
 
@@ -619,7 +619,7 @@ def test_empty_sql_driver_falls_back_to_autodetect(monkeypatch):
     # .env 裡 SQL_DRIVER= 留空時不能當成驅動名稱
     fake_drivers(monkeypatch, ["ODBC Driver 18 for SQL Server"])
     monkeypatch.setenv("SQL_SERVER", "SRV01")
-    monkeypatch.setenv("SQL_DATABASE", "UMC")
+    monkeypatch.setenv("SQL_DATABASE", "DEMO")
     monkeypatch.setenv("SQL_DRIVER", "")
     assert "ODBC+Driver+18+for+SQL+Server" in core.conn_from_env()
 
@@ -1036,7 +1036,7 @@ def test_progress_reports_each_stage(tmp_path):
 
 def test_progress_is_optional(tmp_path):
     t = core.scan(write(tmp_path, "T001.txt",
-                        "Dynamic List Display\n\nBUKRS\tBUTXT\n8104\t聯電\n"
+                        "Dynamic List Display\n\nBUKRS\tBUTXT\n1000\t示範公司\n"
                         ).parent)[0]
     assert core.import_table(core.connect(f"sqlite:///{tmp_path / 'o.db'}"), t) == 1
 
@@ -1066,7 +1066,7 @@ def test_chunked_write_lands_every_row(tmp_path, monkeypatch):
 # 就變文字，指定 DECIMAL 會炸 unable to parse string "1,087.00"。
 
 def test_excel_thousands_separator_becomes_number(tmp_path):
-    pd.DataFrame({"BELNR": ["1449008934"],
+    pd.DataFrame({"BELNR": ["1900000001"],
                   "WRBTR": ["1,087.00"]}).to_excel(
                       tmp_path / "BSEG.xlsx", index=False)
     df = core.read(tmp_path / "BSEG.xlsx")
@@ -1075,14 +1075,14 @@ def test_excel_thousands_separator_becomes_number(tmp_path):
 
 def test_csv_thousands_separator_becomes_number(tmp_path):
     (tmp_path / "BSEG.csv").write_text(
-        'BELNR,WRBTR\n1449008934,"1,087.00"\n1449008935,"23,456.78"\n',
+        'BELNR,WRBTR\n1900000001,"1,087.00"\n1900000002,"23,456.78"\n',
         encoding="utf-8")
     df = core.read(tmp_path / "BSEG.csv")
     assert df["WRBTR"].tolist() == [1087.0, 23456.78]
 
 
 def test_excel_thousands_column_infers_decimal(tmp_path):
-    pd.DataFrame({"BELNR": ["1449008934", "1449008935"],
+    pd.DataFrame({"BELNR": ["1900000001", "1900000002"],
                   "WRBTR": ["1,087.00", "23,456.78"]}).to_excel(
                       tmp_path / "BSEG.xlsx", index=False)
     t = core.scan(tmp_path)[0]
@@ -1092,7 +1092,7 @@ def test_excel_thousands_column_infers_decimal(tmp_path):
 def test_excel_thousands_survives_import(tmp_path):
     root = tmp_path / "data" / "BSEG"
     root.mkdir(parents=True)
-    pd.DataFrame({"BELNR": ["1449008934", "1449008935"],
+    pd.DataFrame({"BELNR": ["1900000001", "1900000002"],
                   "WRBTR": ["1,087.00", "23,456.78"]}).to_excel(
                       root / "feb.xlsx", index=False)
     t = core.scan(tmp_path / "data")[0]
@@ -1105,7 +1105,7 @@ def test_excel_thousands_survives_import(tmp_path):
 
 def test_excel_german_thousands_separator(tmp_path):
     # SAP 德式版面：句點是千分位、逗號是小數點，尾綴負號
-    pd.DataFrame({"BELNR": ["1449008934", "1449008935"],
+    pd.DataFrame({"BELNR": ["1900000001", "1900000002"],
                   "WRBTR": ["1.087,00", "70.319,87-"]}).to_excel(
                       tmp_path / "BSEG.xlsx", index=False)
     df = core.read(tmp_path / "BSEG.xlsx")

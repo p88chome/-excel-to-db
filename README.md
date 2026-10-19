@@ -230,7 +230,7 @@ SAP 的 txt 不是乾淨的 CSV，檔頭有報表標題、檔尾有統計列、�
 
 ### SAP 代碼欄位一律當文字
 
-`BELNR` 1449008934、`BUKRS` 8104、`GJAHR` 2026 —— 這些在 SAP 裡是 CHAR，
+`BELNR` 1900000001、`BUKRS` 1000、`GJAHR` 2026 —— 這些在 SAP 裡是 CHAR，
 只是長得像數字。當成數字會出兩種事：前導零掉了（`0000001000` 變 `1000`）跟主檔
 JOIN 不到；還有同一欄位這個月的檔案沒有前導零、下個月有，`replace` 模式
 每次重建表，欄位型別就在 INT 與 NVARCHAR 之間跳，下游跟著爛。
@@ -448,7 +448,7 @@ COL1:_ BUZEI:T! LIFNR:T! ZUONR:T! SGTXT:T HKONT:T! WRBTR:N- ZFBDT:D:slash?
 
 ```
 SQL_SERVER=SQLPRD01,1433
-SQL_DATABASE=UMC
+SQL_DATABASE=DEMO
 SQL_USER=            留空 = 用 Windows 整合驗證
 SQL_PASSWORD=
 ```
