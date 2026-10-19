@@ -2,8 +2,8 @@
 
 | 項目 | 內容 |
 |---|---|
-| 版本 | v1.0（2026-10-19） |
-| 狀態 | 已核可，第一期開工 |
+| 版本 | v1.2（2026-10-19） |
+| 狀態 | 第一期已實作（`etl/sql/10～12`，測試 `etl/test_kri.py`），待 UMC 實際資料驗收 |
 | 依據 | 《擬定清單 v2.2（UMC入選KRI）》、《初擬清單 v1.3 會議記錄 0506》、資料移轉規格 v2.3、過往專案 KRI 程式研究 |
 | 範圍 | KRI 計算框架、KRI 邏輯、評分方向；不含 Power BI 畫面設計 |
 
@@ -67,12 +67,12 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 - **放棄**：過往專案在每個 KRI 裡直接 JOIN SAP 原表，同樣的 JOIN bug 在多個 KRI 重複出現。
 
 ### D2. 設定拆成多張有型別的表
-- **選擇**：`kri.Definition`（KRI 定義）、`kri.Parameter`（門檻）、`kri.Exclusion`（排除清單）、`kri.ApprovalMatrix`（核決權限）。
+- **選擇**：`kri.Definition`（KRI 定義）、`kri.Parameter`（數值門檻）、`kri.ValueList`（清單：排除名單與白名單）、`kri.ApprovalMatrix`（核決權限）。
 - **原因**：過往專案把定義、全域設定、門檻、執行紀錄混在同一張表，查詢全靠「參數名稱剛好不重複」。也沒有啟用開關，排程寫死在程式裡。
 - **放棄**：一張萬用設定表。
 
 ### D3. 門檻與排除清單全部參數化
-- **選擇**：程式裡**不寫死任何門檻、廠商代碼前綴、採購組織、傳票類型**。全部從 `kri.Parameter` / `kri.Exclusion` 讀。還沒定案的值標 `IsTentative = 1`，儀表板要顯示「暫定」。
+- **選擇**：程式裡**不寫死任何門檻、廠商代碼前綴、採購組織、傳票類型**。全部從 `kri.Parameter` / `kri.ValueList` 讀。還沒定案的值標 `IsTentative = 1`，儀表板要顯示「暫定」。
 - **原因**：過往專案很多 KRI 宣告了門檻參數卻沒有使用，實際值寫死在 SQL，改設定表不會生效，也沒人發現。
 - **放棄**：先寫死、之後再改。
 
@@ -154,13 +154,13 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | IsTentative | 1 = 暫定值，尚未經 UMC/DTT 確認 |
 | UpdatedAt, UpdatedBy | 最後修改 |
 
-**kri.Exclusion**：排除清單
+**kri.ValueList**：清單（排除名單與白名單）
 | 欄位 | 說明 |
 |---|---|
 | KriCode | 適用的 KRI；`*` = 全部 |
-| ExclType | `VendorPrefix`、`Vendor`、`PurchOrg`、`Plant`、`PoType`、`MaterialGroup`、`ConditionType` … |
-| ExclValue | 值 |
-| Reason | 原因 |
+| ListName | 排除：`ExcludeVendorPrefix`、`ExcludePurchOrg`、`ExcludePlant`、`ExcludePoType`、`ExcludeMaterialGroup`；白名單：`AllowedConditionType`、`AllowedInfoCategory` |
+| ListValue | 值 |
+| Note | 原因 |
 
 **kri.ApprovalMatrix**：核決權限（K08 用，**由 UMC 提供**）
 | 欄位 | 說明 |
@@ -219,11 +219,11 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 |---|---|
 | **PO 單價** | `NetPrice / NULLIF(PriceUnit, 0)`（PriceUnit 缺值時由 ETL 反推，見 v2.3 規格） |
 | **主檔單價** | `ConditionPrice / NULLIF(PriceUnit, 0)` |
-| **主檔價取用** | 先找 A017（分工廠：Vendor + Material + PurchOrg + Plant + InfoCategory），找不到再用 A018（不分工廠）。條件類型依 `kri.Exclusion` 的 `ConditionType` 白名單（預設 PB00）。PO 日期落在 `[ValidFrom, ValidTo]`，排除刪除標記 |
+| **主檔價取用** | 先找 A017（分工廠：Vendor + Material + PurchOrg + Plant + InfoCategory），找不到再用 A018（不分工廠）。條件類型依 `kri.ValueList` 的 `AllowedConditionType` 白名單（預設 PB00），資訊記錄類別依 `AllowedInfoCategory`（預設 0 = 標準）。PO 日期落在 `[ValidFrom, ValidTo]`，排除刪除標記 |
 | **文件幣別 → 本幣** | `WKURS > 0`：金額 × WKURS；`WKURS < 0`（間接報價）：金額 ÷ \|WKURS\|；文件幣別 = 本幣：× 1 |
 | **本幣** | 公司別的 `T001.WAERS` |
 | **台幣** | 第二期：從匯率表 TCURR 取文件日期當月的匯率（**不是**最新匯率） |
-| **排除條件** | PO 刪除標記、數量 ≤ 0、`kri.Exclusion` 列出的對象 |
+| **排除條件** | PO 刪除標記、數量 ≤ 0、`kri.ValueList` 排除名單列出的對象 |
 
 ---
 
@@ -299,7 +299,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
   3. 每一筆 PR，往前 `WindowDays` 天內同群組的 PR 合計金額（滾動視窗，避免曆月邊界漏抓）。
   4. 用 `kri.ApprovalMatrix` 查單筆金額與合計金額的核決層級。
   5. 合計層級 > 單筆層級，且視窗內至少 `MinCount` 筆 → 標記。
-- **影響金額**：該筆 PR 金額，換算本幣。
+- **影響金額**：該筆 PR 金額。PR 沒有匯率，所以先以 PR 幣別計（`LocalCurrency` 填 PR 幣別），匯率表到位後再換算。
 - **參數**：`WindowDays` = 30；`MinCount` = 2；`WindowMonths` = 12。
 - **前置條件**：`kri.ApprovalMatrix` 沒有資料時，這題不會標記任何東西，RunStep 會記錄「核決權限表為空」。
 - **待確認**：部門的定義（成本中心或請購人）；系統自動產生的 PR 要排除（需 `EBAN.ESTKZ`）；PR 價格單位（`EBAN.PEINH` 目前不在規格內，先視為 1）。
@@ -371,3 +371,5 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | 日期 | 版本 | 內容 |
 |---|---|---|
 | 2026-10-19 | v1.0 | 初版：框架決策 D1～D12、分期、第一期 KRI 規格 |
+| 2026-10-19 | v1.1 | `kri.Exclusion` 改為 `kri.ValueList`，同時放排除名單與白名單；K08 影響金額以 PR 幣別計（PR 沒有匯率） |
+| 2026-10-19 | v1.2 | 第一期實作完成：框架 + K08、K13、K14、K18、K21，LocalDB 測試 37 項通過 |

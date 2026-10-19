@@ -34,6 +34,27 @@ EXEC etl.Load_PurchaseOrderDetail; -- 只跑一張
 （全部 schema，SAP 原表與目標表都在）。連線讀 `config.json` / `.env`，跟匯入工具同一個資料庫。
 `--schemas dbo,prc` 只盤點指定的 schema；第一個參數可以指定輸出檔名。
 
+## KRI
+
+設計與每題規格見 [`docs/KRI_PRD.md`](../docs/KRI_PRD.md)。ETL 跑完之後：
+
+| 檔案 | 做什麼 | 什麼時候跑 |
+|---|---|---|
+| `sql/10_kri_framework.sql` | 建 `kri` schema：設定表、執行紀錄、`kri.Flag`、`kri.RunAll` | 第一次，或框架改了之後（不會清掉已調的設定） |
+| `sql/11_kri_procedures.sql` | 建各題 KRI 的明細表與程序 | 第一次，或 KRI 改了之後 |
+| `sql/12_kri_seed.sql` | 補上預設定義、暫定門檻、白名單（只補沒有的） | 第一次，或新增 KRI 之後 |
+
+```sql
+EXEC kri.RunAll;                            -- 跑全部啟用的 KRI，基準日今天
+EXEC kri.RunAll @AsOfDate = '2025-12-31';   -- 指定基準日
+EXEC kri.RunAll @Only = N'K14';              -- 只跑某幾題
+SELECT * FROM kri.vFlagLatest;              -- 每題最新一次成功的標記（儀表板接這個）
+```
+
+- **調門檻：** `UPDATE kri.Parameter SET ParamValue = 0.1, IsTentative = 0 WHERE KriCode = 'K14' AND ParamName = 'PriceTolerance';`
+- **加排除名單：** `INSERT kri.ValueList (KriCode, ListName, ListValue, Note) VALUES ('*', 'ExcludeVendorPrefix', 'X', N'一次性供應商');`
+- **K08 要先填核決權限：** `kri.ApprovalMatrix`，沒有資料時 K08 不會標記，`RunAll` 的說明欄會提示。
+
 ## 規格改了
 
 ```
@@ -46,7 +67,8 @@ DDL 從規格表產生（刪除線的列不建；規格上的 VARCHAR 一律建�
 ## 測試
 
 ```
-python etl/test_etl.py
+python etl/test_etl.py      # ETL
+python etl/test_kri.py      # KRI
 ```
 
 在 LocalDB 建一個暫存資料庫，塞進多筆分攤、沖銷、PR 拆多張 PO、分割評價、
