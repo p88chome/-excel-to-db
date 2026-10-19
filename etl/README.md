@@ -30,6 +30,10 @@ EXEC etl.Load_PurchaseOrderDetail; -- 只跑一張
 要盤點資料庫裡每張表的欄位結構（給 user 看、或對照規格的「是否有資料」）時，跑 `sql/91_column_inventory.sql`：
 列出每張表的筆數、每個欄位的型別；`@fill = 1` 再加上每個欄位有值的筆數與比例。
 
+要直接存成 Excel：在專案根目錄跑 `python column_inventory.py`，輸出 Schema、表、欄位、型別、可為NULL
+（全部 schema，SAP 原表與目標表都在）。連線讀 `config.json` / `.env`，跟匯入工具同一個資料庫。
+`--schemas dbo,prc` 只盤點指定的 schema；第一個參數可以指定輸出檔名。
+
 ## 規格改了
 
 ```
