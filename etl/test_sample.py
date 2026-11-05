@@ -142,6 +142,11 @@ for i in range(50):
     ins("ADT_ECAR", [{"Id": i, "Amount": i * 1.5, "Memo": f"備註{i}", "Dt": "2025-01-01"}])
     ins("MBEWH", [{"MATERIAL": f"X{i}", "LFGJA": "2024"}])
 
+for i in range(40):           # A018 都跟抽到的單據無關，測補到 @Rows
+    ins("A018", [{"LIFNR": "V9999", "MATNR": "M99999", "EKORG": "TW01", "ESOKZ": "0", "KSCHL": "PB00",
+                  "DATAB": f"20{i:02d}-01-01", "DATBI": f"20{i:02d}-12-31", "KNUMH": f"Q{i:09d}"}])
+    ins("KONP", [{"KNUMH": f"Q{i:09d}", "KOPOS": "01", "KBETR": 5, "KONWA": "TWD", "KPEIN": 1}])
+
 for f in ("01_create_tables.sql", "02_load_procedures.sql", "20_sample_exp.sql"):
     sqlcmd("-i", str(SQL / f), db=DB)
 cur.execute("EXEC etl.LoadAll").fetchall()
@@ -207,10 +212,23 @@ for t in ("MARA", "MAKT", "MARC", "MARD", "MBEW"):
     check(f"{t} 只帶用到的物料", keys(f"SELECT MATNR FROM exp.{t}"), used_m)
 check("CDHDR 只帶 KRED、用到的供應商", keys("SELECT OBJECTID FROM exp.CDHDR"), used_v)
 check("CDPOS 跟 CDHDR 同一批", keys("SELECT CHANGENR FROM exp.CDPOS"), keys("SELECT CHANGENR FROM exp.CDHDR"))
-check("A017 = 用到的供應商 × 物料", one("SELECT COUNT(*) FROM exp.A017")[0][0], len(used_v) * len(used_m))
-check("KONP、KONH 跟 A017 同一批",
+pairs = one("""SELECT COUNT(*) FROM dbo.A017 a WHERE EXISTS (
+                   SELECT 1 FROM exp.EKKO k JOIN exp.EKPO p ON p.EBELN = k.EBELN
+                   WHERE k.LIFNR = a.LIFNR AND p.MATNR = a.MATNR
+                   UNION ALL SELECT 1 FROM exp.EBAN r WHERE r.FLIEF = a.LIFNR AND r.MATNR = a.MATNR)""")[0][0]
+check("A017 只帶同一張單據上一起出現的組合（不是供應商 × 物料）",
+      one("""SELECT COUNT(*) FROM exp.A017 a WHERE NOT EXISTS (
+               SELECT 1 FROM exp.EKKO k JOIN exp.EKPO p ON p.EBELN = k.EBELN
+               WHERE k.LIFNR = a.LIFNR AND p.MATNR = a.MATNR
+               UNION ALL SELECT 1 FROM exp.EBAN r WHERE r.FLIEF = a.LIFNR AND r.MATNR = a.MATNR)""")[0][0], 0)
+check("A017 比供應商 × 物料少", pairs < len(used_v) * len(used_m), True)
+check("A017 筆數 = 用到的組合（已超過 @Rows 不補）", one("SELECT COUNT(*) FROM exp.A017")[0][0], pairs)
+check("KONP 跟 A017 + A018 同一批、KONH 只有 A017 的（測試資料 A018 沒建 KONH）",
       (keys("SELECT KNUMH FROM exp.KONP"), keys("SELECT KNUMH FROM exp.KONH")),
-      (keys("SELECT KNUMH FROM exp.A017"),) * 2)
+      (keys("SELECT KNUMH FROM exp.A017 UNION SELECT KNUMH FROM exp.A018"), keys("SELECT KNUMH FROM exp.A017")))
+check("A018 沒有用到的組合時隨機補到 @Rows 筆", (res["dbo.A018"][0], res["dbo.A018"][1]),
+      (5, "用到的 0 筆 + 隨機補 5 筆"))
+check("KONP 跟著補進來的 A018", one("SELECT COUNT(*) FROM exp.KONP WHERE KNUMH LIKE 'Q%'")[0][0], 5)
 check("EINE 跟 EINA 同一批", keys("SELECT INFNR FROM exp.EINE"), keys("SELECT INFNR FROM exp.EINA"))
 check("T001 整張", one("SELECT COUNT(*) FROM exp.T001")[0][0], 1)
 
@@ -231,7 +249,10 @@ check("業務表 VendorChangeHistory", keys("SELECT DISTINCT Vendor FROM exp.Ven
 check("業務表 Material、InventoryBalance",
       (keys("SELECT Material FROM exp.Material"), keys("SELECT Material FROM exp.InventoryBalance")),
       (used_m, used_m))
-check("業務表條件 A017", one("SELECT COUNT(*) FROM exp.PurchasingCondA017")[0][0], len(used_v) * len(used_m))
+check("業務表條件 A017 跟 exp.A017 同一批",
+      keys("SELECT ConditionRecord FROM exp.PurchasingCondA017"), keys("SELECT KNUMH FROM exp.A017"))
+check("業務表資訊記錄跟 exp.EINA 同一批",
+      keys("SELECT InfoRecord FROM exp.PurchasingInfoRecord"), keys("SELECT INFNR FROM exp.EINA"))
 
 # 同一個 seed 抽同一批；換 seed 換一批；不給 seed 會自己產生
 before = (po_set, keys("SELECT MBLNR FROM exp.MKPF"), keys("SELECT BELNR FROM exp.BKPF"))

@@ -10,7 +10,8 @@
 --      收貨憑證、發票傳票。所以 exp 裡任何單據引用的 PO 都在 exp.EKKO 裡
 --   3. 明細照表頭帶：EKPO / EKKN / EKET / EKBE、EBKN、MSEG、BSEG，一張單據的明細全部帶出
 --   4. 主檔只帶有用到的：這些單據的供應商（LFA1 / LFB1 / LFM1 / CDHDR / CDPOS）、
---      物料（MARA / MAKT / MARC / MARD / MBEW）、供應商 × 物料的資訊記錄與價格條件
+--      物料（MARA / MAKT / MARC / MARD / MBEW）；資訊記錄與價格條件只帶同一張 PO / PR 上
+--      一起出現的「供應商 + 物料」，A017 / A018 不足 @Rows 筆再隨機補（超過就全留）
 --   5. 設定表（T001、T001K、T001W、T024D、T024E）整張複製
 --   6. 業務表用同一批鍵篩，跟 exp 裡的原表是同一批單據
 --   7. 其他表：LFBK 帶用到的供應商、MBEWH 帶用到的物料（沒有 LIFNR / MATNR 欄位就改成隨機）；
@@ -201,7 +202,13 @@ BEGIN
 
     DECLARE @v  NVARCHAR(200) = N't.LIFNR IN (SELECT LIFNR FROM #vendor)',
             @m  NVARCHAR(200) = N't.MATNR IN (SELECT MATNR FROM #mat)',
-            @vm NVARCHAR(200) = N't.LIFNR IN (SELECT LIFNR FROM #vendor) AND t.MATNR IN (SELECT MATNR FROM #mat)';
+            @vm NVARCHAR(200) = N'EXISTS (SELECT 1 FROM #vm k WHERE k.LIFNR = t.LIFNR AND k.MATNR = t.MATNR)';
+
+    -- 同一張 PO / PR 上真的一起出現的「供應商 + 物料」，不是所有供應商 × 所有物料
+    SELECT k.LIFNR, p.MATNR INTO #vm
+    FROM exp.EKKO k JOIN exp.EKPO p ON p.EBELN = k.EBELN
+    WHERE ISNULL(k.LIFNR, '') <> '' AND ISNULL(p.MATNR, '') <> ''
+    UNION SELECT FLIEF, MATNR FROM exp.EBAN WHERE ISNULL(FLIEF, '') <> '' AND ISNULL(MATNR, '') <> '';
 
     EXEC exp.CopyTable N'dbo.LFA1', @v;
     EXEC exp.CopyTable N'dbo.LFB1', @v;
@@ -217,8 +224,11 @@ BEGIN
 
     EXEC exp.CopyTable N'dbo.EINA', @vm;
     EXEC exp.CopyTable N'dbo.EINE', N't.INFNR IN (SELECT INFNR FROM exp.EINA)';
+    -- 價格條件：先帶用到的組合，不足 @Rows 筆再隨機補（超過就全留），KONP / KONH 跟著同一批
     EXEC exp.CopyTable N'dbo.A017', @vm;
+    EXEC exp.TopUp     N'dbo.A017', @Rows, @Seed, N'KNUMH';
     EXEC exp.CopyTable N'dbo.A018', @vm;
+    EXEC exp.TopUp     N'dbo.A018', @Rows, @Seed, N'KNUMH';
     EXEC exp.CopyTable N'dbo.KONP', N't.KNUMH IN (SELECT KNUMH FROM exp.A017 UNION SELECT KNUMH FROM exp.A018)';
     EXEC exp.CopyTable N'dbo.KONH', N't.KNUMH IN (SELECT KNUMH FROM exp.A017 UNION SELECT KNUMH FROM exp.A018)';
 
@@ -236,8 +246,7 @@ BEGIN
     -- ------------------------------------------------------------------
     DECLARE @bmd NVARCHAR(200) = N'EXISTS (SELECT 1 FROM #md k WHERE k.MBLNR = t.MaterialDoc AND k.MJAHR = t.MaterialDocYear)',
             @bv  NVARCHAR(200) = N't.Vendor IN (SELECT LIFNR FROM #vendor)',
-            @bm  NVARCHAR(200) = N't.Material IN (SELECT MATNR FROM #mat)',
-            @bvm NVARCHAR(200) = N't.Vendor IN (SELECT LIFNR FROM #vendor) AND t.Material IN (SELECT MATNR FROM #mat)';
+            @bm  NVARCHAR(200) = N't.Material IN (SELECT MATNR FROM #mat)';
 
     EXEC exp.CopyTable N'prc.PurchaseOrderDetail', N't.PoNumber IN (SELECT EBELN FROM #po)';
     EXEC exp.CopyTable N'prc.PurchaseRequisition', N't.PrNumber IN (SELECT BANFN FROM #pr)';
@@ -249,9 +258,9 @@ BEGIN
     EXEC exp.CopyTable N'mst.VendorChangeHistory',  @bv;
     EXEC exp.CopyTable N'mst.Material',             @bm;
     EXEC exp.CopyTable N'inv.InventoryBalance',     @bm;
-    EXEC exp.CopyTable N'mst.PurchasingInfoRecord', @bvm;
-    EXEC exp.CopyTable N'mst.PurchasingCondA017',   @bvm;
-    EXEC exp.CopyTable N'mst.PurchasingCondA018',   @bvm;
+    EXEC exp.CopyTable N'mst.PurchasingInfoRecord', N't.InfoRecord IN (SELECT INFNR FROM exp.EINA)';
+    EXEC exp.CopyTable N'mst.PurchasingCondA017',   N't.ConditionRecord IN (SELECT KNUMH FROM exp.A017)';
+    EXEC exp.CopyTable N'mst.PurchasingCondA018',   N't.ConditionRecord IN (SELECT KNUMH FROM exp.A018)';
 
     -- ------------------------------------------------------------------
     -- 7. 其他表
