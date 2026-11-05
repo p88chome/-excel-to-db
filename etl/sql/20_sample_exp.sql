@@ -11,8 +11,11 @@
 --   3. 明細照表頭帶：EKPO / EKKN / EKET / EKBE、EBKN、MSEG、BSEG，一張單據的明細全部帶出
 --   4. 主檔只帶有用到的：這些單據的供應商（LFA1 / LFB1 / LFM1 / CDHDR / CDPOS）、
 --      物料（MARA / MAKT / MARC / MARD / MBEW）、供應商 × 物料的資訊記錄與價格條件
---   5. 設定表（T001、T024D、T024E）整張複製
+--   5. 設定表（T001、T001K、T001W、T024D、T024E）整張複製
 --   6. 業務表用同一批鍵篩，跟 exp 裡的原表是同一批單據
+--   7. 其他表：LFBK 帶用到的供應商、MBEWH 帶用到的物料（沒有 LIFNR / MATNR 欄位就改成隨機）；
+--      ANLA、ZTM105、ZTM80、ADT_CONTRACT、ADT_ECAR、ADT_OSWEB、ADT_POAS 沒有固定關聯，
+--      SELECT * 隨機抽 @Rows 筆（依 seed + 整列內容的雜湊排序，同一個 seed 一樣抽同一批）
 -- 所以 @Rows 是「每類單據的張數」，不是每張表的筆數：明細表會比較多，主檔看用到幾個。
 --
 -- 隨機的方式：依「seed + 單據號碼」的雜湊排序取前 @Rows 張。
@@ -46,6 +49,30 @@ BEGIN
              + N'SET @r = @@ROWCOUNT;';
     EXEC sp_executesql @sql, N'@r BIGINT OUTPUT', @r = @rows OUTPUT;
     INSERT #explog (Src, Rows, Note) VALUES (@Src, @rows, NULL);
+END;
+GO
+
+-- 隨機抽 @Rows 筆：exp.<表名> = SELECT TOP (@Rows) * FROM @Src，依 seed + 整列的 BINARY_CHECKSUM 排序
+CREATE OR ALTER PROCEDURE exp.CopyRandom @Src NVARCHAR(256), @Top INT, @Seed INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @schema SYSNAME = PARSENAME(@Src, 2), @name SYSNAME = PARSENAME(@Src, 1),
+            @sql NVARCHAR(MAX), @rows BIGINT;
+
+    IF OBJECT_ID(QUOTENAME(@schema) + N'.' + QUOTENAME(@name), N'U') IS NULL
+    BEGIN
+        INSERT #explog (Src, Rows, Note) VALUES (@Src, NULL, N'來源表不存在，跳過');
+        RETURN;
+    END;
+
+    SET @sql = N'DROP TABLE IF EXISTS exp.' + QUOTENAME(@name) + N';'
+             + N'SELECT TOP (@n) t.* INTO exp.' + QUOTENAME(@name)
+             + N' FROM ' + QUOTENAME(@schema) + N'.' + QUOTENAME(@name) + N' t'
+             + N' ORDER BY HASHBYTES(''MD5'', CONCAT(@seed, N''|'', BINARY_CHECKSUM(*)));'
+             + N'SET @r = @@ROWCOUNT;';
+    EXEC sp_executesql @sql, N'@n INT, @seed INT, @r BIGINT OUTPUT', @n = @Top, @seed = @Seed, @r = @rows OUTPUT;
+    INSERT #explog (Src, Rows, Note) VALUES (@Src, @rows, N'隨機');
 END;
 GO
 
@@ -167,6 +194,8 @@ BEGIN
     EXEC exp.CopyTable N'dbo.T001';
     EXEC exp.CopyTable N'dbo.T024D';
     EXEC exp.CopyTable N'dbo.T024E';
+    EXEC exp.CopyTable N'dbo.T001K';
+    EXEC exp.CopyTable N'dbo.T001W';
 
     -- ------------------------------------------------------------------
     -- 6. 業務表：同一批鍵
@@ -189,6 +218,22 @@ BEGIN
     EXEC exp.CopyTable N'mst.PurchasingInfoRecord', @bvm;
     EXEC exp.CopyTable N'mst.PurchasingCondA017',   @bvm;
     EXEC exp.CopyTable N'mst.PurchasingCondA018',   @bvm;
+
+    -- ------------------------------------------------------------------
+    -- 7. 其他表
+    -- ------------------------------------------------------------------
+    IF COL_LENGTH(N'dbo.LFBK', N'LIFNR') IS NOT NULL EXEC exp.CopyTable N'dbo.LFBK', @v;
+    ELSE EXEC exp.CopyRandom N'dbo.LFBK', @Rows, @Seed;
+    IF COL_LENGTH(N'dbo.MBEWH', N'MATNR') IS NOT NULL EXEC exp.CopyTable N'dbo.MBEWH', @m;
+    ELSE EXEC exp.CopyRandom N'dbo.MBEWH', @Rows, @Seed;
+
+    EXEC exp.CopyRandom N'dbo.ANLA',         @Rows, @Seed;
+    EXEC exp.CopyRandom N'dbo.ZTM105',       @Rows, @Seed;
+    EXEC exp.CopyRandom N'dbo.ZTM80',        @Rows, @Seed;
+    EXEC exp.CopyRandom N'dbo.ADT_CONTRACT', @Rows, @Seed;
+    EXEC exp.CopyRandom N'dbo.ADT_ECAR',     @Rows, @Seed;
+    EXEC exp.CopyRandom N'dbo.ADT_OSWEB',    @Rows, @Seed;
+    EXEC exp.CopyRandom N'dbo.ADT_POAS',     @Rows, @Seed;
 
     SELECT Src AS [來源], N'exp.' + PARSENAME(Src, 1) AS [抽樣表], Rows AS [筆數], Note AS [說明],
            @Seed AS [Seed]

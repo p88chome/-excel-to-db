@@ -122,6 +122,18 @@ for v in V + ["V9999"]:
         ins("KONP", [{"KNUMH": f"K{k:09d}", "KOPOS": "01", "KBETR": 5, "KONWA": "TWD", "KPEIN": 1}])
         ins("KONH", [{"KNUMH": f"K{k:09d}", "ERDAT": "2025-01-01"}])
 
+# 其他表：LFBK 有 LIFNR、MBEWH 沒有 MATNR（測退回隨機）、ADT_ECAR 欄位隨便、ZTM80 不存在
+cur.execute("CREATE TABLE dbo.LFBK (LIFNR NVARCHAR(100), BANKN NVARCHAR(100))")
+for v in V + ["V9999"]:
+    ins("LFBK", [{"LIFNR": v, "BANKN": "123"}])
+cur.execute("CREATE TABLE dbo.MBEWH (MATERIAL NVARCHAR(100), LFGJA NVARCHAR(4))")
+cur.execute("CREATE TABLE dbo.T001W (WERKS NVARCHAR(100), NAME1 NVARCHAR(100))")
+ins("T001W", [{"WERKS": "1100", "NAME1": "一廠"}, {"WERKS": "1200", "NAME1": "二廠"}])
+cur.execute("CREATE TABLE dbo.ADT_ECAR (Id INT, Amount DECIMAL(18,2), Memo NVARCHAR(MAX), Dt DATETIME2)")
+for i in range(50):
+    ins("ADT_ECAR", [{"Id": i, "Amount": i * 1.5, "Memo": f"備註{i}", "Dt": "2025-01-01"}])
+    ins("MBEWH", [{"MATERIAL": f"X{i}", "LFGJA": "2024"}])
+
 for f in ("01_create_tables.sql", "02_load_procedures.sql", "20_sample_exp.sql"):
     sqlcmd("-i", str(SQL / f), db=DB)
 cur.execute("EXEC etl.LoadAll").fetchall()
@@ -226,6 +238,22 @@ check("不給 seed 也會列出用的是哪一個", len(seed) == 1 and None not 
 sample(1000, 1)
 check("@Rows 比資料多時整張都抽", one("SELECT COUNT(*) FROM exp.EKKO")[0][0], N)
 check("只動 exp，原表沒變", one("SELECT COUNT(*) FROM dbo.EKKO")[0][0], N)
+
+# 其他表
+sample(5, 42)
+check("LFBK 只帶用到的供應商", keys("SELECT LIFNR FROM exp.LFBK"),
+      keys("SELECT LIFNR FROM exp.LFA1"))
+check("MBEWH 沒有 MATNR 時退回隨機 5 筆", one("SELECT COUNT(*) FROM exp.MBEWH")[0][0], 5)
+check("T001W 整張", one("SELECT COUNT(*) FROM exp.T001W")[0][0], 2)
+check("ADT_ECAR 隨機 5 筆、欄位全帶",
+      (one("SELECT COUNT(*) FROM exp.ADT_ECAR")[0][0],
+       one("SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('exp.ADT_ECAR')")[0][0]), (5, 4))
+ecar = keys("SELECT Id FROM exp.ADT_ECAR")
+res = sample(5, 42)
+check("ADT_ECAR 同一個 seed 抽同一批", keys("SELECT Id FROM exp.ADT_ECAR"), ecar)
+check("不存在的 ZTM80 跳過", res["dbo.ZTM80"][:2], (None, "來源表不存在，跳過"))
+sample(5, 7)
+check("ADT_ECAR 換 seed 換一批", keys("SELECT Id FROM exp.ADT_ECAR") != ecar, True)
 
 cn.close()
 sqlcmd("-Q", f"ALTER DATABASE {DB} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {DB};")
