@@ -3,6 +3,7 @@
 --
 --   EXEC exp.SampleAll;                         -- 每類單據隨機抽 1000 張，每次都不一樣
 --   EXEC exp.SampleAll @Rows = 500, @Seed = 42;  -- 同一個 seed、同一份資料 → 抽出同一批
+--   EXEC exp.SampleAll @PreferFilled = 0;        -- 不挑空欄位少的，純隨機
 --
 -- 不是每張表各自亂抽 1000 筆（那樣 EKKO 和 EKPO 會對不起來），而是「以單據為主」：
 --   1. 隨機抽 @Rows 張單據表頭：PO（EKKO）、PR（EBAN）、物料憑證（MKPF）、有供應商行的會計傳票（BKPF）
@@ -22,6 +23,9 @@
 -- 所以 @Rows 是「每類單據的張數」，不是每張表的筆數：明細表會比較多，主檔看用到幾個。
 --
 -- 隨機的方式：依「seed + 單據號碼」的雜湊排序取前 @Rows 張。
+-- @PreferFilled = 1（預設）時，凡是「隨機挑」的地方都先挑空欄位（NULL）少的，同樣少的再隨機：
+-- 四類單據表頭、整張隨機的表、A017 / A018 / ANLA 的補與縮。跟著單據帶的明細與主檔沒得挑。
+-- 這樣抽出來的會偏向資料比較完整的單據；要照原本的比例抽就給 @PreferFilled = 0。
 -- 不給 @Seed 就隨機產生一個，結果最後一欄會列出這次用的 seed，要重抽同一批就把它帶回來。
 -- 重新匯入 SAP 資料後用同一個 seed，原本就有的單據還是會抽到同一批。
 --
@@ -29,6 +33,27 @@
 -- 注意：exp 裡仍然是客戶的真實資料，不要放進版控或帶出客戶環境。
 
 IF SCHEMA_ID(N'exp') IS NULL EXEC (N'CREATE SCHEMA exp');
+GO
+
+-- 一列有幾個 NULL 欄位的運算式，給「挑空欄位少的」排序用。@Alias 空字串 = 不加前綴。
+CREATE OR ALTER FUNCTION exp.NullCountExpr (@Obj NVARCHAR(256), @Alias SYSNAME)
+RETURNS NVARCHAR(MAX)
+AS
+BEGIN
+    DECLARE @p NVARCHAR(200) = IIF(ISNULL(@Alias, N'') = N'', N'', QUOTENAME(@Alias) + N'.');
+    RETURN (SELECT N'(' + STRING_AGG(CAST(N'IIF(' + @p + QUOTENAME(name) + N' IS NULL, 1, 0)' AS NVARCHAR(MAX)), N' + ') + N')'
+            FROM sys.columns WHERE object_id = OBJECT_ID(@Obj));
+END;
+GO
+
+-- 隨機排序：@Prefer = 1 時空欄位少的排前面，同樣少的再依 seed + 整列內容的雜湊
+CREATE OR ALTER FUNCTION exp.RandomOrder (@Obj NVARCHAR(256), @Alias SYSNAME, @Prefer BIT)
+RETURNS NVARCHAR(MAX)
+AS
+BEGIN
+    RETURN IIF(@Prefer = 1, exp.NullCountExpr(@Obj, @Alias) + N', ', N'')
+         + N'HASHBYTES(''MD5'', CONCAT(@seed, N''|'', BINARY_CHECKSUM(*)))';
+END;
 GO
 
 -- 複製一張表：exp.<表名> = SELECT * FROM @Src t WHERE @Where（@Where 用 t 當別名）
@@ -56,7 +81,7 @@ END;
 GO
 
 -- 隨機抽 @Rows 筆：exp.<表名> = SELECT TOP (@Rows) * FROM @Src，依 seed + 整列的 BINARY_CHECKSUM 排序
-CREATE OR ALTER PROCEDURE exp.CopyRandom @Src NVARCHAR(256), @Top INT, @Seed INT
+CREATE OR ALTER PROCEDURE exp.CopyRandom @Src NVARCHAR(256), @Top INT, @Seed INT, @Prefer BIT = 1
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -72,16 +97,17 @@ BEGIN
     SET @sql = N'DROP TABLE IF EXISTS exp.' + QUOTENAME(@name) + N';'
              + N'SELECT TOP (@n) t.* INTO exp.' + QUOTENAME(@name)
              + N' FROM ' + QUOTENAME(@schema) + N'.' + QUOTENAME(@name) + N' t'
-             + N' ORDER BY HASHBYTES(''MD5'', CONCAT(@seed, N''|'', BINARY_CHECKSUM(*)));'
+             + N' ORDER BY ' + exp.RandomOrder(@Src, N't', @Prefer) + N';'
              + N'SET @r = @@ROWCOUNT;';
     EXEC sp_executesql @sql, N'@n INT, @seed INT, @r BIGINT OUTPUT', @n = @Top, @seed = @Seed, @r = @rows OUTPUT;
-    INSERT #explog (Src, Rows, Note) VALUES (@Src, @rows, N'隨機');
+    INSERT #explog (Src, Rows, Note) VALUES (@Src, @rows, IIF(@Prefer = 1, N'隨機（空欄位少的優先）', N'隨機'));
 END;
 GO
 
 -- 調到剛好 @Top 筆：exp.<表名> 不足就從 @Src 裡還沒抽到的（依 @Keys 判斷）隨機補，
 -- 超過就依 seed 隨機留 @Top 筆。都是依 seed + 整列內容的雜湊排序，同一個 seed 結果一樣。
-CREATE OR ALTER PROCEDURE exp.FitRows @Src NVARCHAR(256), @Top INT, @Seed INT, @Keys NVARCHAR(400)
+CREATE OR ALTER PROCEDURE exp.FitRows @Src NVARCHAR(256), @Top INT, @Seed INT, @Keys NVARCHAR(400),
+                                     @Prefer BIT = 1
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -95,7 +121,8 @@ BEGIN
 
     IF @have > @Top
     BEGIN
-        SET @sql = N'WITH x AS (SELECT ROW_NUMBER() OVER (ORDER BY HASHBYTES(''MD5'', CONCAT(@seed, N''|'', BINARY_CHECKSUM(*)))) AS rn'
+        SET @sql = N'WITH x AS (SELECT ROW_NUMBER() OVER (ORDER BY '
+                 + exp.RandomOrder(N'exp.' + QUOTENAME(@name), N'', @Prefer) + N') AS rn'
                  + N' FROM exp.' + QUOTENAME(@name) + N') DELETE x WHERE rn > @top;'
                  + N'SET @r = @@ROWCOUNT;';
         EXEC sp_executesql @sql, N'@top INT, @seed INT, @r BIGINT OUTPUT', @top = @Top, @seed = @Seed, @r = @n OUTPUT;
@@ -112,7 +139,7 @@ BEGIN
     SET @sql = N'INSERT exp.' + QUOTENAME(@name) + N' SELECT TOP (@n) t.* FROM '
              + QUOTENAME(@schema) + N'.' + QUOTENAME(@name) + N' t'
              + N' WHERE NOT EXISTS (SELECT 1 FROM exp.' + QUOTENAME(@name) + N' e WHERE ' + @match + N')'
-             + N' ORDER BY HASHBYTES(''MD5'', CONCAT(@seed, N''|'', BINARY_CHECKSUM(*)));'
+             + N' ORDER BY ' + exp.RandomOrder(@Src, N't', @Prefer) + N';'
              + N'SET @r = @@ROWCOUNT;';
     DECLARE @need BIGINT = @Top - @have;
     EXEC sp_executesql @sql, N'@n BIGINT, @seed INT, @r BIGINT OUTPUT', @n = @need, @seed = @Seed, @r = @n OUTPUT;
@@ -125,40 +152,46 @@ GO
 DROP PROCEDURE IF EXISTS exp.TopUp;
 GO
 
-CREATE OR ALTER PROCEDURE exp.SampleAll @Rows INT = 1000, @Seed INT = NULL
+CREATE OR ALTER PROCEDURE exp.SampleAll @Rows INT = 1000, @Seed INT = NULL, @PreferFilled BIT = 1
 AS
 BEGIN
     SET NOCOUNT ON;
     SET @Seed = ISNULL(@Seed, ABS(CHECKSUM(NEWID())) % 1000000);
-    DECLARE @s NVARCHAR(20) = CAST(@Seed AS NVARCHAR(20)) + N'|';
+    DECLARE @s NVARCHAR(20) = CAST(@Seed AS NVARCHAR(20)) + N'|', @q NVARCHAR(MAX),
+            @nul NVARCHAR(MAX);
 
     CREATE TABLE #explog (seq INT IDENTITY, Src NVARCHAR(256), Rows BIGINT, Note NVARCHAR(200));
 
     -- ------------------------------------------------------------------
     -- 1～2. 單據鍵
     -- ------------------------------------------------------------------
-    -- 先四類各自隨機抽 @Rows 張
-    SELECT TOP (@Rows) EBELN INTO #po
-    FROM dbo.EKKO
-    WHERE ISNULL(EBELN, '') <> ''
-    ORDER BY HASHBYTES('MD5', @s + EBELN);
+    -- 先四類各自隨機抽 @Rows 張。@PreferFilled = 1 時表頭空欄位少的優先（PR 看項目的平均）
+    SELECT TOP 0 EBELN INTO #po FROM dbo.EKKO;
+    SET @nul = IIF(@PreferFilled = 1, exp.NullCountExpr(N'dbo.EKKO', N't') + N', ', N'');
+    SET @q = N'INSERT #po SELECT TOP (@n) t.EBELN FROM dbo.EKKO t WHERE ISNULL(t.EBELN, '''') <> '''''
+           + N' ORDER BY ' + @nul + N'HASHBYTES(''MD5'', @s + t.EBELN)';
+    EXEC sp_executesql @q, N'@n INT, @s NVARCHAR(20)', @n = @Rows, @s = @s;
 
-    SELECT TOP (@Rows) BANFN INTO #pr
-    FROM (SELECT DISTINCT BANFN FROM dbo.EBAN WHERE ISNULL(BANFN, '') <> '') x
-    ORDER BY HASHBYTES('MD5', @s + BANFN);
+    SELECT TOP 0 BANFN INTO #pr FROM dbo.EBAN;
+    SET @nul = IIF(@PreferFilled = 1, N'AVG(CAST(' + exp.NullCountExpr(N'dbo.EBAN', N't') + N' AS FLOAT)), ', N'');
+    SET @q = N'INSERT #pr SELECT TOP (@n) t.BANFN FROM dbo.EBAN t WHERE ISNULL(t.BANFN, '''') <> '''''
+           + N' GROUP BY t.BANFN ORDER BY ' + @nul + N'HASHBYTES(''MD5'', @s + t.BANFN)';
+    EXEC sp_executesql @q, N'@n INT, @s NVARCHAR(20)', @n = @Rows, @s = @s;
 
-    SELECT TOP (@Rows) MBLNR, MJAHR INTO #md
-    FROM dbo.MKPF
-    WHERE ISNULL(MBLNR, '') <> ''
-    ORDER BY HASHBYTES('MD5', @s + MBLNR + N'|' + CAST(MJAHR AS NVARCHAR(10)));
+    SELECT TOP 0 MBLNR, MJAHR INTO #md FROM dbo.MKPF;
+    SET @nul = IIF(@PreferFilled = 1, exp.NullCountExpr(N'dbo.MKPF', N't') + N', ', N'');
+    SET @q = N'INSERT #md SELECT TOP (@n) t.MBLNR, t.MJAHR FROM dbo.MKPF t WHERE ISNULL(t.MBLNR, '''') <> '''''
+           + N' ORDER BY ' + @nul + N'HASHBYTES(''MD5'', @s + t.MBLNR + N''|'' + CAST(t.MJAHR AS NVARCHAR(10)))';
+    EXEC sp_executesql @q, N'@n INT, @s NVARCHAR(20)', @n = @Rows, @s = @s;
 
     -- 會計傳票只從有供應商行的抽（不然 fin.AccountsPayable 抽出來幾乎是空的）
-    SELECT TOP (@Rows) h.BUKRS, h.BELNR, h.GJAHR INTO #ad
-    FROM dbo.BKPF h
-    WHERE EXISTS (SELECT 1 FROM dbo.BSEG s
-                  WHERE s.BUKRS = h.BUKRS AND s.BELNR = h.BELNR AND s.GJAHR = h.GJAHR
-                    AND ISNULL(s.LIFNR, '') <> '')
-    ORDER BY HASHBYTES('MD5', @s + h.BUKRS + N'|' + h.BELNR + N'|' + CAST(h.GJAHR AS NVARCHAR(10)));
+    SELECT TOP 0 BUKRS, BELNR, GJAHR INTO #ad FROM dbo.BKPF;
+    SET @nul = IIF(@PreferFilled = 1, exp.NullCountExpr(N'dbo.BKPF', N't') + N', ', N'');
+    SET @q = N'INSERT #ad SELECT TOP (@n) t.BUKRS, t.BELNR, t.GJAHR FROM dbo.BKPF t'
+           + N' WHERE EXISTS (SELECT 1 FROM dbo.BSEG s WHERE s.BUKRS = t.BUKRS AND s.BELNR = t.BELNR'
+           + N' AND s.GJAHR = t.GJAHR AND ISNULL(s.LIFNR, '''') <> '''')'
+           + N' ORDER BY ' + @nul + N'HASHBYTES(''MD5'', @s + t.BUKRS + N''|'' + t.BELNR + N''|'' + CAST(t.GJAHR AS NVARCHAR(10)))';
+    EXEC sp_executesql @q, N'@n INT, @s NVARCHAR(20)', @n = @Rows, @s = @s;
 
     -- 抽到的 PR、物料憑證、傳票引用到的 PO 併進來
     INSERT #po (EBELN)
@@ -240,9 +273,9 @@ BEGIN
     EXEC exp.CopyTable N'dbo.EINE', N't.INFNR IN (SELECT INFNR FROM exp.EINA)';
     -- 價格條件：先帶用到的組合，調到 @Rows 筆（不足隨機補、超過隨機留），KONP / KONH 跟著同一批
     EXEC exp.CopyTable N'dbo.A017', @vm;
-    EXEC exp.FitRows    N'dbo.A017', @Rows, @Seed, N'KNUMH';
+    EXEC exp.FitRows    N'dbo.A017', @Rows, @Seed, N'KNUMH', @PreferFilled;
     EXEC exp.CopyTable N'dbo.A018', @vm;
-    EXEC exp.FitRows    N'dbo.A018', @Rows, @Seed, N'KNUMH';
+    EXEC exp.FitRows    N'dbo.A018', @Rows, @Seed, N'KNUMH', @PreferFilled;
     EXEC exp.CopyTable N'dbo.KONP', N't.KNUMH IN (SELECT KNUMH FROM exp.A017 UNION SELECT KNUMH FROM exp.A018)';
     EXEC exp.CopyTable N'dbo.KONH', N't.KNUMH IN (SELECT KNUMH FROM exp.A017 UNION SELECT KNUMH FROM exp.A018)';
 
@@ -280,9 +313,9 @@ BEGIN
     -- 7. 其他表
     -- ------------------------------------------------------------------
     IF COL_LENGTH(N'dbo.LFBK', N'LIFNR') IS NOT NULL EXEC exp.CopyTable N'dbo.LFBK', @v;
-    ELSE EXEC exp.CopyRandom N'dbo.LFBK', @Rows, @Seed;
+    ELSE EXEC exp.CopyRandom N'dbo.LFBK', @Rows, @Seed, @PreferFilled;
     IF COL_LENGTH(N'dbo.MBEWH', N'MATNR') IS NOT NULL EXEC exp.CopyTable N'dbo.MBEWH', @m;
-    ELSE EXEC exp.CopyRandom N'dbo.MBEWH', @Rows, @Seed;
+    ELSE EXEC exp.CopyRandom N'dbo.MBEWH', @Rows, @Seed, @PreferFilled;
 
     -- ANLA：EKKN / BSEG 有 ANLN1 才串得起來；兩邊都有 ANLN2（資產子編號）時一起比
     DECLARE @anla NVARCHAR(MAX) = NULL;
@@ -305,15 +338,15 @@ BEGIN
         EXEC exp.CopyTable N'dbo.ANLA', @anla;
         DECLARE @anlaKeys NVARCHAR(100) = IIF(COL_LENGTH(N'dbo.ANLA', N'ANLN2') IS NOT NULL,
                                               N'BUKRS,ANLN1,ANLN2', N'BUKRS,ANLN1');
-        EXEC exp.FitRows N'dbo.ANLA', @Rows, @Seed, @anlaKeys;
+        EXEC exp.FitRows N'dbo.ANLA', @Rows, @Seed, @anlaKeys, @PreferFilled;
     END;
-    ELSE EXEC exp.CopyRandom N'dbo.ANLA', @Rows, @Seed;
-    EXEC exp.CopyRandom N'dbo.ZTM105',       @Rows, @Seed;
-    EXEC exp.CopyRandom N'dbo.ZTM80',        @Rows, @Seed;
-    EXEC exp.CopyRandom N'dbo.ADT_CONTRACT', @Rows, @Seed;
-    EXEC exp.CopyRandom N'dbo.ADT_ECAR',     @Rows, @Seed;
-    EXEC exp.CopyRandom N'dbo.ADT_OSWEB',    @Rows, @Seed;
-    EXEC exp.CopyRandom N'dbo.ADT_POAS',     @Rows, @Seed;
+    ELSE EXEC exp.CopyRandom N'dbo.ANLA', @Rows, @Seed, @PreferFilled;
+    EXEC exp.CopyRandom N'dbo.ZTM105',       @Rows, @Seed, @PreferFilled;
+    EXEC exp.CopyRandom N'dbo.ZTM80',        @Rows, @Seed, @PreferFilled;
+    EXEC exp.CopyRandom N'dbo.ADT_CONTRACT', @Rows, @Seed, @PreferFilled;
+    EXEC exp.CopyRandom N'dbo.ADT_ECAR',     @Rows, @Seed, @PreferFilled;
+    EXEC exp.CopyRandom N'dbo.ADT_OSWEB',    @Rows, @Seed, @PreferFilled;
+    EXEC exp.CopyRandom N'dbo.ADT_POAS',     @Rows, @Seed, @PreferFilled;
 
     SELECT Src AS [來源], N'exp.' + PARSENAME(Src, 1) AS [抽樣表], Rows AS [筆數], Note AS [說明],
            @Seed AS [Seed]

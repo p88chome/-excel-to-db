@@ -139,7 +139,8 @@ cur.execute("CREATE TABLE dbo.T001W (WERKS NVARCHAR(100), NAME1 NVARCHAR(100))")
 ins("T001W", [{"WERKS": "1100", "NAME1": "一廠"}, {"WERKS": "1200", "NAME1": "二廠"}])
 cur.execute("CREATE TABLE dbo.ADT_ECAR (Id INT, Amount DECIMAL(18,2), Memo NVARCHAR(MAX), Dt DATETIME2)")
 for i in range(50):
-    ins("ADT_ECAR", [{"Id": i, "Amount": i * 1.5, "Memo": f"備註{i}", "Dt": "2025-01-01"}])
+    # 只有 10 筆是完整的，其他缺 Memo：測空欄位少的優先
+    ins("ADT_ECAR", [{"Id": i, "Amount": i * 1.5, "Memo": f"備註{i}" if i % 5 == 0 else None, "Dt": "2025-01-01"}])
     ins("MBEWH", [{"MATERIAL": f"X{i}", "LFGJA": "2024"}])
 
 for i in range(40):           # A018 都跟抽到的單據無關，測補到 @Rows
@@ -150,6 +151,8 @@ for i in range(40):           # A018 都跟抽到的單據無關，測補到 @Ro
 for f in ("01_create_tables.sql", "02_load_procedures.sql", "20_sample_exp.sql"):
     sqlcmd("-i", str(SQL / f), db=DB)
 cur.execute("EXEC etl.LoadAll").fetchall()
+# 後 20 張 PO 缺匯率：測表頭空欄位少的優先
+cur.execute("UPDATE dbo.EKKO SET WKURS = NULL WHERE EBELN > '4500000009'")
 
 checks = []
 
@@ -296,11 +299,18 @@ check("ADT_ECAR 隨機 5 筆、欄位全帶",
       (one("SELECT COUNT(*) FROM exp.ADT_ECAR")[0][0],
        one("SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('exp.ADT_ECAR')")[0][0]), (5, 4))
 ecar = keys("SELECT Id FROM exp.ADT_ECAR")
+check("隨機的表空欄位少的優先", all(i % 5 == 0 for i in ecar), True)
+check("PO 表頭空欄位少的優先（隨機抽的 5 張都有匯率）",
+      one("SELECT COUNT(*) FROM exp.EKKO WHERE WKURS IS NOT NULL")[0][0] >= 5, True)
 res = sample(5, 42)
 check("ADT_ECAR 同一個 seed 抽同一批", keys("SELECT Id FROM exp.ADT_ECAR"), ecar)
 check("不存在的 ZTM80 跳過", res["dbo.ZTM80"][:2], (None, "來源表不存在，跳過"))
 sample(5, 7)
 check("ADT_ECAR 換 seed 換一批", keys("SELECT Id FROM exp.ADT_ECAR") != ecar, True)
+
+res = {r[0]: r for r in one("EXEC exp.SampleAll @Rows = 5, @Seed = 42, @PreferFilled = 0")}
+check("@PreferFilled = 0 不挑，抽得到缺 Memo 的", any(i % 5 for i in keys("SELECT Id FROM exp.ADT_ECAR")), True)
+check("@PreferFilled = 0 說明只寫隨機", res["dbo.ADT_ECAR"][3], "隨機")
 
 cn.close()
 sqlcmd("-Q", f"ALTER DATABASE {DB} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {DB};")

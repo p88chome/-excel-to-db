@@ -63,6 +63,7 @@ SELECT * FROM kri.vFlagLatest;              -- 每題最新一次成功的標記
 ```sql
 EXEC exp.SampleAll;                          -- PO、PR、物料憑證、會計傳票各隨機抽 1000 張
 EXEC exp.SampleAll @Rows = 500, @Seed = 42;  -- 同一個 seed 抽同一批
+EXEC exp.SampleAll @PreferFilled = 0;        -- 不挑空欄位少的，純隨機
 ```
 
 以單據為主抽，抽出來串得起來：明細照表頭全帶，單據之間互相引用的 PO / PR / 收貨 / 發票會補齊，
@@ -70,6 +71,7 @@ EXEC exp.SampleAll @Rows = 500, @Seed = 42;  -- 同一個 seed 抽同一批
 資訊記錄與價格條件只帶同一張 PO / PR 上一起出現的供應商 + 物料，A017 / A018 調到剛好 `@Rows` 筆（不足隨機補、超過隨機留）。
 LFBK、MBEWH 也跟著供應商、物料帶，ANLA 先帶 PO（EKKN.ANLN1）與傳票（BSEG.ANLN1）用到的資產、一樣調到 `@Rows` 筆；ZTM105、ZTM80、ADT_* 沒有固定關聯，`SELECT *` 隨機抽 `@Rows` 筆。
 結果最後一欄是這次用的 seed，沒給的話是隨機產生的，要重抽同一批就帶回去。
+預設會在每個「隨機挑」的地方先挑空欄位（NULL）少的，抽出來會偏向資料完整的單據；跟著單據帶的明細與主檔沒得挑。
 每次執行會重建 exp 裡的表。**exp 裡仍是客戶真實資料，不要帶出客戶環境。**
 
 ## 規格改了
