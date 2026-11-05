@@ -243,6 +243,15 @@ sample(5, 7)
 check("換 seed 換一批", keys("SELECT EBELN FROM exp.EKKO") != po_set, True)
 seed = {r[4] for r in one("EXEC exp.SampleAll @Rows = 5")}
 check("不給 seed 也會列出用的是哪一個", len(seed) == 1 and None not in seed, True)
+res = sample(40, 3)
+used_a = keys("SELECT DISTINCT ANLN1 + '-' + ANLN2 FROM exp.EKKN WHERE ANLN1 IS NOT NULL")
+check("ANLA 補到 40 筆，說明列出用到幾筆、補幾筆",
+      (res["dbo.ANLA"][0], res["dbo.ANLA"][1]),
+      (40, f"用到的 {len(used_a)} 筆 + 隨機補 {40 - len(used_a)} 筆"))
+res = sample(2, 3)
+used_a = keys("SELECT DISTINCT ANLN1 + '-' + ANLN2 FROM exp.EKKN WHERE ANLN1 IS NOT NULL")
+check("ANLA 用到的已經夠 @Rows 時全留、不補不砍",
+      (one("SELECT COUNT(*) FROM exp.ANLA")[0][0], res["dbo.ANLA"][1]), (len(used_a), None))
 sample(1000, 1)
 check("@Rows 比資料多時整張都抽", one("SELECT COUNT(*) FROM exp.EKKO")[0][0], N)
 check("只動 exp，原表沒變", one("SELECT COUNT(*) FROM dbo.EKKO")[0][0], N)
@@ -252,10 +261,11 @@ sample(5, 42)
 check("LFBK 只帶用到的供應商", keys("SELECT LIFNR FROM exp.LFBK"),
       keys("SELECT LIFNR FROM exp.LFA1"))
 check("MBEWH 沒有 MATNR 時退回隨機 5 筆", one("SELECT COUNT(*) FROM exp.MBEWH")[0][0], 5)
-check("ANLA 只帶抽到的 PO 用到的資產、子編號也比對",
-      keys("SELECT ANLN1 + '-' + ANLN2 FROM exp.ANLA"),
-      keys("SELECT DISTINCT ANLN1 + '-' + ANLN2 FROM exp.EKKN WHERE ANLN1 IS NOT NULL"))
-check("ANLA 有抽到東西", one("SELECT COUNT(*) FROM exp.ANLA")[0][0] > 0, True)
+used_a = keys("SELECT DISTINCT ANLN1 + '-' + ANLN2 FROM exp.EKKN WHERE ANLN1 IS NOT NULL")
+got_a = keys("SELECT ANLN1 + '-' + ANLN2 FROM exp.ANLA")
+check("ANLA 用到的資產都在（子編號也比對）", set(used_a) <= set(got_a), True)
+check("ANLA 用到的不足 5 筆時補到 5 筆、不重複",
+      (len(got_a), len(set(got_a))), (max(5, len(used_a)),) * 2)
 check("T001W 整張", one("SELECT COUNT(*) FROM exp.T001W")[0][0], 2)
 check("ADT_ECAR 隨機 5 筆、欄位全帶",
       (one("SELECT COUNT(*) FROM exp.ADT_ECAR")[0][0],
