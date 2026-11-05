@@ -55,6 +55,21 @@ SELECT * FROM kri.vFlagLatest;              -- 每題最新一次成功的標記
 - **加排除名單：** `INSERT kri.ValueList (KriCode, ListName, ListValue, Note) VALUES ('*', 'ExcludeVendorPrefix', 'X', N'一次性供應商');`
 - **K08 要先填核決權限：** `kri.ApprovalMatrix`，沒有資料時 K08 不會標記，`RunAll` 的說明欄會提示。
 
+## 抽樣到 exp
+
+`sql/20_sample_exp.sql` 建 `exp.SampleAll`：把 ETL 用到的 SAP 原表、業務表各抽一小份到 `exp`，
+表名不變（`dbo.EKKO` → `exp.EKKO`、`prc.PurchaseOrderDetail` → `exp.PurchaseOrderDetail`）。
+
+```sql
+EXEC exp.SampleAll;                          -- PO、PR、物料憑證、會計傳票各隨機抽 1000 張
+EXEC exp.SampleAll @Rows = 500, @Seed = 42;  -- 同一個 seed 抽同一批
+```
+
+以單據為主抽，抽出來串得起來：明細照表頭全帶，單據之間互相引用的 PO / PR / 收貨 / 發票會補齊，
+主檔只帶有用到的供應商與物料。所以 `@Rows` 是每類單據的張數，不是每張表的筆數。
+結果最後一欄是這次用的 seed，沒給的話是隨機產生的，要重抽同一批就帶回去。
+每次執行會重建 exp 裡的表。**exp 裡仍是客戶真實資料，不要帶出客戶環境。**
+
 ## 規格改了
 
 ```
@@ -69,6 +84,7 @@ DDL 從規格表產生（刪除線的列不建；規格上的 VARCHAR 一律建�
 ```
 python etl/test_etl.py      # ETL
 python etl/test_kri.py      # KRI
+python etl/test_sample.py   # 抽樣
 ```
 
 在 LocalDB 建一個暫存資料庫，塞進多筆分攤、沖銷、PR 拆多張 PO、分割評價、
