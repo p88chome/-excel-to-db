@@ -216,13 +216,16 @@ pairs = one("""SELECT COUNT(*) FROM dbo.A017 a WHERE EXISTS (
                    SELECT 1 FROM exp.EKKO k JOIN exp.EKPO p ON p.EBELN = k.EBELN
                    WHERE k.LIFNR = a.LIFNR AND p.MATNR = a.MATNR
                    UNION ALL SELECT 1 FROM exp.EBAN r WHERE r.FLIEF = a.LIFNR AND r.MATNR = a.MATNR)""")[0][0]
-check("A017 只帶同一張單據上一起出現的組合（不是供應商 × 物料）",
+check("A017 只帶同一張單據上一起出現的組合（縮過之後也是）",
       one("""SELECT COUNT(*) FROM exp.A017 a WHERE NOT EXISTS (
                SELECT 1 FROM exp.EKKO k JOIN exp.EKPO p ON p.EBELN = k.EBELN
                WHERE k.LIFNR = a.LIFNR AND p.MATNR = a.MATNR
                UNION ALL SELECT 1 FROM exp.EBAN r WHERE r.FLIEF = a.LIFNR AND r.MATNR = a.MATNR)""")[0][0], 0)
 check("A017 比供應商 × 物料少", pairs < len(used_v) * len(used_m), True)
-check("A017 筆數 = 用到的組合（已超過 @Rows 不補）", one("SELECT COUNT(*) FROM exp.A017")[0][0], pairs)
+check("A017 用到的組合超過 @Rows 時隨機留 5 筆",
+      (pairs > 5, res["dbo.A017"][0], res["dbo.A017"][1]), (True, 5, f"用到的 {pairs} 筆，隨機留 5 筆"))
+check("KONP 跟著縮過的 A017",
+      one("SELECT COUNT(*) FROM exp.KONP WHERE KNUMH LIKE 'K%'")[0][0], 5)
 check("KONP 跟 A017 + A018 同一批、KONH 只有 A017 的（測試資料 A018 沒建 KONH）",
       (keys("SELECT KNUMH FROM exp.KONP"), keys("SELECT KNUMH FROM exp.KONH")),
       (keys("SELECT KNUMH FROM exp.A017 UNION SELECT KNUMH FROM exp.A018"), keys("SELECT KNUMH FROM exp.A017")))
@@ -271,8 +274,11 @@ check("ANLA 補到 40 筆，說明列出用到幾筆、補幾筆",
       (40, f"用到的 {len(used_a)} 筆 + 隨機補 {40 - len(used_a)} 筆"))
 res = sample(2, 3)
 used_a = keys("SELECT DISTINCT ANLN1 + '-' + ANLN2 FROM exp.EKKN WHERE ANLN1 IS NOT NULL")
-check("ANLA 用到的已經夠 @Rows 時全留、不補不砍",
-      (one("SELECT COUNT(*) FROM exp.ANLA")[0][0], res["dbo.ANLA"][1]), (len(used_a), None))
+got_a = keys("SELECT ANLN1 + '-' + ANLN2 FROM exp.ANLA")
+check("ANLA 用到的超過 @Rows 時隨機留 2 筆，留的都是用到的",
+      (len(used_a) > 2, len(got_a), set(got_a) <= set(used_a)), (True, 2, True))
+sample(2, 3)
+check("縮的時候同一個 seed 留同一批", keys("SELECT ANLN1 + '-' + ANLN2 FROM exp.ANLA"), got_a)
 sample(1000, 1)
 check("@Rows 比資料多時整張都抽", one("SELECT COUNT(*) FROM exp.EKKO")[0][0], N)
 check("只動 exp，原表沒變", one("SELECT COUNT(*) FROM dbo.EKKO")[0][0], N)
@@ -284,9 +290,7 @@ check("LFBK 只帶用到的供應商", keys("SELECT LIFNR FROM exp.LFBK"),
 check("MBEWH 沒有 MATNR 時退回隨機 5 筆", one("SELECT COUNT(*) FROM exp.MBEWH")[0][0], 5)
 used_a = keys("SELECT DISTINCT ANLN1 + '-' + ANLN2 FROM exp.EKKN WHERE ANLN1 IS NOT NULL")
 got_a = keys("SELECT ANLN1 + '-' + ANLN2 FROM exp.ANLA")
-check("ANLA 用到的資產都在（子編號也比對）", set(used_a) <= set(got_a), True)
-check("ANLA 用到的不足 5 筆時補到 5 筆、不重複",
-      (len(got_a), len(set(got_a))), (max(5, len(used_a)),) * 2)
+check("ANLA 剛好 5 筆、不重複", (len(got_a), len(set(got_a))), (5, 5))
 check("T001W 整張", one("SELECT COUNT(*) FROM exp.T001W")[0][0], 2)
 check("ADT_ECAR 隨機 5 筆、欄位全帶",
       (one("SELECT COUNT(*) FROM exp.ADT_ECAR")[0][0],

@@ -11,12 +11,12 @@
 --   3. 明細照表頭帶：EKPO / EKKN / EKET / EKBE、EBKN、MSEG、BSEG，一張單據的明細全部帶出
 --   4. 主檔只帶有用到的：這些單據的供應商（LFA1 / LFB1 / LFM1 / CDHDR / CDPOS）、
 --      物料（MARA / MAKT / MARC / MARD / MBEW）；資訊記錄與價格條件只帶同一張 PO / PR 上
---      一起出現的「供應商 + 物料」，A017 / A018 不足 @Rows 筆再隨機補（超過就全留）
+--      一起出現的「供應商 + 物料」，A017 / A018 再調到 @Rows 筆（不足隨機補、超過隨機留）
 --   5. 設定表（T001、T001K、T001W、T024D、T024E）整張複製
 --   6. 業務表用同一批鍵篩，跟 exp 裡的原表是同一批單據
 --   7. 其他表：LFBK 帶用到的供應商、MBEWH 帶用到的物料（沒有 LIFNR / MATNR 欄位就改成隨機）；
---      ANLA 先帶抽到的 PO（EKKN.ANLN1）、會計傳票（BSEG.ANLN1）用到的資產，不足 @Rows 筆再隨機補
---      （用到的超過 @Rows 就全留；沒有 ANLN1 欄位就整張隨機）；
+--      ANLA 先帶抽到的 PO（EKKN.ANLN1）、會計傳票（BSEG.ANLN1）用到的資產，再調到 @Rows 筆
+--      （不足隨機補、超過隨機留；沒有 ANLN1 欄位就整張隨機）；
 --      ZTM105、ZTM80、ADT_CONTRACT、ADT_ECAR、ADT_OSWEB、ADT_POAS 沒有固定關聯，
 --      SELECT * 隨機抽 @Rows 筆（依 seed + 整列內容的雜湊排序，同一個 seed 一樣抽同一批）
 -- 所以 @Rows 是「每類單據的張數」，不是每張表的筆數：明細表會比較多，主檔看用到幾個。
@@ -79,18 +79,31 @@ BEGIN
 END;
 GO
 
--- 補到 @Top 筆：exp.<表名> 不足 @Top 筆時，從 @Src 裡還沒抽到的（依 @Keys 判斷）隨機補
-CREATE OR ALTER PROCEDURE exp.TopUp @Src NVARCHAR(256), @Top INT, @Seed INT, @Keys NVARCHAR(400)
+-- 調到剛好 @Top 筆：exp.<表名> 不足就從 @Src 裡還沒抽到的（依 @Keys 判斷）隨機補，
+-- 超過就依 seed 隨機留 @Top 筆。都是依 seed + 整列內容的雜湊排序，同一個 seed 結果一樣。
+CREATE OR ALTER PROCEDURE exp.FitRows @Src NVARCHAR(256), @Top INT, @Seed INT, @Keys NVARCHAR(400)
 AS
 BEGIN
     SET NOCOUNT ON;
     DECLARE @schema SYSNAME = PARSENAME(@Src, 2), @name SYSNAME = PARSENAME(@Src, 1),
-            @have BIGINT, @sql NVARCHAR(MAX), @added BIGINT, @match NVARCHAR(MAX);
+            @have BIGINT, @sql NVARCHAR(MAX), @n BIGINT, @match NVARCHAR(MAX);
     IF OBJECT_ID(N'exp.' + QUOTENAME(@name), N'U') IS NULL RETURN;
 
     SET @sql = N'SELECT @c = COUNT_BIG(*) FROM exp.' + QUOTENAME(@name);
     EXEC sp_executesql @sql, N'@c BIGINT OUTPUT', @c = @have OUTPUT;
-    IF @have >= @Top RETURN;
+    IF @have = @Top RETURN;
+
+    IF @have > @Top
+    BEGIN
+        SET @sql = N'WITH x AS (SELECT ROW_NUMBER() OVER (ORDER BY HASHBYTES(''MD5'', CONCAT(@seed, N''|'', BINARY_CHECKSUM(*)))) AS rn'
+                 + N' FROM exp.' + QUOTENAME(@name) + N') DELETE x WHERE rn > @top;'
+                 + N'SET @r = @@ROWCOUNT;';
+        EXEC sp_executesql @sql, N'@top INT, @seed INT, @r BIGINT OUTPUT', @top = @Top, @seed = @Seed, @r = @n OUTPUT;
+        UPDATE #explog SET Rows = Rows - @n,
+                           Note = CONCAT(N'用到的 ', @have, N' 筆，隨機留 ', @Top, N' 筆')
+        WHERE Src = @Src;
+        RETURN;
+    END;
 
     SELECT @match = STRING_AGG(N'ISNULL(e.' + QUOTENAME(TRIM(value)) + N', '''') = ISNULL(t.'
                                + QUOTENAME(TRIM(value)) + N', '''')', N' AND ')
@@ -102,13 +115,14 @@ BEGIN
              + N' ORDER BY HASHBYTES(''MD5'', CONCAT(@seed, N''|'', BINARY_CHECKSUM(*)));'
              + N'SET @r = @@ROWCOUNT;';
     DECLARE @need BIGINT = @Top - @have;
-    EXEC sp_executesql @sql, N'@n BIGINT, @seed INT, @r BIGINT OUTPUT',
-         @n = @need, @seed = @Seed, @r = @added OUTPUT;
-
-    UPDATE #explog SET Rows = Rows + @added,
-                       Note = CONCAT(N'用到的 ', @have, N' 筆 + 隨機補 ', @added, N' 筆')
+    EXEC sp_executesql @sql, N'@n BIGINT, @seed INT, @r BIGINT OUTPUT', @n = @need, @seed = @Seed, @r = @n OUTPUT;
+    UPDATE #explog SET Rows = Rows + @n,
+                       Note = CONCAT(N'用到的 ', @have, N' 筆 + 隨機補 ', @n, N' 筆')
     WHERE Src = @Src;
 END;
+GO
+
+DROP PROCEDURE IF EXISTS exp.TopUp;
 GO
 
 CREATE OR ALTER PROCEDURE exp.SampleAll @Rows INT = 1000, @Seed INT = NULL
@@ -224,11 +238,11 @@ BEGIN
 
     EXEC exp.CopyTable N'dbo.EINA', @vm;
     EXEC exp.CopyTable N'dbo.EINE', N't.INFNR IN (SELECT INFNR FROM exp.EINA)';
-    -- 價格條件：先帶用到的組合，不足 @Rows 筆再隨機補（超過就全留），KONP / KONH 跟著同一批
+    -- 價格條件：先帶用到的組合，調到 @Rows 筆（不足隨機補、超過隨機留），KONP / KONH 跟著同一批
     EXEC exp.CopyTable N'dbo.A017', @vm;
-    EXEC exp.TopUp     N'dbo.A017', @Rows, @Seed, N'KNUMH';
+    EXEC exp.FitRows    N'dbo.A017', @Rows, @Seed, N'KNUMH';
     EXEC exp.CopyTable N'dbo.A018', @vm;
-    EXEC exp.TopUp     N'dbo.A018', @Rows, @Seed, N'KNUMH';
+    EXEC exp.FitRows    N'dbo.A018', @Rows, @Seed, N'KNUMH';
     EXEC exp.CopyTable N'dbo.KONP', N't.KNUMH IN (SELECT KNUMH FROM exp.A017 UNION SELECT KNUMH FROM exp.A018)';
     EXEC exp.CopyTable N'dbo.KONH', N't.KNUMH IN (SELECT KNUMH FROM exp.A017 UNION SELECT KNUMH FROM exp.A018)';
 
@@ -287,11 +301,11 @@ BEGIN
     END;
     IF @anla IS NOT NULL
     BEGIN
-        -- 先帶用到的資產，不足 @Rows 筆再隨機補（超過就全留）
+        -- 先帶用到的資產，調到 @Rows 筆（不足隨機補、超過隨機留）
         EXEC exp.CopyTable N'dbo.ANLA', @anla;
         DECLARE @anlaKeys NVARCHAR(100) = IIF(COL_LENGTH(N'dbo.ANLA', N'ANLN2') IS NOT NULL,
                                               N'BUKRS,ANLN1,ANLN2', N'BUKRS,ANLN1');
-        EXEC exp.TopUp N'dbo.ANLA', @Rows, @Seed, @anlaKeys;
+        EXEC exp.FitRows N'dbo.ANLA', @Rows, @Seed, @anlaKeys;
     END;
     ELSE EXEC exp.CopyRandom N'dbo.ANLA', @Rows, @Seed;
     EXEC exp.CopyRandom N'dbo.ZTM105',       @Rows, @Seed;
