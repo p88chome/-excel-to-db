@@ -14,7 +14,8 @@
 --   5. 設定表（T001、T001K、T001W、T024D、T024E）整張複製
 --   6. 業務表用同一批鍵篩，跟 exp 裡的原表是同一批單據
 --   7. 其他表：LFBK 帶用到的供應商、MBEWH 帶用到的物料（沒有 LIFNR / MATNR 欄位就改成隨機）；
---      ANLA、ZTM105、ZTM80、ADT_CONTRACT、ADT_ECAR、ADT_OSWEB、ADT_POAS 沒有固定關聯，
+--      ANLA 帶抽到的 PO（EKKN.ANLN1）、會計傳票（BSEG.ANLN1）用到的資產（沒有 ANLN1 欄位就改成隨機）；
+--      ZTM105、ZTM80、ADT_CONTRACT、ADT_ECAR、ADT_OSWEB、ADT_POAS 沒有固定關聯，
 --      SELECT * 隨機抽 @Rows 筆（依 seed + 整列內容的雜湊排序，同一個 seed 一樣抽同一批）
 -- 所以 @Rows 是「每類單據的張數」，不是每張表的筆數：明細表會比較多，主檔看用到幾個。
 --
@@ -227,7 +228,23 @@ BEGIN
     IF COL_LENGTH(N'dbo.MBEWH', N'MATNR') IS NOT NULL EXEC exp.CopyTable N'dbo.MBEWH', @m;
     ELSE EXEC exp.CopyRandom N'dbo.MBEWH', @Rows, @Seed;
 
-    EXEC exp.CopyRandom N'dbo.ANLA',         @Rows, @Seed;
+    -- ANLA：EKKN / BSEG 有 ANLN1 才串得起來；兩邊都有 ANLN2（資產子編號）時一起比
+    DECLARE @anla NVARCHAR(MAX) = NULL;
+    IF COL_LENGTH(N'dbo.ANLA', N'ANLN1') IS NOT NULL AND COL_LENGTH(N'dbo.ANLA', N'BUKRS') IS NOT NULL
+    BEGIN
+        IF COL_LENGTH(N'exp.EKKN', N'ANLN1') IS NOT NULL
+            SET @anla = N'EXISTS (SELECT 1 FROM exp.EKKN k JOIN exp.EKKO h ON h.EBELN = k.EBELN'
+                      + N' WHERE h.BUKRS = t.BUKRS AND k.ANLN1 = t.ANLN1'
+                      + IIF(COL_LENGTH(N'exp.EKKN', N'ANLN2') IS NOT NULL AND COL_LENGTH(N'dbo.ANLA', N'ANLN2') IS NOT NULL,
+                            N' AND k.ANLN2 = t.ANLN2', N'') + N')';
+        IF COL_LENGTH(N'exp.BSEG', N'ANLN1') IS NOT NULL
+            SET @anla = CONCAT(@anla + N' OR ', N'EXISTS (SELECT 1 FROM exp.BSEG k'
+                      + N' WHERE k.BUKRS = t.BUKRS AND k.ANLN1 = t.ANLN1'
+                      + IIF(COL_LENGTH(N'exp.BSEG', N'ANLN2') IS NOT NULL AND COL_LENGTH(N'dbo.ANLA', N'ANLN2') IS NOT NULL,
+                            N' AND k.ANLN2 = t.ANLN2', N'') + N')');
+    END;
+    IF @anla IS NOT NULL EXEC exp.CopyTable N'dbo.ANLA', @anla;
+    ELSE EXEC exp.CopyRandom N'dbo.ANLA', @Rows, @Seed;
     EXEC exp.CopyRandom N'dbo.ZTM105',       @Rows, @Seed;
     EXEC exp.CopyRandom N'dbo.ZTM80',        @Rows, @Seed;
     EXEC exp.CopyRandom N'dbo.ADT_CONTRACT', @Rows, @Seed;

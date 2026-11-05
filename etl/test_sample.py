@@ -127,6 +127,14 @@ cur.execute("CREATE TABLE dbo.LFBK (LIFNR NVARCHAR(100), BANKN NVARCHAR(100))")
 for v in V + ["V9999"]:
     ins("LFBK", [{"LIFNR": v, "BANKN": "123"}])
 cur.execute("CREATE TABLE dbo.MBEWH (MATERIAL NVARCHAR(100), LFGJA NVARCHAR(4))")
+# ANLA：EKKN 有 ANLN1/ANLN2、BSEG 沒有（測只用 EKKN 串）
+cur.execute("ALTER TABLE dbo.EKKN ADD ANLN1 NVARCHAR(100), ANLN2 NVARCHAR(100)")
+cur.execute("CREATE TABLE dbo.ANLA (BUKRS NVARCHAR(100), ANLN1 NVARCHAR(100), ANLN2 NVARCHAR(100), TXT50 NVARCHAR(100))")
+for i in range(N):
+    ins("ANLA", [{"BUKRS": "1000", "ANLN1": f"3{i:011d}", "ANLN2": "0000", "TXT50": f"資產{i}"},
+                 {"BUKRS": "1000", "ANLN1": f"3{i:011d}", "ANLN2": "0001", "TXT50": f"子資產{i}"}])
+cur.execute("UPDATE dbo.EKKN SET ANLN1 = '3' + RIGHT('00000000000' + CAST(CAST(RIGHT(EBELN, 8) AS INT) AS VARCHAR), 11),"
+            " ANLN2 = '0000' WHERE EBELP = '00010'")
 cur.execute("CREATE TABLE dbo.T001W (WERKS NVARCHAR(100), NAME1 NVARCHAR(100))")
 ins("T001W", [{"WERKS": "1100", "NAME1": "一廠"}, {"WERKS": "1200", "NAME1": "二廠"}])
 cur.execute("CREATE TABLE dbo.ADT_ECAR (Id INT, Amount DECIMAL(18,2), Memo NVARCHAR(MAX), Dt DATETIME2)")
@@ -244,6 +252,10 @@ sample(5, 42)
 check("LFBK 只帶用到的供應商", keys("SELECT LIFNR FROM exp.LFBK"),
       keys("SELECT LIFNR FROM exp.LFA1"))
 check("MBEWH 沒有 MATNR 時退回隨機 5 筆", one("SELECT COUNT(*) FROM exp.MBEWH")[0][0], 5)
+check("ANLA 只帶抽到的 PO 用到的資產、子編號也比對",
+      keys("SELECT ANLN1 + '-' + ANLN2 FROM exp.ANLA"),
+      keys("SELECT DISTINCT ANLN1 + '-' + ANLN2 FROM exp.EKKN WHERE ANLN1 IS NOT NULL"))
+check("ANLA 有抽到東西", one("SELECT COUNT(*) FROM exp.ANLA")[0][0] > 0, True)
 check("T001W 整張", one("SELECT COUNT(*) FROM exp.T001W")[0][0], 2)
 check("ADT_ECAR 隨機 5 筆、欄位全帶",
       (one("SELECT COUNT(*) FROM exp.ADT_ECAR")[0][0],
