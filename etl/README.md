@@ -57,24 +57,23 @@ SELECT * FROM kri.vFlagLatest;              -- 每題最新一次成功的標記
 
 ## 抽樣到 exp
 
-`sql/20_sample_exp.sql` 建 `exp.SampleAll`：把 ETL 用到的 SAP 原表、業務表各抽一小份到 `exp`，
-表名不變（`dbo.EKKO` → `exp.EKKO`、`prc.PurchaseOrderDetail` → `exp.PurchaseOrderDetail`）。
+`sql/20_sample_exp.sql` 建 `exp.SampleAll`：把業務表與 SAP 原表各抽一小份到 `exp`，
+表名不變（`prc.PurchaseOrderDetail` → `exp.PurchaseOrderDetail`、`dbo.EKKO` → `exp.EKKO`）。
 
 ```sql
-EXEC exp.SampleAll;                          -- PO、PR、物料憑證、會計傳票各隨機抽 1000 張
+EXEC exp.SampleAll;                          -- 每張業務表 1000 筆
 EXEC exp.SampleAll @Rows = 500, @Seed = 42;  -- 同一個 seed 抽同一批
 EXEC exp.SampleAll @PreferFilled = 0;        -- 不挑空欄位少的，純隨機
+EXEC exp.SampleAll @CapRaw = 1;              -- 一對多的原表也砍到 1000 筆（明細會不完整）
 ```
 
-以單據為主抽，抽出來串得起來：明細照表頭全帶，單據之間互相引用的 PO / PR / 收貨 / 發票會補齊，
-主檔只帶有用到的供應商與物料。所以 `@Rows` 是每類單據的張數，不是每張表的筆數。
-資訊記錄與價格條件只帶同一張 PO / PR 上一起出現的供應商 + 物料，A017 / A018 調到剛好 `@Rows` 筆（不足隨機補、超過隨機留）。
-LFBK、MBEWH 也跟著供應商、物料帶，ANLA 先帶 PO（EKKN.ANLN1）與傳票（BSEG.ANLN1）用到的資產、一樣調到 `@Rows` 筆；ZTM105、ZTM80、ADT_* 沒有固定關聯，`SELECT *` 隨機抽 `@Rows` 筆。
-結果最後一欄是這次用的 seed，沒給的話是隨機產生的，要重抽同一批就帶回去。
-預設會在每個「隨機挑」的地方先挑空欄位（NULL）少的：先比**重要欄位**（`exp.ImportantColumn`，預設是 ETL 用到的欄位；
-業務表全部欄位都算），再比全部欄位。抽出來會偏向資料完整的單據；跟著單據帶的明細與主檔沒得挑。
-業務表（prc / mst / inv / fin）以 `@Rows` 筆為主：同一批超過就隨機留、不足就從整張業務表補。
-每次執行會重建 exp 裡的表。**exp 裡仍是客戶真實資料，不要帶出客戶環境。**
+1. **業務表各 `@Rows` 筆**：PO 明細隨機抽，其他業務表先帶跟這批 PO 有關的，再調到 `@Rows` 筆（超過隨機留、不足隨機補）。
+2. **SAP 原表從業務表回推**：一對一的（EKPO、EBAN、MSEG、LFA1、MARA、A017…）不會超過 `@Rows` 筆；
+   一對多的（EKKN、EKET、EKBE、EBKN、BSEG、MAKT、MBEW、KONP）照實際帶，`@CapRaw = 1` 才砍。
+3. **沒組進業務表的表各 `@Rows` 筆**：LFBK、MBEWH、ANLA 先帶有關聯的再調；ZTM、ADT 直接隨機；T 開頭的設定表整張。
+
+挑資料時空欄位（NULL）少的優先：先比**重要欄位**（`exp.ImportantColumn`，預設是 ETL 用到的欄位、業務表全部欄位），再比全部欄位。
+結果最後一欄是這次用的 seed。每次執行會重建 exp 裡的表。**exp 裡仍是客戶真實資料，不要帶出客戶環境。**
 
 ## 規格改了
 

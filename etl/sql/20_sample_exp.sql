@@ -1,36 +1,34 @@
-﻿-- 抽樣：把 ETL 用到的 SAP 原表、業務表（prc / mst / inv / fin）抽一小份到 exp schema，
--- 表名不變：dbo.EKKO → exp.EKKO、prc.PurchaseOrderDetail → exp.PurchaseOrderDetail。
+﻿-- 抽樣：把業務表（prc / mst / inv / fin）和 SAP 原表抽一小份到 exp schema，
+-- 表名不變：prc.PurchaseOrderDetail → exp.PurchaseOrderDetail、dbo.EKKO → exp.EKKO。
 --
---   EXEC exp.SampleAll;                         -- 每類單據隨機抽 1000 張，每次都不一樣
+--   EXEC exp.SampleAll;                          -- 每張業務表 1000 筆，每次都不一樣
 --   EXEC exp.SampleAll @Rows = 500, @Seed = 42;  -- 同一個 seed、同一份資料 → 抽出同一批
 --   EXEC exp.SampleAll @PreferFilled = 0;        -- 不挑空欄位少的，純隨機
+--   EXEC exp.SampleAll @CapRaw = 1;              -- 一對多的原表也砍到 1000 筆（明細會不完整）
 --
--- 不是每張表各自亂抽 1000 筆（那樣 EKKO 和 EKPO 會對不起來），而是「以單據為主」：
---   1. 隨機抽 @Rows 張單據表頭：PO（EKKO）、PR（EBAN）、物料憑證（MKPF）、有供應商行的會計傳票（BKPF）
---   2. 補上相關的單據：PR、物料憑證、傳票引用到的 PO 併進來；再由全部的 PO 補來源 PR、
---      收貨憑證、發票傳票。所以 exp 裡任何單據引用的 PO 都在 exp.EKKO 裡
---   3. 明細照表頭帶：EKPO / EKKN / EKET / EKBE、EBKN、MSEG、BSEG，一張單據的明細全部帶出
---   4. 主檔只帶有用到的：這些單據的供應商（LFA1 / LFB1 / LFM1 / CDHDR / CDPOS）、
---      物料（MARA / MAKT / MARC / MARD / MBEW）；資訊記錄與價格條件只帶同一張 PO / PR 上
---      一起出現的「供應商 + 物料」，A017 / A018 再調到 @Rows 筆（不足隨機補、超過隨機留）
---   5. 設定表（T001、T001K、T001W、T024D、T024E）整張複製
---   6. 業務表先用同一批鍵篩，再調到剛好 @Rows 筆：超過就隨機留 @Rows 筆（一張單據可能只留部分項目），
---      不足就從整張業務表隨機補（補進來的不在 exp 的原表裡）
---   7. 其他表：LFBK 帶用到的供應商、MBEWH 帶用到的物料（沒有 LIFNR / MATNR 欄位就改成隨機）；
---      ANLA 先帶抽到的 PO（EKKN.ANLN1）、會計傳票（BSEG.ANLN1）用到的資產，再調到 @Rows 筆
---      （不足隨機補、超過隨機留；沒有 ANLN1 欄位就整張隨機）；
---      ZTM105、ZTM80、ADT_CONTRACT、ADT_ECAR、ADT_OSWEB、ADT_POAS 沒有固定關聯，
---      SELECT * 隨機抽 @Rows 筆（依 seed + 整列內容的雜湊排序，同一個 seed 一樣抽同一批）
--- 所以 SAP 原表的 @Rows 是「每類單據的張數」，不是每張表的筆數：明細表會比較多，主檔看用到幾個。
--- 剛好 @Rows 筆的是：業務表、A017 / A018 / ANLA、整張隨機的表（來源本身不足 @Rows 筆的除外）。
+-- 做法：先抽業務表，再用業務表的鍵回推 SAP 原表。
+--   1. 業務表各 @Rows 筆，以 PO 為起點：
+--      PurchaseOrderDetail 隨機 @Rows 筆 → 其他業務表先帶跟這批 PO 有關的（PR、收貨、物料異動、
+--      應付、供應商、物料、庫存、資訊記錄、價格條件），再調到 @Rows 筆：超過隨機留、不足從整張隨機補。
+--   2. SAP 原表從業務表回推：
+--        EKKO / EKPO / EKKN / EKET / EKBE <- PurchaseOrderDetail     EBAN / EBKN <- PurchaseRequisition
+--        MKPF / MSEG <- GoodsReceipt + MaterialMovement            BKPF / BSEG <- AccountsPayable（整張傳票）
+--        LFA1 / LFB1 / LFM1 <- Vendor      CDHDR / CDPOS <- VendorChangeHistory
+--        MARA / MAKT <- Material           MARC / MARD / MBEW <- InventoryBalance
+--        EINA / EINE <- PurchasingInfoRecord    A017 / A018 <- PurchasingCondA017 / A018 -> KONP / KONH
+--      一對一的原表（EKPO、EBAN、MSEG、LFA1、MARA、MARD、A017…）不會超過 @Rows 筆。
+--      一對多的（EKKN、EKET、EKBE、EBKN、BSEG、MAKT、MBEW、KONP）照實際帶，可能超過；
+--      @CapRaw = 1 時也砍到 @Rows 筆，但明細會不完整（例如一個 PO 項目只剩部分收貨紀錄）。
+--   3. 沒有組進業務表的表各 @Rows 筆：LFBK 先帶 exp.LFA1 的供應商、MBEWH 先帶 exp.MARA 的物料、
+--      ANLA 先帶 EKKN / BSEG 用到的資產，再調到 @Rows 筆；ZTM105、ZTM80、ADT_* 直接隨機。
+--      設定表（T001、T001K、T001W、T024D、T024E）整張複製。
 --
--- 隨機的方式：依「seed + 單據號碼」的雜湊排序取前 @Rows 張。
--- @PreferFilled = 1（預設）時，凡是「隨機挑」的地方都先挑空欄位（NULL）少的，同樣少的再隨機。
--- 先比「重要欄位」（exp.ImportantColumn，預設是 ETL 用到的欄位）的空值數，再比全部欄位：
--- 四類單據表頭、整張隨機的表、A017 / A018 / ANLA 的補與縮。跟著單據帶的明細與主檔沒得挑。
--- 這樣抽出來的會偏向資料比較完整的單據；要照原本的比例抽就給 @PreferFilled = 0。
+-- 業務表補進來的列、ZTM / ADT 這些沒有關聯的表，跟其他表不一定串得起來。
+--
+-- 隨機：依 seed + 整列內容的雜湊排序。@PreferFilled = 1（預設）時空欄位（NULL）少的優先，
+-- 先比「重要欄位」（exp.ImportantColumn，預設是 ETL 用到的欄位；業務表全部欄位都算），再比全部欄位。
+-- 抽出來會偏向資料比較完整的列；要照原本的比例抽就給 @PreferFilled = 0。
 -- 不給 @Seed 就隨機產生一個，結果最後一欄會列出這次用的 seed，要重抽同一批就把它帶回來。
--- 重新匯入 SAP 資料後用同一個 seed，原本就有的單據還是會抽到同一批。
 --
 -- 每次執行會 DROP 掉 exp 裡同名的表重建。來源表不存在的（例如沒有 T024E）會跳過並在結果註明。
 -- 注意：exp 裡仍然是客戶的真實資料，不要放進版控或帶出客戶環境。
@@ -211,10 +209,10 @@ BEGIN
 END;
 GO
 
--- 調到剛好 @Top 筆：exp.<表名> 不足就從 @Src 裡還沒抽到的（依 @Keys 判斷）隨機補，
+-- 調到剛好 @Top 筆：exp.<表名> 不足就從 @Src 裡還沒抽到的（依 @Keys 判斷）隨機補（@TopUp = 0 不補），
 -- 超過就依 seed 隨機留 @Top 筆。都是依 seed + 整列內容的雜湊排序，同一個 seed 結果一樣。
 CREATE OR ALTER PROCEDURE exp.FitRows @Src NVARCHAR(256), @Top INT, @Seed INT, @Keys NVARCHAR(400),
-                                     @Prefer BIT = 1
+                                     @Prefer BIT = 1, @TopUp BIT = 1
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -239,13 +237,20 @@ BEGIN
         RETURN;
     END;
 
+    IF @TopUp = 0 RETURN;
+
     SELECT @match = STRING_AGG(N'ISNULL(e.' + QUOTENAME(TRIM(value)) + N', '''') = ISNULL(t.'
                                + QUOTENAME(TRIM(value)) + N', '''')', N' AND ')
-    FROM STRING_SPLIT(@Keys, N',');
+    FROM STRING_SPLIT(@Keys, N',')
+    WHERE TRIM(value) <> N'';
 
+    -- 沒給鍵就整列比對（EXCEPT），慢一點但不用知道主鍵
     SET @sql = N'INSERT exp.' + QUOTENAME(@name) + N' SELECT TOP (@n) t.* FROM '
-             + QUOTENAME(@schema) + N'.' + QUOTENAME(@name) + N' t'
-             + N' WHERE NOT EXISTS (SELECT 1 FROM exp.' + QUOTENAME(@name) + N' e WHERE ' + @match + N')'
+             + IIF(@match IS NULL,
+                   N'(SELECT * FROM ' + QUOTENAME(@schema) + N'.' + QUOTENAME(@name)
+                   + N' EXCEPT SELECT * FROM exp.' + QUOTENAME(@name) + N') t',
+                   QUOTENAME(@schema) + N'.' + QUOTENAME(@name) + N' t'
+                   + N' WHERE NOT EXISTS (SELECT 1 FROM exp.' + QUOTENAME(@name) + N' e WHERE ' + @match + N')')
              + N' ORDER BY ' + exp.RandomOrder(@Src, N't', @Prefer) + N';'
              + N'SET @r = @@ROWCOUNT;';
     DECLARE @need BIGINT = @Top - @have;
@@ -259,184 +264,152 @@ GO
 DROP PROCEDURE IF EXISTS exp.TopUp;
 GO
 
-CREATE OR ALTER PROCEDURE exp.SampleAll @Rows INT = 1000, @Seed INT = NULL, @PreferFilled BIT = 1
+CREATE OR ALTER PROCEDURE exp.SampleAll @Rows INT = 1000, @Seed INT = NULL, @PreferFilled BIT = 1,
+                                       @CapRaw BIT = 0
 AS
 BEGIN
     SET NOCOUNT ON;
     SET @Seed = ISNULL(@Seed, ABS(CHECKSUM(NEWID())) % 1000000);
-    DECLARE @s NVARCHAR(20) = CAST(@Seed AS NVARCHAR(20)) + N'|', @q NVARCHAR(MAX),
-            @nul NVARCHAR(MAX);
+    DECLARE @pf BIT = @PreferFilled;
 
     CREATE TABLE #explog (seq INT IDENTITY, Src NVARCHAR(256), Rows BIGINT, Note NVARCHAR(200));
 
-    -- ------------------------------------------------------------------
-    -- 1～2. 單據鍵
-    -- ------------------------------------------------------------------
-    -- 先四類各自隨機抽 @Rows 張。@PreferFilled = 1 時表頭空欄位少的優先（PR 看項目的平均）
-    SELECT TOP 0 EBELN INTO #po FROM dbo.EKKO;
-    SET @nul = IIF(@PreferFilled = 1, exp.FilledOrder(N'dbo.EKKO', N't', NULL), N'');
-    SET @q = N'INSERT #po SELECT TOP (@n) t.EBELN FROM dbo.EKKO t WHERE ISNULL(t.EBELN, '''') <> '''''
-           + N' ORDER BY ' + @nul + N'HASHBYTES(''MD5'', @s + t.EBELN)';
-    EXEC sp_executesql @q, N'@n INT, @s NVARCHAR(20)', @n = @Rows, @s = @s;
+    -- ==================================================================
+    -- 1. 業務表：PO 隨機 @Rows 筆，其他跟著 PO 帶，再調到 @Rows 筆
+    -- ==================================================================
+    EXEC exp.CopyRandom N'prc.PurchaseOrderDetail', @Rows, @Seed, @pf;
 
-    SELECT TOP 0 BANFN INTO #pr FROM dbo.EBAN;
-    SET @nul = IIF(@PreferFilled = 1, exp.FilledOrder(N'dbo.EBAN', N't', N'AVG'), N'');
-    SET @q = N'INSERT #pr SELECT TOP (@n) t.BANFN FROM dbo.EBAN t WHERE ISNULL(t.BANFN, '''') <> '''''
-           + N' GROUP BY t.BANFN ORDER BY ' + @nul + N'HASHBYTES(''MD5'', @s + t.BANFN)';
-    EXEC sp_executesql @q, N'@n INT, @s NVARCHAR(20)', @n = @Rows, @s = @s;
+    -- 這批 PO 的來源 PR、收貨、應付
+    EXEC exp.CopyTable N'prc.PurchaseRequisition',
+         N'EXISTS (SELECT 1 FROM exp.PurchaseOrderDetail k WHERE k.PrNumber = t.PrNumber AND k.PrItem = t.PrItem)';
+    EXEC exp.FitRows   N'prc.PurchaseRequisition', @Rows, @Seed, N'PrNumber,PrItem', @pf;
+    EXEC exp.CopyTable N'prc.GoodsReceipt',
+         N'EXISTS (SELECT 1 FROM exp.PurchaseOrderDetail k WHERE k.PoNumber = t.PoNumber AND k.PoItem = t.PoItem)';
+    EXEC exp.FitRows   N'prc.GoodsReceipt', @Rows, @Seed, N'MaterialDoc,MaterialDocYear,MaterialDocItem', @pf;
+    EXEC exp.CopyTable N'fin.AccountsPayable', N't.PoNumber IN (SELECT PoNumber FROM exp.PurchaseOrderDetail)';
+    EXEC exp.FitRows   N'fin.AccountsPayable', @Rows, @Seed, N'CompanyCode,AccountingDoc,FiscalYear,LineItem', @pf;
+    -- 物料異動：先帶收貨那幾筆（同一批物料憑證項目）
+    EXEC exp.CopyTable N'inv.MaterialMovement',
+         N'EXISTS (SELECT 1 FROM exp.GoodsReceipt k WHERE k.MaterialDoc = t.MaterialDoc
+                   AND k.MaterialDocYear = t.MaterialDocYear AND k.MaterialDocItem = t.MaterialDocItem)';
+    EXEC exp.FitRows   N'inv.MaterialMovement', @Rows, @Seed, N'MaterialDoc,MaterialDocYear,MaterialDocItem', @pf;
 
-    SELECT TOP 0 MBLNR, MJAHR INTO #md FROM dbo.MKPF;
-    SET @nul = IIF(@PreferFilled = 1, exp.FilledOrder(N'dbo.MKPF', N't', NULL), N'');
-    SET @q = N'INSERT #md SELECT TOP (@n) t.MBLNR, t.MJAHR FROM dbo.MKPF t WHERE ISNULL(t.MBLNR, '''') <> '''''
-           + N' ORDER BY ' + @nul + N'HASHBYTES(''MD5'', @s + t.MBLNR + N''|'' + CAST(t.MJAHR AS NVARCHAR(10)))';
-    EXEC sp_executesql @q, N'@n INT, @s NVARCHAR(20)', @n = @Rows, @s = @s;
+    -- 主檔：上面這些單據用到的供應商、物料
+    EXEC exp.CopyTable N'mst.Vendor',
+         N't.Vendor IN (SELECT Vendor FROM exp.PurchaseOrderDetail UNION SELECT Vendor FROM exp.PurchaseRequisition
+                        UNION SELECT Vendor FROM exp.GoodsReceipt UNION SELECT Vendor FROM exp.AccountsPayable)';
+    EXEC exp.FitRows   N'mst.Vendor', @Rows, @Seed, N'Vendor,CompanyCode,PurchOrg', @pf;
+    EXEC exp.CopyTable N'mst.VendorChangeHistory', N't.Vendor IN (SELECT Vendor FROM exp.Vendor)';
+    EXEC exp.FitRows   N'mst.VendorChangeHistory', @Rows, @Seed, N'Vendor,ChangeNumber,TableName,TableKey,FieldName', @pf;
+    EXEC exp.CopyTable N'mst.Material',
+         N't.Material IN (SELECT Material FROM exp.PurchaseOrderDetail UNION SELECT Material FROM exp.PurchaseRequisition
+                          UNION SELECT Material FROM exp.MaterialMovement)';
+    EXEC exp.FitRows   N'mst.Material', @Rows, @Seed, N'Material', @pf;
+    EXEC exp.CopyTable N'inv.InventoryBalance', N't.Material IN (SELECT Material FROM exp.Material)';
+    EXEC exp.FitRows   N'inv.InventoryBalance', @Rows, @Seed, N'Material,Plant,StorLoc', @pf;
 
-    -- 會計傳票只從有供應商行的抽（不然 fin.AccountsPayable 抽出來幾乎是空的）
-    SELECT TOP 0 BUKRS, BELNR, GJAHR INTO #ad FROM dbo.BKPF;
-    SET @nul = IIF(@PreferFilled = 1, exp.FilledOrder(N'dbo.BKPF', N't', NULL), N'');
-    SET @q = N'INSERT #ad SELECT TOP (@n) t.BUKRS, t.BELNR, t.GJAHR FROM dbo.BKPF t'
-           + N' WHERE EXISTS (SELECT 1 FROM dbo.BSEG s WHERE s.BUKRS = t.BUKRS AND s.BELNR = t.BELNR'
-           + N' AND s.GJAHR = t.GJAHR AND ISNULL(s.LIFNR, '''') <> '''')'
-           + N' ORDER BY ' + @nul + N'HASHBYTES(''MD5'', @s + t.BUKRS + N''|'' + t.BELNR + N''|'' + CAST(t.GJAHR AS NVARCHAR(10)))';
-    EXEC sp_executesql @q, N'@n INT, @s NVARCHAR(20)', @n = @Rows, @s = @s;
+    -- 資訊記錄、價格條件：同一張 PO / PR 上一起出現的「供應商 + 物料」
+    DECLARE @pair NVARCHAR(MAX) = N'EXISTS (SELECT 1 FROM (SELECT Vendor, Material FROM exp.PurchaseOrderDetail
+                                            UNION SELECT Vendor, Material FROM exp.PurchaseRequisition) k
+                                    WHERE k.Vendor = t.Vendor AND k.Material = t.Material)';
+    EXEC exp.CopyTable N'mst.PurchasingInfoRecord', @pair;
+    EXEC exp.FitRows   N'mst.PurchasingInfoRecord', @Rows, @Seed, N'Vendor,Material,PurchOrg,InfoCategory,Plant', @pf;
+    EXEC exp.CopyTable N'mst.PurchasingCondA017', @pair;
+    EXEC exp.FitRows   N'mst.PurchasingCondA017', @Rows, @Seed, N'Vendor,Material,PurchOrg,Plant,InfoCategory,ConditionType,ValidFrom', @pf;
+    EXEC exp.CopyTable N'mst.PurchasingCondA018', @pair;
+    EXEC exp.FitRows   N'mst.PurchasingCondA018', @Rows, @Seed, N'Vendor,Material,PurchOrg,InfoCategory,ConditionType,ValidFrom', @pf;
 
-    -- 抽到的 PR、物料憑證、傳票引用到的 PO 併進來
-    INSERT #po (EBELN)
-    SELECT EBELN FROM dbo.EKPO WHERE BANFN IN (SELECT BANFN FROM #pr)
-    UNION SELECT s.EBELN FROM dbo.MSEG s
-          WHERE EXISTS (SELECT 1 FROM #md k WHERE k.MBLNR = s.MBLNR AND k.MJAHR = s.MJAHR)
-    UNION SELECT s.EBELN FROM dbo.BSEG s
-          WHERE EXISTS (SELECT 1 FROM #ad k WHERE k.BUKRS = s.BUKRS AND k.BELNR = s.BELNR AND k.GJAHR = s.GJAHR)
-    EXCEPT SELECT EBELN FROM #po;
-    DELETE #po WHERE ISNULL(EBELN, '') = '';
+    -- ==================================================================
+    -- 2. SAP 原表：從業務表回推
+    -- ==================================================================
+    DECLARE @poi NVARCHAR(MAX) = N'EXISTS (SELECT 1 FROM exp.PurchaseOrderDetail k WHERE k.PoNumber = t.EBELN AND k.PoItem = t.EBELP)',
+            @pri NVARCHAR(MAX) = N'EXISTS (SELECT 1 FROM exp.PurchaseRequisition k WHERE k.PrNumber = t.BANFN AND k.PrItem = t.BNFPO)',
+            @mdh NVARCHAR(MAX) = N'EXISTS (SELECT 1 FROM (SELECT MaterialDoc, MaterialDocYear FROM exp.GoodsReceipt
+                                           UNION SELECT MaterialDoc, MaterialDocYear FROM exp.MaterialMovement) k
+                                   WHERE k.MaterialDoc = t.MBLNR AND k.MaterialDocYear = t.MJAHR)',
+            @mdi NVARCHAR(MAX) = N'EXISTS (SELECT 1 FROM (SELECT MaterialDoc, MaterialDocYear, MaterialDocItem FROM exp.GoodsReceipt
+                                           UNION SELECT MaterialDoc, MaterialDocYear, MaterialDocItem FROM exp.MaterialMovement) k
+                                   WHERE k.MaterialDoc = t.MBLNR AND k.MaterialDocYear = t.MJAHR AND k.MaterialDocItem = t.ZEILE)',
+            @ad  NVARCHAR(MAX) = N'EXISTS (SELECT 1 FROM exp.AccountsPayable k
+                                   WHERE k.CompanyCode = t.BUKRS AND k.AccountingDoc = t.BELNR AND k.FiscalYear = t.GJAHR)',
+            @cnd NVARCHAR(MAX) = N't.KNUMH IN (SELECT KNUMH FROM exp.A017 UNION SELECT KNUMH FROM exp.A018)';
 
-    -- 再由全部的 PO 補：來源 PR（K08 要用 PO 的供應商）、收貨憑證、發票傳票
-    INSERT #pr (BANFN)
-    SELECT BANFN FROM dbo.EKPO WHERE EBELN IN (SELECT EBELN FROM #po) AND ISNULL(BANFN, '') <> ''
-    EXCEPT SELECT BANFN FROM #pr;
-
-    INSERT #md (MBLNR, MJAHR)
-    SELECT MBLNR, MJAHR FROM dbo.MSEG WHERE EBELN IN (SELECT EBELN FROM #po)
-    EXCEPT SELECT MBLNR, MJAHR FROM #md;
-
-    INSERT #ad (BUKRS, BELNR, GJAHR)
-    SELECT BUKRS, BELNR, GJAHR FROM dbo.BSEG WHERE EBELN IN (SELECT EBELN FROM #po)
-    EXCEPT SELECT BUKRS, BELNR, GJAHR FROM #ad;
-
-    -- ------------------------------------------------------------------
-    -- 3. 單據表頭與明細
-    -- ------------------------------------------------------------------
-    DECLARE @po NVARCHAR(200) = N't.EBELN IN (SELECT EBELN FROM #po)',
-            @pr NVARCHAR(200) = N't.BANFN IN (SELECT BANFN FROM #pr)',
-            @md NVARCHAR(200) = N'EXISTS (SELECT 1 FROM #md k WHERE k.MBLNR = t.MBLNR AND k.MJAHR = t.MJAHR)',
-            @ad NVARCHAR(200) = N'EXISTS (SELECT 1 FROM #ad k WHERE k.BUKRS = t.BUKRS AND k.BELNR = t.BELNR AND k.GJAHR = t.GJAHR)';
-
-    EXEC exp.CopyTable N'dbo.EKKO', @po;
-    EXEC exp.CopyTable N'dbo.EKPO', @po;
-    EXEC exp.CopyTable N'dbo.EKKN', @po;
-    EXEC exp.CopyTable N'dbo.EKET', @po;
-    EXEC exp.CopyTable N'dbo.EKBE', @po;
-    EXEC exp.CopyTable N'dbo.EBAN', @pr;
-    EXEC exp.CopyTable N'dbo.EBKN', @pr;
-    EXEC exp.CopyTable N'dbo.MKPF', @md;
-    EXEC exp.CopyTable N'dbo.MSEG', @md;
+    EXEC exp.CopyTable N'dbo.EKKO', N't.EBELN IN (SELECT PoNumber FROM exp.PurchaseOrderDetail)';
+    EXEC exp.CopyTable N'dbo.EKPO', @poi;
+    EXEC exp.CopyTable N'dbo.EKKN', @poi;
+    EXEC exp.CopyTable N'dbo.EKET', @poi;
+    EXEC exp.CopyTable N'dbo.EKBE', @poi;
+    EXEC exp.CopyTable N'dbo.EBAN', @pri;
+    EXEC exp.CopyTable N'dbo.EBKN', @pri;
+    EXEC exp.CopyTable N'dbo.MKPF', @mdh;
+    EXEC exp.CopyTable N'dbo.MSEG', @mdi;
     EXEC exp.CopyTable N'dbo.BKPF', @ad;
-    EXEC exp.CopyTable N'dbo.BSEG', @ad;
+    EXEC exp.CopyTable N'dbo.BSEG', @ad;     -- 整張傳票（供應商行以外的費用、稅額行也帶）
 
-    -- ------------------------------------------------------------------
-    -- 4. 主檔：只帶這些單據用到的供應商、物料
-    -- ------------------------------------------------------------------
-    SELECT LIFNR INTO #vendor FROM exp.EKKO WHERE ISNULL(LIFNR, '') <> ''
-    UNION SELECT FLIEF FROM exp.EBAN WHERE ISNULL(FLIEF, '') <> ''
-    UNION SELECT LIFNR FROM exp.BSEG WHERE ISNULL(LIFNR, '') <> '';
+    EXEC exp.CopyTable N'dbo.LFA1', N't.LIFNR IN (SELECT Vendor FROM exp.Vendor)';
+    EXEC exp.CopyTable N'dbo.LFB1', N'EXISTS (SELECT 1 FROM exp.Vendor k WHERE k.Vendor = t.LIFNR AND k.CompanyCode = ISNULL(t.BUKRS, ''''))';
+    EXEC exp.CopyTable N'dbo.LFM1', N'EXISTS (SELECT 1 FROM exp.Vendor k WHERE k.Vendor = t.LIFNR AND k.PurchOrg = ISNULL(t.EKORG, ''''))';
+    EXEC exp.CopyTable N'dbo.CDHDR', N't.OBJECTCLAS = ''KRED'' AND EXISTS (SELECT 1 FROM exp.VendorChangeHistory k
+                                       WHERE k.Vendor = LEFT(RTRIM(t.OBJECTID), 10) AND k.ChangeNumber = t.CHANGENR)';
+    EXEC exp.CopyTable N'dbo.CDPOS', N't.OBJECTCLAS = ''KRED'' AND EXISTS (SELECT 1 FROM exp.VendorChangeHistory k
+                                       WHERE k.Vendor = LEFT(RTRIM(t.OBJECTID), 10) AND k.ChangeNumber = t.CHANGENR
+                                         AND k.TableName = t.TABNAME AND k.TableKey = ISNULL(t.TABKEY, '''') AND k.FieldName = t.FNAME)';
 
-    SELECT MATNR INTO #mat FROM exp.EKPO WHERE ISNULL(MATNR, '') <> ''
-    UNION SELECT MATNR FROM exp.EBAN WHERE ISNULL(MATNR, '') <> ''
-    UNION SELECT MATNR FROM exp.MSEG WHERE ISNULL(MATNR, '') <> '';
+    EXEC exp.CopyTable N'dbo.MARA', N't.MATNR IN (SELECT Material FROM exp.Material)';
+    EXEC exp.CopyTable N'dbo.MAKT', N't.MATNR IN (SELECT Material FROM exp.Material)';
+    EXEC exp.CopyTable N'dbo.MARC', N'EXISTS (SELECT 1 FROM exp.InventoryBalance k WHERE k.Material = t.MATNR AND k.Plant = t.WERKS)';
+    EXEC exp.CopyTable N'dbo.MARD', N'EXISTS (SELECT 1 FROM exp.InventoryBalance k WHERE k.Material = t.MATNR AND k.Plant = t.WERKS
+                                              AND k.StorLoc = ISNULL(t.LGORT, ''''))';
+    EXEC exp.CopyTable N'dbo.MBEW', N'EXISTS (SELECT 1 FROM exp.InventoryBalance k WHERE k.Material = t.MATNR AND k.Plant = t.BWKEY)';
 
-    DECLARE @v  NVARCHAR(200) = N't.LIFNR IN (SELECT LIFNR FROM #vendor)',
-            @m  NVARCHAR(200) = N't.MATNR IN (SELECT MATNR FROM #mat)',
-            @vm NVARCHAR(200) = N'EXISTS (SELECT 1 FROM #vm k WHERE k.LIFNR = t.LIFNR AND k.MATNR = t.MATNR)';
+    EXEC exp.CopyTable N'dbo.EINA', N't.INFNR IN (SELECT InfoRecord FROM exp.PurchasingInfoRecord)';
+    EXEC exp.CopyTable N'dbo.EINE', N'EXISTS (SELECT 1 FROM exp.PurchasingInfoRecord k WHERE k.InfoRecord = t.INFNR
+                                              AND k.PurchOrg = ISNULL(t.EKORG, '''') AND k.InfoCategory = ISNULL(t.ESOKZ, '''')
+                                              AND k.Plant = ISNULL(t.WERKS, ''''))';
+    EXEC exp.CopyTable N'dbo.A017', N't.KNUMH IN (SELECT ConditionRecord FROM exp.PurchasingCondA017)';
+    EXEC exp.CopyTable N'dbo.A018', N't.KNUMH IN (SELECT ConditionRecord FROM exp.PurchasingCondA018)';
+    EXEC exp.CopyTable N'dbo.KONP', @cnd;
+    EXEC exp.CopyTable N'dbo.KONH', @cnd;
 
-    -- 同一張 PO / PR 上真的一起出現的「供應商 + 物料」，不是所有供應商 × 所有物料
-    SELECT k.LIFNR, p.MATNR INTO #vm
-    FROM exp.EKKO k JOIN exp.EKPO p ON p.EBELN = k.EBELN
-    WHERE ISNULL(k.LIFNR, '') <> '' AND ISNULL(p.MATNR, '') <> ''
-    UNION SELECT FLIEF, MATNR FROM exp.EBAN WHERE ISNULL(FLIEF, '') <> '' AND ISNULL(MATNR, '') <> '';
-
-    EXEC exp.CopyTable N'dbo.LFA1', @v;
-    EXEC exp.CopyTable N'dbo.LFB1', @v;
-    EXEC exp.CopyTable N'dbo.LFM1', @v;
-    EXEC exp.CopyTable N'dbo.CDHDR', N't.OBJECTCLAS = ''KRED'' AND LEFT(RTRIM(t.OBJECTID), 10) IN (SELECT LIFNR FROM #vendor)';
-    EXEC exp.CopyTable N'dbo.CDPOS', N'EXISTS (SELECT 1 FROM exp.CDHDR k WHERE k.OBJECTCLAS = t.OBJECTCLAS AND k.OBJECTID = t.OBJECTID AND k.CHANGENR = t.CHANGENR)';
-
-    EXEC exp.CopyTable N'dbo.MARA', @m;
-    EXEC exp.CopyTable N'dbo.MAKT', @m;
-    EXEC exp.CopyTable N'dbo.MARC', @m;
-    EXEC exp.CopyTable N'dbo.MARD', @m;
-    EXEC exp.CopyTable N'dbo.MBEW', @m;
-
-    EXEC exp.CopyTable N'dbo.EINA', @vm;
-    EXEC exp.CopyTable N'dbo.EINE', N't.INFNR IN (SELECT INFNR FROM exp.EINA)';
-    -- 價格條件：先帶用到的組合，調到 @Rows 筆（不足隨機補、超過隨機留），KONP / KONH 跟著同一批
-    EXEC exp.CopyTable N'dbo.A017', @vm;
-    EXEC exp.FitRows    N'dbo.A017', @Rows, @Seed, N'KNUMH', @PreferFilled;
-    EXEC exp.CopyTable N'dbo.A018', @vm;
-    EXEC exp.FitRows    N'dbo.A018', @Rows, @Seed, N'KNUMH', @PreferFilled;
-    EXEC exp.CopyTable N'dbo.KONP', N't.KNUMH IN (SELECT KNUMH FROM exp.A017 UNION SELECT KNUMH FROM exp.A018)';
-    EXEC exp.CopyTable N'dbo.KONH', N't.KNUMH IN (SELECT KNUMH FROM exp.A017 UNION SELECT KNUMH FROM exp.A018)';
-
-    -- ------------------------------------------------------------------
-    -- 5. 設定表：整張
-    -- ------------------------------------------------------------------
     EXEC exp.CopyTable N'dbo.T001';
     EXEC exp.CopyTable N'dbo.T024D';
     EXEC exp.CopyTable N'dbo.T024E';
     EXEC exp.CopyTable N'dbo.T001K';
     EXEC exp.CopyTable N'dbo.T001W';
 
-    -- ------------------------------------------------------------------
-    -- 6. 業務表：同一批鍵
-    -- ------------------------------------------------------------------
-    DECLARE @bmd NVARCHAR(200) = N'EXISTS (SELECT 1 FROM #md k WHERE k.MBLNR = t.MaterialDoc AND k.MJAHR = t.MaterialDocYear)',
-            @bv  NVARCHAR(200) = N't.Vendor IN (SELECT LIFNR FROM #vendor)',
-            @bm  NVARCHAR(200) = N't.Material IN (SELECT MATNR FROM #mat)';
+    -- 一對多的原表：@CapRaw = 1 時也砍到 @Rows 筆（只砍不補）
+    IF @CapRaw = 1
+    BEGIN
+        DECLARE @t NVARCHAR(256);
+        DECLARE cap CURSOR LOCAL FAST_FORWARD FOR
+            SELECT v FROM (VALUES (N'dbo.EKKN'), (N'dbo.EKET'), (N'dbo.EKBE'), (N'dbo.EBKN'), (N'dbo.BSEG'),
+                                  (N'dbo.MAKT'), (N'dbo.MBEW'), (N'dbo.KONP')) x (v);
+        OPEN cap;
+        FETCH NEXT FROM cap INTO @t;
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            EXEC exp.FitRows @t, @Rows, @Seed, N'', @pf, 0;
+            FETCH NEXT FROM cap INTO @t;
+        END;
+        CLOSE cap;
+    END;
 
-    EXEC exp.CopyTable N'prc.PurchaseOrderDetail', N't.PoNumber IN (SELECT EBELN FROM #po)';
-    EXEC exp.CopyTable N'prc.PurchaseRequisition', N't.PrNumber IN (SELECT BANFN FROM #pr)';
-    EXEC exp.CopyTable N'prc.GoodsReceipt',        @bmd;
-    EXEC exp.CopyTable N'inv.MaterialMovement',    @bmd;
-    EXEC exp.CopyTable N'fin.AccountsPayable',
-         N'EXISTS (SELECT 1 FROM #ad k WHERE k.BUKRS = t.CompanyCode AND k.BELNR = t.AccountingDoc AND k.GJAHR = t.FiscalYear)';
-    EXEC exp.CopyTable N'mst.Vendor',               @bv;
-    EXEC exp.CopyTable N'mst.VendorChangeHistory',  @bv;
-    EXEC exp.CopyTable N'mst.Material',             @bm;
-    EXEC exp.CopyTable N'inv.InventoryBalance',     @bm;
-    EXEC exp.CopyTable N'mst.PurchasingInfoRecord', N't.InfoRecord IN (SELECT INFNR FROM exp.EINA)';
-    EXEC exp.CopyTable N'mst.PurchasingCondA017',   N't.ConditionRecord IN (SELECT KNUMH FROM exp.A017)';
-    EXEC exp.CopyTable N'mst.PurchasingCondA018',   N't.ConditionRecord IN (SELECT KNUMH FROM exp.A018)';
+    -- ==================================================================
+    -- 3. 沒有組進業務表的表：先帶有關聯的，再調到 @Rows 筆；沒有關聯的直接隨機
+    -- ==================================================================
+    IF COL_LENGTH(N'dbo.LFBK', N'LIFNR') IS NOT NULL
+    BEGIN
+        EXEC exp.CopyTable N'dbo.LFBK', N't.LIFNR IN (SELECT LIFNR FROM exp.LFA1)';
+        EXEC exp.FitRows   N'dbo.LFBK', @Rows, @Seed, N'', @pf;
+    END;
+    ELSE EXEC exp.CopyRandom N'dbo.LFBK', @Rows, @Seed, @pf;
 
-    -- 業務表以 @Rows 筆為主：上面同一批鍵篩出來的超過就隨機留 @Rows 筆、不足就從整張業務表隨機補
-    EXEC exp.FitRows N'prc.PurchaseOrderDetail', @Rows, @Seed, N'PoNumber,PoItem', @PreferFilled;
-    EXEC exp.FitRows N'prc.PurchaseRequisition', @Rows, @Seed, N'PrNumber,PrItem', @PreferFilled;
-    EXEC exp.FitRows N'prc.GoodsReceipt',        @Rows, @Seed, N'MaterialDoc,MaterialDocYear,MaterialDocItem', @PreferFilled;
-    EXEC exp.FitRows N'inv.MaterialMovement',    @Rows, @Seed, N'MaterialDoc,MaterialDocYear,MaterialDocItem', @PreferFilled;
-    EXEC exp.FitRows N'fin.AccountsPayable',     @Rows, @Seed, N'CompanyCode,AccountingDoc,FiscalYear,LineItem', @PreferFilled;
-    EXEC exp.FitRows N'mst.Vendor',              @Rows, @Seed, N'Vendor,CompanyCode,PurchOrg', @PreferFilled;
-    EXEC exp.FitRows N'mst.VendorChangeHistory', @Rows, @Seed, N'Vendor,ChangeNumber,TableName,TableKey,FieldName', @PreferFilled;
-    EXEC exp.FitRows N'mst.Material',            @Rows, @Seed, N'Material', @PreferFilled;
-    EXEC exp.FitRows N'inv.InventoryBalance',    @Rows, @Seed, N'Material,Plant,StorLoc', @PreferFilled;
-    EXEC exp.FitRows N'mst.PurchasingInfoRecord', @Rows, @Seed, N'Vendor,Material,PurchOrg,InfoCategory,Plant', @PreferFilled;
-    EXEC exp.FitRows N'mst.PurchasingCondA017',  @Rows, @Seed, N'Vendor,Material,PurchOrg,Plant,InfoCategory,ConditionType,ValidFrom', @PreferFilled;
-    EXEC exp.FitRows N'mst.PurchasingCondA018',  @Rows, @Seed, N'Vendor,Material,PurchOrg,InfoCategory,ConditionType,ValidFrom', @PreferFilled;
-
-    -- ------------------------------------------------------------------
-    -- 7. 其他表
-    -- ------------------------------------------------------------------
-    IF COL_LENGTH(N'dbo.LFBK', N'LIFNR') IS NOT NULL EXEC exp.CopyTable N'dbo.LFBK', @v;
-    ELSE EXEC exp.CopyRandom N'dbo.LFBK', @Rows, @Seed, @PreferFilled;
-    IF COL_LENGTH(N'dbo.MBEWH', N'MATNR') IS NOT NULL EXEC exp.CopyTable N'dbo.MBEWH', @m;
-    ELSE EXEC exp.CopyRandom N'dbo.MBEWH', @Rows, @Seed, @PreferFilled;
+    IF COL_LENGTH(N'dbo.MBEWH', N'MATNR') IS NOT NULL
+    BEGIN
+        EXEC exp.CopyTable N'dbo.MBEWH', N't.MATNR IN (SELECT MATNR FROM exp.MARA)';
+        EXEC exp.FitRows   N'dbo.MBEWH', @Rows, @Seed, N'', @pf;
+    END;
+    ELSE EXEC exp.CopyRandom N'dbo.MBEWH', @Rows, @Seed, @pf;
 
     -- ANLA：EKKN / BSEG 有 ANLN1 才串得起來；兩邊都有 ANLN2（資產子編號）時一起比
     DECLARE @anla NVARCHAR(MAX) = NULL;
@@ -455,19 +428,19 @@ BEGIN
     END;
     IF @anla IS NOT NULL
     BEGIN
-        -- 先帶用到的資產，調到 @Rows 筆（不足隨機補、超過隨機留）
         EXEC exp.CopyTable N'dbo.ANLA', @anla;
         DECLARE @anlaKeys NVARCHAR(100) = IIF(COL_LENGTH(N'dbo.ANLA', N'ANLN2') IS NOT NULL,
                                               N'BUKRS,ANLN1,ANLN2', N'BUKRS,ANLN1');
-        EXEC exp.FitRows N'dbo.ANLA', @Rows, @Seed, @anlaKeys, @PreferFilled;
+        EXEC exp.FitRows N'dbo.ANLA', @Rows, @Seed, @anlaKeys, @pf;
     END;
-    ELSE EXEC exp.CopyRandom N'dbo.ANLA', @Rows, @Seed, @PreferFilled;
-    EXEC exp.CopyRandom N'dbo.ZTM105',       @Rows, @Seed, @PreferFilled;
-    EXEC exp.CopyRandom N'dbo.ZTM80',        @Rows, @Seed, @PreferFilled;
-    EXEC exp.CopyRandom N'dbo.ADT_CONTRACT', @Rows, @Seed, @PreferFilled;
-    EXEC exp.CopyRandom N'dbo.ADT_ECAR',     @Rows, @Seed, @PreferFilled;
-    EXEC exp.CopyRandom N'dbo.ADT_OSWEB',    @Rows, @Seed, @PreferFilled;
-    EXEC exp.CopyRandom N'dbo.ADT_POAS',     @Rows, @Seed, @PreferFilled;
+    ELSE EXEC exp.CopyRandom N'dbo.ANLA', @Rows, @Seed, @pf;
+
+    EXEC exp.CopyRandom N'dbo.ZTM105',       @Rows, @Seed, @pf;
+    EXEC exp.CopyRandom N'dbo.ZTM80',        @Rows, @Seed, @pf;
+    EXEC exp.CopyRandom N'dbo.ADT_CONTRACT', @Rows, @Seed, @pf;
+    EXEC exp.CopyRandom N'dbo.ADT_ECAR',     @Rows, @Seed, @pf;
+    EXEC exp.CopyRandom N'dbo.ADT_OSWEB',    @Rows, @Seed, @pf;
+    EXEC exp.CopyRandom N'dbo.ADT_POAS',     @Rows, @Seed, @pf;
 
     SELECT Src AS [來源], N'exp.' + PARSENAME(Src, 1) AS [抽樣表], Rows AS [筆數], Note AS [說明],
            @Seed AS [Seed]
