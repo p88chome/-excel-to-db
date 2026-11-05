@@ -14,16 +14,19 @@
 --      物料（MARA / MAKT / MARC / MARD / MBEW）；資訊記錄與價格條件只帶同一張 PO / PR 上
 --      一起出現的「供應商 + 物料」，A017 / A018 再調到 @Rows 筆（不足隨機補、超過隨機留）
 --   5. 設定表（T001、T001K、T001W、T024D、T024E）整張複製
---   6. 業務表用同一批鍵篩，跟 exp 裡的原表是同一批單據
+--   6. 業務表先用同一批鍵篩，再調到剛好 @Rows 筆：超過就隨機留 @Rows 筆（一張單據可能只留部分項目），
+--      不足就從整張業務表隨機補（補進來的不在 exp 的原表裡）
 --   7. 其他表：LFBK 帶用到的供應商、MBEWH 帶用到的物料（沒有 LIFNR / MATNR 欄位就改成隨機）；
 --      ANLA 先帶抽到的 PO（EKKN.ANLN1）、會計傳票（BSEG.ANLN1）用到的資產，再調到 @Rows 筆
 --      （不足隨機補、超過隨機留；沒有 ANLN1 欄位就整張隨機）；
 --      ZTM105、ZTM80、ADT_CONTRACT、ADT_ECAR、ADT_OSWEB、ADT_POAS 沒有固定關聯，
 --      SELECT * 隨機抽 @Rows 筆（依 seed + 整列內容的雜湊排序，同一個 seed 一樣抽同一批）
--- 所以 @Rows 是「每類單據的張數」，不是每張表的筆數：明細表會比較多，主檔看用到幾個。
+-- 所以 SAP 原表的 @Rows 是「每類單據的張數」，不是每張表的筆數：明細表會比較多，主檔看用到幾個。
+-- 剛好 @Rows 筆的是：業務表、A017 / A018 / ANLA、整張隨機的表（來源本身不足 @Rows 筆的除外）。
 --
 -- 隨機的方式：依「seed + 單據號碼」的雜湊排序取前 @Rows 張。
--- @PreferFilled = 1（預設）時，凡是「隨機挑」的地方都先挑空欄位（NULL）少的，同樣少的再隨機：
+-- @PreferFilled = 1（預設）時，凡是「隨機挑」的地方都先挑空欄位（NULL）少的，同樣少的再隨機。
+-- 先比「重要欄位」（exp.ImportantColumn，預設是 ETL 用到的欄位）的空值數，再比全部欄位：
 -- 四類單據表頭、整張隨機的表、A017 / A018 / ANLA 的補與縮。跟著單據帶的明細與主檔沒得挑。
 -- 這樣抽出來的會偏向資料比較完整的單據；要照原本的比例抽就給 @PreferFilled = 0。
 -- 不給 @Seed 就隨機產生一個，結果最後一欄會列出這次用的 seed，要重抽同一批就把它帶回來。
@@ -35,23 +38,127 @@
 IF SCHEMA_ID(N'exp') IS NULL EXEC (N'CREATE SCHEMA exp');
 GO
 
+-- 重要欄位：挑資料時這些欄位有值的優先。依表名（不分 schema）對應。
+-- 預設 = ETL 會用到的欄位（00_check_staging.sql 的清單）；業務表沒列 = 全部欄位都算重要。
+-- 可以自己增刪，重跑這支只補沒有的、不會蓋掉：
+--   INSERT exp.ImportantColumn VALUES ('ZTM80', 'EBELN');
+--   DELETE exp.ImportantColumn WHERE TableName = 'LFA1' AND ColumnName = 'TELFX';
+IF OBJECT_ID(N'exp.ImportantColumn', N'U') IS NULL
+CREATE TABLE exp.ImportantColumn (
+    TableName  SYSNAME NOT NULL,
+    ColumnName SYSNAME NOT NULL,
+    CONSTRAINT PK_exp_ImportantColumn PRIMARY KEY (TableName, ColumnName)
+);
+GO
+
+INSERT exp.ImportantColumn (TableName, ColumnName)
+SELECT s.t, s.c FROM (VALUES
+('EKKO','EBELN'),('EKKO','BSTYP'),('EKKO','BSART'),('EKKO','BUKRS'),('EKKO','EKORG'),
+('EKKO','EKGRP'),('EKKO','BEDAT'),('EKKO','LIFNR'),('EKKO','ZTERM'),('EKKO','WAERS'),
+('EKKO','WKURS'),('EKPO','EBELN'),('EKPO','EBELP'),('EKPO','MATNR'),('EKPO','MATKL'),
+('EKPO','WERKS'),('EKPO','LGORT'),('EKPO','MENGE'),('EKPO','MEINS'),('EKPO','NETPR'),
+('EKPO','PEINH'),('EKPO','NETWR'),('EKPO','ELIKZ'),('EKPO','WEPOS'),('EKPO','REPOS'),
+('EKPO','LOEKZ'),('EKPO','BANFN'),('EKPO','BNFPO'),('EKPO','KONNR'),('EKPO','KTPNR'),
+('EKKN','EBELN'),('EKKN','EBELP'),('EKKN','ZEKKN'),('EKKN','SAKTO'),('EKKN','KOSTL'),
+('EKKN','AUFNR'),('EKET','EBELN'),('EKET','EBELP'),('EKET','EINDT'),('EKBE','EBELN'),
+('EKBE','EBELP'),('EKBE','BEWTP'),('EKBE','SHKZG'),('EKBE','MENGE'),('EKBE','DMBTR'),
+('EKBE','BUDAT'),('MAKT','MATNR'),('MAKT','SPRAS'),('MAKT','MAKTX'),('LFA1','LIFNR'),
+('LFA1','NAME1'),('LFA1','NAME2'),('LFA1','SORTL'),('LFA1','LAND1'),('LFA1','REGIO'),
+('LFA1','ORT01'),('LFA1','PSTLZ'),('LFA1','STRAS'),('LFA1','SPRAS'),('LFA1','TELF1'),
+('LFA1','TELFX'),('LFA1','STCD1'),('LFA1','KTOKK'),('LFA1','ERDAT'),('LFA1','ERNAM'),
+('LFA1','LOEVM'),('LFA1','SPERR'),('LFA1','SPERM'),('LFB1','LIFNR'),('LFB1','BUKRS'),
+('LFB1','ZTERM'),('LFB1','ZWELS'),('LFB1','ZAHLS'),('LFB1','SPERR'),('LFM1','LIFNR'),
+('LFM1','EKORG'),('LFM1','SPERM'),('LFM1','INCO1'),('LFM1','WAERS'),('LFM1','VERKF'),
+('LFM1','ZTERM'),('EBAN','BANFN'),('EBAN','BNFPO'),('EBAN','BSART'),('EBAN','BADAT'),
+('EBAN','ERNAM'),('EBAN','MATNR'),('EBAN','TXZ01'),('EBAN','MATKL'),('EBAN','WERKS'),
+('EBAN','LGORT'),('EBAN','MENGE'),('EBAN','MEINS'),('EBAN','LFDAT'),('EBAN','PREIS'),
+('EBAN','WAERS'),('EBAN','EKGRP'),('EBAN','EKORG'),('EBAN','FLIEF'),('EBAN','KNTTP'),
+('EBAN','FRGKZ'),('EBAN','FRGST'),('EBAN','LOEKZ'),('EBKN','BANFN'),('EBKN','BNFPO'),
+('EBKN','ZEBKN'),('EBKN','KOSTL'),('EBKN','SAKTO'),('MKPF','MBLNR'),('MKPF','MJAHR'),
+('MKPF','BUDAT'),('MKPF','BLDAT'),('MKPF','CPUDT'),('MKPF','USNAM'),('MKPF','XBLNR'),
+('MSEG','MBLNR'),('MSEG','MJAHR'),('MSEG','ZEILE'),('MSEG','BWART'),('MSEG','MATNR'),
+('MSEG','WERKS'),('MSEG','LGORT'),('MSEG','CHARG'),('MSEG','BUKRS'),('MSEG','MENGE'),
+('MSEG','MEINS'),('MSEG','DMBTR'),('MSEG','EBELN'),('MSEG','EBELP'),('MSEG','SGTXT'),
+('MSEG','SHKZG'),('MSEG','KOSTL'),('MSEG','SAKTO'),('MSEG','AUFNR'),('MSEG','KUNNR'),
+('T001','BUKRS'),('T001','WAERS'),('CDHDR','OBJECTCLAS'),('CDHDR','OBJECTID'),
+('CDHDR','CHANGENR'),('CDHDR','UDATE'),('CDHDR','UTIME'),('CDHDR','USERNAME'),('CDHDR','TCODE'),
+('CDPOS','OBJECTCLAS'),('CDPOS','OBJECTID'),('CDPOS','CHANGENR'),('CDPOS','TABNAME'),
+('CDPOS','TABKEY'),('CDPOS','FNAME'),('CDPOS','CHNGIND'),('CDPOS','VALUE_OLD'),
+('CDPOS','VALUE_NEW'),('MARA','MATNR'),('MARA','MTART'),('MARA','MATKL'),('MARA','MEINS'),
+('MARA','MBRSH'),('MARA','SPART'),('MARA','MSTAE'),('MARA','BRGEW'),('MARA','NTGEW'),
+('MARA','GEWEI'),('MARA','VOLUM'),('MARA','VOLEH'),('MARA','GROES'),('MARA','WRKST'),
+('MARA','MFRPN'),('MARA','ERSDA'),('MARA','ERNAM'),('MARA','LVORM'),('EINA','INFNR'),
+('EINA','LIFNR'),('EINA','MATNR'),('EINA','IDNLF'),('EINA','LOEKZ'),('EINA','ERDAT'),
+('EINA','ERNAM'),('EINE','INFNR'),('EINE','EKORG'),('EINE','ESOKZ'),('EINE','WERKS'),
+('EINE','EKGRP'),('EINE','APLFZ'),('EINE','NORBM'),('EINE','WAERS'),('EINE','INCO1'),
+('EINE','BSTAE'),('A017','LIFNR'),('A017','MATNR'),('A017','EKORG'),('A017','WERKS'),
+('A017','ESOKZ'),('A017','KSCHL'),('A017','DATAB'),('A017','DATBI'),('A017','KNUMH'),
+('A018','LIFNR'),('A018','MATNR'),('A018','EKORG'),('A018','ESOKZ'),('A018','KSCHL'),
+('A018','DATAB'),('A018','DATBI'),('A018','KNUMH'),('KONP','KNUMH'),('KONP','KOPOS'),
+('KONP','KBETR'),('KONP','KONWA'),('KONP','KPEIN'),('KONP','KMEIN'),('KONP','LOEVM_KO'),
+('KONH','KNUMH'),('KONH','ERDAT'),('KONH','ERNAM'),('MARD','MATNR'),('MARD','WERKS'),
+('MARD','LGORT'),('MARD','LABST'),('MARD','INSME'),('MARD','SPEME'),('MARD','UMLME'),
+('MBEW','MATNR'),('MBEW','BWKEY'),('MBEW','BWTAR'),('MBEW','SALK3'),('MBEW','STPRS'),
+('MBEW','VERPR'),('MBEW','VPRSV'),('MBEW','PEINH'),('MBEW','LBKUM'),('MARC','MATNR'),
+('MARC','WERKS'),('MARC','EISBE'),('MARC','MINBE'),('MARC','MABST'),('MARC','DISMM'),
+('MARC','DISPO'),('MARC','BESKZ'),('MARC','MAABC'),('BKPF','BUKRS'),('BKPF','BELNR'),
+('BKPF','GJAHR'),('BKPF','BLART'),('BKPF','BUDAT'),('BKPF','BLDAT'),('BKPF','CPUDT'),
+('BKPF','USNAM'),('BKPF','XBLNR'),('BKPF','WAERS'),('BSEG','BUKRS'),('BSEG','BELNR'),
+('BSEG','GJAHR'),('BSEG','BUZEI'),('BSEG','KOART'),('BSEG','LIFNR'),('BSEG','ZUONR'),
+('BSEG','SGTXT'),('BSEG','HKONT'),('BSEG','KOSTL'),('BSEG','WRBTR'),('BSEG','DMBTR'),
+('BSEG','SHKZG'),('BSEG','ZTERM'),('BSEG','ZFBDT'),('BSEG','ZLSCH'),('BSEG','ZLSPR'),
+('BSEG','AUGBL'),('BSEG','AUGDT'),('BSEG','EBELN'),('BSEG','EBELP'),('BSEG','BSCHL'),
+('T024D','WERKS'),('T024D','DISPO'),('T024D','DSNAM'),('T024E','EKORG'),('T024E','BUKRS')
+) AS s (t, c)
+WHERE NOT EXISTS (SELECT 1 FROM exp.ImportantColumn x WHERE x.TableName = s.t AND x.ColumnName = s.c);
+GO
+
 -- 一列有幾個 NULL 欄位的運算式，給「挑空欄位少的」排序用。@Alias 空字串 = 不加前綴。
-CREATE OR ALTER FUNCTION exp.NullCountExpr (@Obj NVARCHAR(256), @Alias SYSNAME)
+-- @Important = 1 只算重要欄位：exp.ImportantColumn 有列這張表就用列的；業務表沒列就算全部欄位；
+-- 其他沒列的表（ZTM、ADT、ANLA…）回 NULL，等於只看全部欄位。
+CREATE OR ALTER FUNCTION exp.NullCountExpr (@Obj NVARCHAR(256), @Alias SYSNAME, @Important BIT = 0)
 RETURNS NVARCHAR(MAX)
 AS
 BEGIN
-    DECLARE @p NVARCHAR(200) = IIF(ISNULL(@Alias, N'') = N'', N'', QUOTENAME(@Alias) + N'.');
-    RETURN (SELECT N'(' + STRING_AGG(CAST(N'IIF(' + @p + QUOTENAME(name) + N' IS NULL, 1, 0)' AS NVARCHAR(MAX)), N' + ') + N')'
-            FROM sys.columns WHERE object_id = OBJECT_ID(@Obj));
+    DECLARE @p NVARCHAR(200) = IIF(ISNULL(@Alias, N'') = N'', N'', QUOTENAME(@Alias) + N'.'),
+            @tbl SYSNAME = PARSENAME(@Obj, 1), @sch SYSNAME = PARSENAME(@Obj, 2),
+            @listed BIT, @biz BIT, @r NVARCHAR(MAX);
+    SET @listed = IIF(EXISTS (SELECT 1 FROM exp.ImportantColumn WHERE TableName = @tbl), 1, 0);
+    -- 業務表（含 exp 裡的業務表抽樣）
+    SET @biz = IIF(EXISTS (SELECT 1 FROM sys.tables t
+                           WHERE t.name = @tbl AND SCHEMA_NAME(t.schema_id) IN (N'prc', N'mst', N'inv', N'fin')), 1, 0);
+    IF @Important = 1 AND @listed = 0 AND @biz = 0
+        RETURN NULL;
+    SELECT @r = N'(' + STRING_AGG(CAST(N'IIF(' + @p + QUOTENAME(c.name) + N' IS NULL, 1, 0)' AS NVARCHAR(MAX)), N' + ') + N')'
+    FROM sys.columns c
+    WHERE c.object_id = OBJECT_ID(@Obj)
+      AND (@Important = 0 OR @listed = 0
+           OR c.name IN (SELECT ColumnName FROM exp.ImportantColumn WHERE TableName = @tbl));
+    RETURN @r;
 END;
 GO
 
--- 隨機排序：@Prefer = 1 時空欄位少的排前面，同樣少的再依 seed + 整列內容的雜湊
+-- 挑空欄位少的排序鍵：先比重要欄位的 NULL 數、再比全部欄位的 NULL 數。@Agg 給 PR 這種分組的用（AVG）。
+CREATE OR ALTER FUNCTION exp.FilledOrder (@Obj NVARCHAR(256), @Alias SYSNAME, @Agg NVARCHAR(10) = NULL)
+RETURNS NVARCHAR(MAX)
+AS
+BEGIN
+    DECLARE @i NVARCHAR(MAX) = exp.NullCountExpr(@Obj, @Alias, 1),
+            @a NVARCHAR(MAX) = exp.NullCountExpr(@Obj, @Alias, 0);
+    IF @Agg IS NOT NULL
+        SELECT @i = @Agg + N'(CAST(' + @i + N' AS FLOAT))', @a = @Agg + N'(CAST(' + @a + N' AS FLOAT))';
+    -- ORDER BY 不能有重複的運算式：重要欄位 = 全部欄位（業務表）或沒有重要欄位時只放一次
+    IF @i IS NULL OR @i = @a RETURN ISNULL(@a + N', ', N'');
+    RETURN @i + N', ' + @a + N', ';
+END;
+GO
+
+-- 隨機排序：@Prefer = 1 時空欄位少的排前面（重要欄位優先），同樣少的再依 seed + 整列內容的雜湊
 CREATE OR ALTER FUNCTION exp.RandomOrder (@Obj NVARCHAR(256), @Alias SYSNAME, @Prefer BIT)
 RETURNS NVARCHAR(MAX)
 AS
 BEGIN
-    RETURN IIF(@Prefer = 1, exp.NullCountExpr(@Obj, @Alias) + N', ', N'')
+    RETURN IIF(@Prefer = 1, exp.FilledOrder(@Obj, @Alias, NULL), N'')
          + N'HASHBYTES(''MD5'', CONCAT(@seed, N''|'', BINARY_CHECKSUM(*)))';
 END;
 GO
@@ -167,26 +274,26 @@ BEGIN
     -- ------------------------------------------------------------------
     -- 先四類各自隨機抽 @Rows 張。@PreferFilled = 1 時表頭空欄位少的優先（PR 看項目的平均）
     SELECT TOP 0 EBELN INTO #po FROM dbo.EKKO;
-    SET @nul = IIF(@PreferFilled = 1, exp.NullCountExpr(N'dbo.EKKO', N't') + N', ', N'');
+    SET @nul = IIF(@PreferFilled = 1, exp.FilledOrder(N'dbo.EKKO', N't', NULL), N'');
     SET @q = N'INSERT #po SELECT TOP (@n) t.EBELN FROM dbo.EKKO t WHERE ISNULL(t.EBELN, '''') <> '''''
            + N' ORDER BY ' + @nul + N'HASHBYTES(''MD5'', @s + t.EBELN)';
     EXEC sp_executesql @q, N'@n INT, @s NVARCHAR(20)', @n = @Rows, @s = @s;
 
     SELECT TOP 0 BANFN INTO #pr FROM dbo.EBAN;
-    SET @nul = IIF(@PreferFilled = 1, N'AVG(CAST(' + exp.NullCountExpr(N'dbo.EBAN', N't') + N' AS FLOAT)), ', N'');
+    SET @nul = IIF(@PreferFilled = 1, exp.FilledOrder(N'dbo.EBAN', N't', N'AVG'), N'');
     SET @q = N'INSERT #pr SELECT TOP (@n) t.BANFN FROM dbo.EBAN t WHERE ISNULL(t.BANFN, '''') <> '''''
            + N' GROUP BY t.BANFN ORDER BY ' + @nul + N'HASHBYTES(''MD5'', @s + t.BANFN)';
     EXEC sp_executesql @q, N'@n INT, @s NVARCHAR(20)', @n = @Rows, @s = @s;
 
     SELECT TOP 0 MBLNR, MJAHR INTO #md FROM dbo.MKPF;
-    SET @nul = IIF(@PreferFilled = 1, exp.NullCountExpr(N'dbo.MKPF', N't') + N', ', N'');
+    SET @nul = IIF(@PreferFilled = 1, exp.FilledOrder(N'dbo.MKPF', N't', NULL), N'');
     SET @q = N'INSERT #md SELECT TOP (@n) t.MBLNR, t.MJAHR FROM dbo.MKPF t WHERE ISNULL(t.MBLNR, '''') <> '''''
            + N' ORDER BY ' + @nul + N'HASHBYTES(''MD5'', @s + t.MBLNR + N''|'' + CAST(t.MJAHR AS NVARCHAR(10)))';
     EXEC sp_executesql @q, N'@n INT, @s NVARCHAR(20)', @n = @Rows, @s = @s;
 
     -- 會計傳票只從有供應商行的抽（不然 fin.AccountsPayable 抽出來幾乎是空的）
     SELECT TOP 0 BUKRS, BELNR, GJAHR INTO #ad FROM dbo.BKPF;
-    SET @nul = IIF(@PreferFilled = 1, exp.NullCountExpr(N'dbo.BKPF', N't') + N', ', N'');
+    SET @nul = IIF(@PreferFilled = 1, exp.FilledOrder(N'dbo.BKPF', N't', NULL), N'');
     SET @q = N'INSERT #ad SELECT TOP (@n) t.BUKRS, t.BELNR, t.GJAHR FROM dbo.BKPF t'
            + N' WHERE EXISTS (SELECT 1 FROM dbo.BSEG s WHERE s.BUKRS = t.BUKRS AND s.BELNR = t.BELNR'
            + N' AND s.GJAHR = t.GJAHR AND ISNULL(s.LIFNR, '''') <> '''')'
@@ -308,6 +415,20 @@ BEGIN
     EXEC exp.CopyTable N'mst.PurchasingInfoRecord', N't.InfoRecord IN (SELECT INFNR FROM exp.EINA)';
     EXEC exp.CopyTable N'mst.PurchasingCondA017',   N't.ConditionRecord IN (SELECT KNUMH FROM exp.A017)';
     EXEC exp.CopyTable N'mst.PurchasingCondA018',   N't.ConditionRecord IN (SELECT KNUMH FROM exp.A018)';
+
+    -- 業務表以 @Rows 筆為主：上面同一批鍵篩出來的超過就隨機留 @Rows 筆、不足就從整張業務表隨機補
+    EXEC exp.FitRows N'prc.PurchaseOrderDetail', @Rows, @Seed, N'PoNumber,PoItem', @PreferFilled;
+    EXEC exp.FitRows N'prc.PurchaseRequisition', @Rows, @Seed, N'PrNumber,PrItem', @PreferFilled;
+    EXEC exp.FitRows N'prc.GoodsReceipt',        @Rows, @Seed, N'MaterialDoc,MaterialDocYear,MaterialDocItem', @PreferFilled;
+    EXEC exp.FitRows N'inv.MaterialMovement',    @Rows, @Seed, N'MaterialDoc,MaterialDocYear,MaterialDocItem', @PreferFilled;
+    EXEC exp.FitRows N'fin.AccountsPayable',     @Rows, @Seed, N'CompanyCode,AccountingDoc,FiscalYear,LineItem', @PreferFilled;
+    EXEC exp.FitRows N'mst.Vendor',              @Rows, @Seed, N'Vendor,CompanyCode,PurchOrg', @PreferFilled;
+    EXEC exp.FitRows N'mst.VendorChangeHistory', @Rows, @Seed, N'Vendor,ChangeNumber,TableName,TableKey,FieldName', @PreferFilled;
+    EXEC exp.FitRows N'mst.Material',            @Rows, @Seed, N'Material', @PreferFilled;
+    EXEC exp.FitRows N'inv.InventoryBalance',    @Rows, @Seed, N'Material,Plant,StorLoc', @PreferFilled;
+    EXEC exp.FitRows N'mst.PurchasingInfoRecord', @Rows, @Seed, N'Vendor,Material,PurchOrg,InfoCategory,Plant', @PreferFilled;
+    EXEC exp.FitRows N'mst.PurchasingCondA017',  @Rows, @Seed, N'Vendor,Material,PurchOrg,Plant,InfoCategory,ConditionType,ValidFrom', @PreferFilled;
+    EXEC exp.FitRows N'mst.PurchasingCondA018',  @Rows, @Seed, N'Vendor,Material,PurchOrg,InfoCategory,ConditionType,ValidFrom', @PreferFilled;
 
     -- ------------------------------------------------------------------
     -- 7. 其他表

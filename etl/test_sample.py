@@ -137,10 +137,15 @@ cur.execute("UPDATE dbo.EKKN SET ANLN1 = '3' + RIGHT('00000000000' + CAST(CAST(R
             " ANLN2 = '0000' WHERE EBELP = '00010'")
 cur.execute("CREATE TABLE dbo.T001W (WERKS NVARCHAR(100), NAME1 NVARCHAR(100))")
 ins("T001W", [{"WERKS": "1100", "NAME1": "一廠"}, {"WERKS": "1200", "NAME1": "二廠"}])
-cur.execute("CREATE TABLE dbo.ADT_ECAR (Id INT, Amount DECIMAL(18,2), Memo NVARCHAR(MAX), Dt DATETIME2)")
+cur.execute("CREATE TABLE dbo.ADT_ECAR (Id INT, Amount DECIMAL(18,2), Memo NVARCHAR(MAX), Dt DATETIME2, Extra NVARCHAR(10))")
 for i in range(50):
     # 只有 10 筆是完整的，其他缺 Memo：測空欄位少的優先
     ins("ADT_ECAR", [{"Id": i, "Amount": i * 1.5, "Memo": f"備註{i}" if i % 5 == 0 else None, "Dt": "2025-01-01"}])
+# 這 10 筆 Memo、Dt 都有，只缺 Amount：沒設重要欄位時最完整，設了 Amount 重要就排後面
+for i in range(100, 110):
+    ins("ADT_ECAR", [{"Id": i, "Amount": None, "Memo": f"完整{i}", "Dt": "2025-01-01", "Extra": "x"}])
+cur.execute("UPDATE dbo.ADT_ECAR SET Dt = NULL WHERE Id < 100")
+for i in range(50):
     ins("MBEWH", [{"MATERIAL": f"X{i}", "LFGJA": "2024"}])
 
 for i in range(40):           # A018 都跟抽到的單據無關，測補到 @Rows
@@ -157,8 +162,8 @@ cur.execute("UPDATE dbo.EKKO SET WKURS = NULL WHERE EBELN > '4500000009'")
 checks = []
 
 
-def one(sql):
-    return cur.execute(sql).fetchall()
+def one(sql, *params):
+    return cur.execute(sql, *params).fetchall()
 
 
 def check(name, got, want):
@@ -238,27 +243,31 @@ check("KONP 跟著補進來的 A018", one("SELECT COUNT(*) FROM exp.KONP WHERE K
 check("EINE 跟 EINA 同一批", keys("SELECT INFNR FROM exp.EINE"), keys("SELECT INFNR FROM exp.EINA"))
 check("T001 整張", one("SELECT COUNT(*) FROM exp.T001")[0][0], 1)
 
-check("業務表 PO 跟 exp.EKKO 同一批", keys("SELECT DISTINCT PoNumber FROM exp.PurchaseOrderDetail"), po_set)
-check("業務表 PR 跟 exp.EBAN 同一批", keys("SELECT DISTINCT PrNumber FROM exp.PurchaseRequisition"), pr_rand)
-check("業務表收貨的 PO 都在 exp.EKKO",
-      keys("SELECT DISTINCT PoNumber FROM exp.GoodsReceipt"), po_set)
 check("物料憑證、傳票引用的 PO 都在 exp.EKKO",
       one("""SELECT COUNT(*) FROM (SELECT EBELN FROM exp.MSEG UNION SELECT EBELN FROM exp.BSEG
                                    UNION SELECT EBELN FROM exp.EKPO) x
              WHERE x.EBELN IS NOT NULL AND x.EBELN NOT IN (SELECT EBELN FROM exp.EKKO)""")[0][0], 0)
-check("業務表物料異動跟 exp.MKPF 同一批",
-      keys("SELECT DISTINCT MaterialDoc FROM exp.MaterialMovement"), keys("SELECT MBLNR FROM exp.MKPF"))
-check("業務表 AP 跟 exp.BKPF 同一批",
-      keys("SELECT DISTINCT AccountingDoc FROM exp.AccountsPayable"), keys("SELECT BELNR FROM exp.BKPF"))
-check("業務表 Vendor", keys("SELECT DISTINCT Vendor FROM exp.Vendor"), used_v)
-check("業務表 VendorChangeHistory", keys("SELECT DISTINCT Vendor FROM exp.VendorChangeHistory"), used_v)
-check("業務表 Material、InventoryBalance",
-      (keys("SELECT Material FROM exp.Material"), keys("SELECT Material FROM exp.InventoryBalance")),
-      (used_m, used_m))
-check("業務表條件 A017 跟 exp.A017 同一批",
-      keys("SELECT ConditionRecord FROM exp.PurchasingCondA017"), keys("SELECT KNUMH FROM exp.A017"))
-check("業務表資訊記錄跟 exp.EINA 同一批",
-      keys("SELECT InfoRecord FROM exp.PurchasingInfoRecord"), keys("SELECT INFNR FROM exp.EINA"))
+
+# 業務表：剛好 5 筆（來源不足 5 筆就整張）；同一批夠的話從同一批裡留，不夠才從外面補
+BIZ = {"PurchaseOrderDetail": ("prc", "PoNumber", po_set),
+       "PurchaseRequisition": ("prc", "PrNumber", pr_rand),
+       "GoodsReceipt": ("prc", "MaterialDoc", keys("SELECT MBLNR FROM exp.MKPF")),
+       "MaterialMovement": ("inv", "MaterialDoc", keys("SELECT MBLNR FROM exp.MKPF")),
+       "AccountsPayable": ("fin", "AccountingDoc", keys("SELECT BELNR FROM exp.BKPF")),
+       "Vendor": ("mst", "Vendor", used_v),
+       "VendorChangeHistory": ("mst", "Vendor", used_v),
+       "Material": ("mst", "Material", used_m),
+       "InventoryBalance": ("inv", "Material", used_m),
+       "PurchasingInfoRecord": ("mst", "InfoRecord", keys("SELECT INFNR FROM exp.EINA")),
+       "PurchasingCondA017": ("mst", "ConditionRecord", keys("SELECT KNUMH FROM exp.A017")),
+       "PurchasingCondA018": ("mst", "ConditionRecord", keys("SELECT KNUMH FROM exp.A018"))}
+for t, (sch, col, batch) in BIZ.items():
+    total = one(f"SELECT COUNT(*) FROM {sch}.{t}")[0][0]
+    in_batch = one(f"SELECT COUNT(*) FROM {sch}.{t} WHERE {col} IN ({','.join('?' * len(batch)) or 'NULL'})", *batch)[0][0]
+    got = one(f"SELECT COUNT(*) FROM exp.{t}")[0][0]
+    got_in = one(f"SELECT COUNT(*) FROM exp.{t} WHERE {col} IN ({','.join('?' * len(batch)) or 'NULL'})", *batch)[0][0]
+    check(f"業務表 {t} 剛好 min(5, 整張) 筆、同一批的優先", (got, got_in), (min(5, total), min(5, in_batch)))
+check("業務表有縮到（PO 明細原本超過 5 筆）", res["prc.PurchaseOrderDetail"][1].endswith("隨機留 5 筆"), True)
 
 # 同一個 seed 抽同一批；換 seed 換一批；不給 seed 會自己產生
 before = (po_set, keys("SELECT MBLNR FROM exp.MKPF"), keys("SELECT BELNR FROM exp.BKPF"))
@@ -297,9 +306,18 @@ check("ANLA 剛好 5 筆、不重複", (len(got_a), len(set(got_a))), (5, 5))
 check("T001W 整張", one("SELECT COUNT(*) FROM exp.T001W")[0][0], 2)
 check("ADT_ECAR 隨機 5 筆、欄位全帶",
       (one("SELECT COUNT(*) FROM exp.ADT_ECAR")[0][0],
-       one("SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('exp.ADT_ECAR')")[0][0]), (5, 4))
+       one("SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('exp.ADT_ECAR')")[0][0]), (5, 5))
 ecar = keys("SELECT Id FROM exp.ADT_ECAR")
-check("隨機的表空欄位少的優先", all(i % 5 == 0 for i in ecar), True)
+check("沒設重要欄位時只看全部欄位：挑到只缺 Amount 的", all(i >= 100 for i in ecar), True)
+cur.execute("INSERT exp.ImportantColumn VALUES ('ADT_ECAR', 'Amount')")
+sample(5, 42)
+ecar = keys("SELECT Id FROM exp.ADT_ECAR")
+check("設了重要欄位：重要欄位有值的優先，再看全部欄位", all(i < 100 and i % 5 == 0 for i in ecar), True)
+check("重要欄位預設帶入 ETL 用到的欄位",
+      one("SELECT COUNT(*) FROM exp.ImportantColumn WHERE TableName = 'EKKO' AND ColumnName = 'WKURS'")[0][0], 1)
+sqlcmd("-i", str(SQL / "20_sample_exp.sql"), db=DB)
+check("重跑 20 不會蓋掉自己加的重要欄位",
+      one("SELECT COUNT(*) FROM exp.ImportantColumn WHERE TableName = 'ADT_ECAR'")[0][0], 1)
 check("PO 表頭空欄位少的優先（隨機抽的 5 張都有匯率）",
       one("SELECT COUNT(*) FROM exp.EKKO WHERE WKURS IS NOT NULL")[0][0] >= 5, True)
 res = sample(5, 42)
@@ -309,7 +327,8 @@ sample(5, 7)
 check("ADT_ECAR 換 seed 換一批", keys("SELECT Id FROM exp.ADT_ECAR") != ecar, True)
 
 res = {r[0]: r for r in one("EXEC exp.SampleAll @Rows = 5, @Seed = 42, @PreferFilled = 0")}
-check("@PreferFilled = 0 不挑，抽得到缺 Memo 的", any(i % 5 for i in keys("SELECT Id FROM exp.ADT_ECAR")), True)
+check("@PreferFilled = 0 不挑，抽得到缺 Memo 的",
+      any(i % 5 and i < 100 for i in keys("SELECT Id FROM exp.ADT_ECAR")), True)
 check("@PreferFilled = 0 說明只寫隨機", res["dbo.ADT_ECAR"][3], "隨機")
 
 cn.close()
