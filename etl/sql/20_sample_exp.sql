@@ -5,6 +5,7 @@
 --   EXEC exp.SampleAll @Rows = 500, @Seed = 42;  -- 同一個 seed、同一份資料 → 抽出同一批
 --   EXEC exp.SampleAll @PreferFilled = 0;        -- 不挑空欄位少的，純隨機
 --   EXEC exp.SampleAll @CapRaw = 1;              -- 一對多的原表也砍到 1000 筆（明細會不完整）
+--   EXEC exp.SampleAll @RecentFirst = 0;         -- 交易類不挑最近的
 --
 -- 做法：先抽業務表，再用業務表的鍵回推 SAP 原表。
 --   1. 業務表各 @Rows 筆，以 PO 為起點：
@@ -25,8 +26,10 @@
 --
 -- 業務表補進來的列、ZTM / ADT 這些沒有關聯的表，跟其他表不一定串得起來。
 --
--- 隨機：依 seed + 整列內容的雜湊排序。@PreferFilled = 1（預設）時空欄位（NULL）少的優先，
--- 先比「重要欄位」（exp.ImportantColumn，預設是 ETL 用到的欄位；業務表全部欄位都算），再比全部欄位。
+-- 挑資料的順序：重要欄位（exp.ImportantColumn，預設是原表裡 ETL 用到的欄位）空值少的
+-- → 交易類日期新的（exp.DateColumn，@RecentFirst = 1 預設）→ 全部欄位空值少的 → seed 隨機。
+-- 業務表預設沒有重要欄位，所以是「日期新的 → 空值少的」。
+-- 空值的兩層是 @PreferFilled = 1（預設）才有。
 -- 抽出來會偏向資料比較完整的列；要照原本的比例抽就給 @PreferFilled = 0。
 -- 不給 @Seed 就隨機產生一個，結果最後一欄會列出這次用的 seed，要重抽同一批就把它帶回來。
 --
@@ -37,7 +40,8 @@ IF SCHEMA_ID(N'exp') IS NULL EXEC (N'CREATE SCHEMA exp');
 GO
 
 -- 重要欄位：挑資料時這些欄位有值的優先。依表名（不分 schema）對應。
--- 預設 = ETL 會用到的欄位（00_check_staging.sql 的清單）；業務表沒列 = 全部欄位都算重要。
+-- 預設 = ETL 會用到的欄位（00_check_staging.sql 的清單）。業務表預設不列：業務表是日期新的優先、
+-- 再看全部欄位的空值；要某幾欄有值優先於日期，就把它們加進來。
 -- 可以自己增刪，重跑這支只補沒有的、不會蓋掉：
 --   INSERT exp.ImportantColumn VALUES ('ZTM80', 'EBELN');
 --   DELETE exp.ImportantColumn WHERE TableName = 'LFA1' AND ColumnName = 'TELFX';
@@ -112,20 +116,16 @@ WHERE NOT EXISTS (SELECT 1 FROM exp.ImportantColumn x WHERE x.TableName = s.t AN
 GO
 
 -- 一列有幾個 NULL 欄位的運算式，給「挑空欄位少的」排序用。@Alias 空字串 = 不加前綴。
--- @Important = 1 只算重要欄位：exp.ImportantColumn 有列這張表就用列的；業務表沒列就算全部欄位；
--- 其他沒列的表（ZTM、ADT、ANLA…）回 NULL，等於只看全部欄位。
+-- @Important = 1 只算重要欄位：exp.ImportantColumn 有列這張表就用列的；沒列的表回 NULL（只看全部欄位）。
 CREATE OR ALTER FUNCTION exp.NullCountExpr (@Obj NVARCHAR(256), @Alias SYSNAME, @Important BIT = 0)
 RETURNS NVARCHAR(MAX)
 AS
 BEGIN
     DECLARE @p NVARCHAR(200) = IIF(ISNULL(@Alias, N'') = N'', N'', QUOTENAME(@Alias) + N'.'),
             @tbl SYSNAME = PARSENAME(@Obj, 1), @sch SYSNAME = PARSENAME(@Obj, 2),
-            @listed BIT, @biz BIT, @r NVARCHAR(MAX);
+            @listed BIT, @r NVARCHAR(MAX);
     SET @listed = IIF(EXISTS (SELECT 1 FROM exp.ImportantColumn WHERE TableName = @tbl), 1, 0);
-    -- 業務表（含 exp 裡的業務表抽樣）
-    SET @biz = IIF(EXISTS (SELECT 1 FROM sys.tables t
-                           WHERE t.name = @tbl AND SCHEMA_NAME(t.schema_id) IN (N'prc', N'mst', N'inv', N'fin')), 1, 0);
-    IF @Important = 1 AND @listed = 0 AND @biz = 0
+    IF @Important = 1 AND @listed = 0
         RETURN NULL;
     SELECT @r = N'(' + STRING_AGG(CAST(N'IIF(' + @p + QUOTENAME(c.name) + N' IS NULL, 1, 0)' AS NVARCHAR(MAX)), N' + ') + N')'
     FROM sys.columns c
@@ -136,28 +136,49 @@ BEGIN
 END;
 GO
 
--- 挑空欄位少的排序鍵：先比重要欄位的 NULL 數、再比全部欄位的 NULL 數。@Agg 給 PR 這種分組的用（AVG）。
-CREATE OR ALTER FUNCTION exp.FilledOrder (@Obj NVARCHAR(256), @Alias SYSNAME, @Agg NVARCHAR(10) = NULL)
-RETURNS NVARCHAR(MAX)
-AS
-BEGIN
-    DECLARE @i NVARCHAR(MAX) = exp.NullCountExpr(@Obj, @Alias, 1),
-            @a NVARCHAR(MAX) = exp.NullCountExpr(@Obj, @Alias, 0);
-    IF @Agg IS NOT NULL
-        SELECT @i = @Agg + N'(CAST(' + @i + N' AS FLOAT))', @a = @Agg + N'(CAST(' + @a + N' AS FLOAT))';
-    -- ORDER BY 不能有重複的運算式：重要欄位 = 全部欄位（業務表）或沒有重要欄位時只放一次
-    IF @i IS NULL OR @i = @a RETURN ISNULL(@a + N', ', N'');
-    RETURN @i + N', ' + @a + N', ';
-END;
+-- 交易類的表用哪個日期欄位判斷「最近」。依表名（不分 schema）對應；沒列的表不看日期。
+-- 可以自己增改，重跑這支只補沒有的：
+--   INSERT exp.DateColumn VALUES ('ADT_ECAR', 'CreateDate');
+IF OBJECT_ID(N'exp.DateColumn', N'U') IS NULL
+CREATE TABLE exp.DateColumn (
+    TableName  SYSNAME NOT NULL PRIMARY KEY,
+    ColumnName SYSNAME NOT NULL
+);
 GO
 
--- 隨機排序：@Prefer = 1 時空欄位少的排前面（重要欄位優先），同樣少的再依 seed + 整列內容的雜湊
-CREATE OR ALTER FUNCTION exp.RandomOrder (@Obj NVARCHAR(256), @Alias SYSNAME, @Prefer BIT)
+INSERT exp.DateColumn (TableName, ColumnName)
+SELECT s.t, s.c FROM (VALUES
+('PurchaseOrderDetail','PoDate'),('PurchaseRequisition','PrDate'),('GoodsReceipt','PostingDate'),
+('MaterialMovement','PostingDate'),('AccountsPayable','PostingDate'),('VendorChangeHistory','ChangeDate'),
+('EKBE','BUDAT'),('EKET','EINDT')
+) AS s (t, c)
+WHERE NOT EXISTS (SELECT 1 FROM exp.DateColumn x WHERE x.TableName = s.t);
+GO
+
+DROP FUNCTION IF EXISTS exp.FilledOrder;
+GO
+
+-- 挑資料的排序：
+--   1. @Prefer = 1：重要欄位的 NULL 數少的優先
+--   2. @Recent = 1：exp.DateColumn 有列這張表的話，日期新的優先
+--   3. @Prefer = 1：全部欄位的 NULL 數少的優先（跟 1 一樣時省略）
+--   4. seed + 整列內容的雜湊
+CREATE OR ALTER FUNCTION exp.RandomOrder (@Obj NVARCHAR(256), @Alias SYSNAME, @Prefer BIT, @Recent BIT = 1)
 RETURNS NVARCHAR(MAX)
 AS
 BEGIN
-    RETURN IIF(@Prefer = 1, exp.FilledOrder(@Obj, @Alias, NULL), N'')
-         + N'HASHBYTES(''MD5'', CONCAT(@seed, N''|'', BINARY_CHECKSUM(*)))';
+    DECLARE @p NVARCHAR(200) = IIF(ISNULL(@Alias, N'') = N'', N'', QUOTENAME(@Alias) + N'.'),
+            @i NVARCHAR(MAX), @a NVARCHAR(MAX), @d SYSNAME, @r NVARCHAR(MAX) = N'';
+    IF @Prefer = 1
+        SELECT @i = exp.NullCountExpr(@Obj, @Alias, 1), @a = exp.NullCountExpr(@Obj, @Alias, 0);
+    IF @Recent = 1
+        SELECT @d = ColumnName FROM exp.DateColumn
+        WHERE TableName = PARSENAME(@Obj, 1) AND COL_LENGTH(@Obj, ColumnName) IS NOT NULL;
+
+    IF @i IS NOT NULL AND @i <> @a SET @r += @i + N', ';   -- 列了全部欄位就等於第 3 層，留到日期後面
+    IF @d IS NOT NULL               SET @r += @p + QUOTENAME(@d) + N' DESC, ';
+    IF @a IS NOT NULL               SET @r += @a + N', ';
+    RETURN @r + N'HASHBYTES(''MD5'', CONCAT(@seed, N''|'', BINARY_CHECKSUM(*)))';
 END;
 GO
 
@@ -186,7 +207,8 @@ END;
 GO
 
 -- 隨機抽 @Rows 筆：exp.<表名> = SELECT TOP (@Rows) * FROM @Src，依 seed + 整列的 BINARY_CHECKSUM 排序
-CREATE OR ALTER PROCEDURE exp.CopyRandom @Src NVARCHAR(256), @Top INT, @Seed INT, @Prefer BIT = 1
+CREATE OR ALTER PROCEDURE exp.CopyRandom @Src NVARCHAR(256), @Top INT, @Seed INT, @Prefer BIT = 1,
+                                        @Recent BIT = 1
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -202,7 +224,7 @@ BEGIN
     SET @sql = N'DROP TABLE IF EXISTS exp.' + QUOTENAME(@name) + N';'
              + N'SELECT TOP (@n) t.* INTO exp.' + QUOTENAME(@name)
              + N' FROM ' + QUOTENAME(@schema) + N'.' + QUOTENAME(@name) + N' t'
-             + N' ORDER BY ' + exp.RandomOrder(@Src, N't', @Prefer) + N';'
+             + N' ORDER BY ' + exp.RandomOrder(@Src, N't', @Prefer, @Recent) + N';'
              + N'SET @r = @@ROWCOUNT;';
     EXEC sp_executesql @sql, N'@n INT, @seed INT, @r BIGINT OUTPUT', @n = @Top, @seed = @Seed, @r = @rows OUTPUT;
     INSERT #explog (Src, Rows, Note) VALUES (@Src, @rows, IIF(@Prefer = 1, N'隨機（空欄位少的優先）', N'隨機'));
@@ -212,7 +234,7 @@ GO
 -- 調到剛好 @Top 筆：exp.<表名> 不足就從 @Src 裡還沒抽到的（依 @Keys 判斷）隨機補（@TopUp = 0 不補），
 -- 超過就依 seed 隨機留 @Top 筆。都是依 seed + 整列內容的雜湊排序，同一個 seed 結果一樣。
 CREATE OR ALTER PROCEDURE exp.FitRows @Src NVARCHAR(256), @Top INT, @Seed INT, @Keys NVARCHAR(400),
-                                     @Prefer BIT = 1, @TopUp BIT = 1
+                                     @Prefer BIT = 1, @TopUp BIT = 1, @Recent BIT = 1
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -227,7 +249,7 @@ BEGIN
     IF @have > @Top
     BEGIN
         SET @sql = N'WITH x AS (SELECT ROW_NUMBER() OVER (ORDER BY '
-                 + exp.RandomOrder(N'exp.' + QUOTENAME(@name), N'', @Prefer) + N') AS rn'
+                 + exp.RandomOrder(N'exp.' + QUOTENAME(@name), N'', @Prefer, @Recent) + N') AS rn'
                  + N' FROM exp.' + QUOTENAME(@name) + N') DELETE x WHERE rn > @top;'
                  + N'SET @r = @@ROWCOUNT;';
         EXEC sp_executesql @sql, N'@top INT, @seed INT, @r BIGINT OUTPUT', @top = @Top, @seed = @Seed, @r = @n OUTPUT;
@@ -251,7 +273,7 @@ BEGIN
                    + N' EXCEPT SELECT * FROM exp.' + QUOTENAME(@name) + N') t',
                    QUOTENAME(@schema) + N'.' + QUOTENAME(@name) + N' t'
                    + N' WHERE NOT EXISTS (SELECT 1 FROM exp.' + QUOTENAME(@name) + N' e WHERE ' + @match + N')')
-             + N' ORDER BY ' + exp.RandomOrder(@Src, N't', @Prefer) + N';'
+             + N' ORDER BY ' + exp.RandomOrder(@Src, N't', @Prefer, @Recent) + N';'
              + N'SET @r = @@ROWCOUNT;';
     DECLARE @need BIGINT = @Top - @have;
     EXEC sp_executesql @sql, N'@n BIGINT, @seed INT, @r BIGINT OUTPUT', @n = @need, @seed = @Seed, @r = @n OUTPUT;
@@ -265,59 +287,59 @@ DROP PROCEDURE IF EXISTS exp.TopUp;
 GO
 
 CREATE OR ALTER PROCEDURE exp.SampleAll @Rows INT = 1000, @Seed INT = NULL, @PreferFilled BIT = 1,
-                                       @CapRaw BIT = 0
+                                       @CapRaw BIT = 0, @RecentFirst BIT = 1
 AS
 BEGIN
     SET NOCOUNT ON;
     SET @Seed = ISNULL(@Seed, ABS(CHECKSUM(NEWID())) % 1000000);
-    DECLARE @pf BIT = @PreferFilled;
+    DECLARE @pf BIT = @PreferFilled, @rf BIT = @RecentFirst;
 
     CREATE TABLE #explog (seq INT IDENTITY, Src NVARCHAR(256), Rows BIGINT, Note NVARCHAR(200));
 
     -- ==================================================================
     -- 1. 業務表：PO 隨機 @Rows 筆，其他跟著 PO 帶，再調到 @Rows 筆
     -- ==================================================================
-    EXEC exp.CopyRandom N'prc.PurchaseOrderDetail', @Rows, @Seed, @pf;
+    EXEC exp.CopyRandom N'prc.PurchaseOrderDetail', @Rows, @Seed, @pf, @Recent = @rf;
 
     -- 這批 PO 的來源 PR、收貨、應付
     EXEC exp.CopyTable N'prc.PurchaseRequisition',
          N'EXISTS (SELECT 1 FROM exp.PurchaseOrderDetail k WHERE k.PrNumber = t.PrNumber AND k.PrItem = t.PrItem)';
-    EXEC exp.FitRows   N'prc.PurchaseRequisition', @Rows, @Seed, N'PrNumber,PrItem', @pf;
+    EXEC exp.FitRows   N'prc.PurchaseRequisition', @Rows, @Seed, N'PrNumber,PrItem', @pf, @Recent = @rf;
     EXEC exp.CopyTable N'prc.GoodsReceipt',
          N'EXISTS (SELECT 1 FROM exp.PurchaseOrderDetail k WHERE k.PoNumber = t.PoNumber AND k.PoItem = t.PoItem)';
-    EXEC exp.FitRows   N'prc.GoodsReceipt', @Rows, @Seed, N'MaterialDoc,MaterialDocYear,MaterialDocItem', @pf;
+    EXEC exp.FitRows   N'prc.GoodsReceipt', @Rows, @Seed, N'MaterialDoc,MaterialDocYear,MaterialDocItem', @pf, @Recent = @rf;
     EXEC exp.CopyTable N'fin.AccountsPayable', N't.PoNumber IN (SELECT PoNumber FROM exp.PurchaseOrderDetail)';
-    EXEC exp.FitRows   N'fin.AccountsPayable', @Rows, @Seed, N'CompanyCode,AccountingDoc,FiscalYear,LineItem', @pf;
+    EXEC exp.FitRows   N'fin.AccountsPayable', @Rows, @Seed, N'CompanyCode,AccountingDoc,FiscalYear,LineItem', @pf, @Recent = @rf;
     -- 物料異動：先帶收貨那幾筆（同一批物料憑證項目）
     EXEC exp.CopyTable N'inv.MaterialMovement',
          N'EXISTS (SELECT 1 FROM exp.GoodsReceipt k WHERE k.MaterialDoc = t.MaterialDoc
                    AND k.MaterialDocYear = t.MaterialDocYear AND k.MaterialDocItem = t.MaterialDocItem)';
-    EXEC exp.FitRows   N'inv.MaterialMovement', @Rows, @Seed, N'MaterialDoc,MaterialDocYear,MaterialDocItem', @pf;
+    EXEC exp.FitRows   N'inv.MaterialMovement', @Rows, @Seed, N'MaterialDoc,MaterialDocYear,MaterialDocItem', @pf, @Recent = @rf;
 
     -- 主檔：上面這些單據用到的供應商、物料
     EXEC exp.CopyTable N'mst.Vendor',
          N't.Vendor IN (SELECT Vendor FROM exp.PurchaseOrderDetail UNION SELECT Vendor FROM exp.PurchaseRequisition
                         UNION SELECT Vendor FROM exp.GoodsReceipt UNION SELECT Vendor FROM exp.AccountsPayable)';
-    EXEC exp.FitRows   N'mst.Vendor', @Rows, @Seed, N'Vendor,CompanyCode,PurchOrg', @pf;
+    EXEC exp.FitRows   N'mst.Vendor', @Rows, @Seed, N'Vendor,CompanyCode,PurchOrg', @pf, @Recent = @rf;
     EXEC exp.CopyTable N'mst.VendorChangeHistory', N't.Vendor IN (SELECT Vendor FROM exp.Vendor)';
-    EXEC exp.FitRows   N'mst.VendorChangeHistory', @Rows, @Seed, N'Vendor,ChangeNumber,TableName,TableKey,FieldName', @pf;
+    EXEC exp.FitRows   N'mst.VendorChangeHistory', @Rows, @Seed, N'Vendor,ChangeNumber,TableName,TableKey,FieldName', @pf, @Recent = @rf;
     EXEC exp.CopyTable N'mst.Material',
          N't.Material IN (SELECT Material FROM exp.PurchaseOrderDetail UNION SELECT Material FROM exp.PurchaseRequisition
                           UNION SELECT Material FROM exp.MaterialMovement)';
-    EXEC exp.FitRows   N'mst.Material', @Rows, @Seed, N'Material', @pf;
+    EXEC exp.FitRows   N'mst.Material', @Rows, @Seed, N'Material', @pf, @Recent = @rf;
     EXEC exp.CopyTable N'inv.InventoryBalance', N't.Material IN (SELECT Material FROM exp.Material)';
-    EXEC exp.FitRows   N'inv.InventoryBalance', @Rows, @Seed, N'Material,Plant,StorLoc', @pf;
+    EXEC exp.FitRows   N'inv.InventoryBalance', @Rows, @Seed, N'Material,Plant,StorLoc', @pf, @Recent = @rf;
 
     -- 資訊記錄、價格條件：同一張 PO / PR 上一起出現的「供應商 + 物料」
     DECLARE @pair NVARCHAR(MAX) = N'EXISTS (SELECT 1 FROM (SELECT Vendor, Material FROM exp.PurchaseOrderDetail
                                             UNION SELECT Vendor, Material FROM exp.PurchaseRequisition) k
                                     WHERE k.Vendor = t.Vendor AND k.Material = t.Material)';
     EXEC exp.CopyTable N'mst.PurchasingInfoRecord', @pair;
-    EXEC exp.FitRows   N'mst.PurchasingInfoRecord', @Rows, @Seed, N'Vendor,Material,PurchOrg,InfoCategory,Plant', @pf;
+    EXEC exp.FitRows   N'mst.PurchasingInfoRecord', @Rows, @Seed, N'Vendor,Material,PurchOrg,InfoCategory,Plant', @pf, @Recent = @rf;
     EXEC exp.CopyTable N'mst.PurchasingCondA017', @pair;
-    EXEC exp.FitRows   N'mst.PurchasingCondA017', @Rows, @Seed, N'Vendor,Material,PurchOrg,Plant,InfoCategory,ConditionType,ValidFrom', @pf;
+    EXEC exp.FitRows   N'mst.PurchasingCondA017', @Rows, @Seed, N'Vendor,Material,PurchOrg,Plant,InfoCategory,ConditionType,ValidFrom', @pf, @Recent = @rf;
     EXEC exp.CopyTable N'mst.PurchasingCondA018', @pair;
-    EXEC exp.FitRows   N'mst.PurchasingCondA018', @Rows, @Seed, N'Vendor,Material,PurchOrg,InfoCategory,ConditionType,ValidFrom', @pf;
+    EXEC exp.FitRows   N'mst.PurchasingCondA018', @Rows, @Seed, N'Vendor,Material,PurchOrg,InfoCategory,ConditionType,ValidFrom', @pf, @Recent = @rf;
 
     -- ==================================================================
     -- 2. SAP 原表：從業務表回推
@@ -388,7 +410,7 @@ BEGIN
         FETCH NEXT FROM cap INTO @t;
         WHILE @@FETCH_STATUS = 0
         BEGIN
-            EXEC exp.FitRows @t, @Rows, @Seed, N'', @pf, 0;
+            EXEC exp.FitRows @t, @Rows, @Seed, N'', @pf, 0, @rf;
             FETCH NEXT FROM cap INTO @t;
         END;
         CLOSE cap;
@@ -400,16 +422,16 @@ BEGIN
     IF COL_LENGTH(N'dbo.LFBK', N'LIFNR') IS NOT NULL
     BEGIN
         EXEC exp.CopyTable N'dbo.LFBK', N't.LIFNR IN (SELECT LIFNR FROM exp.LFA1)';
-        EXEC exp.FitRows   N'dbo.LFBK', @Rows, @Seed, N'', @pf;
+        EXEC exp.FitRows   N'dbo.LFBK', @Rows, @Seed, N'', @pf, @Recent = @rf;
     END;
-    ELSE EXEC exp.CopyRandom N'dbo.LFBK', @Rows, @Seed, @pf;
+    ELSE EXEC exp.CopyRandom N'dbo.LFBK', @Rows, @Seed, @pf, @Recent = @rf;
 
     IF COL_LENGTH(N'dbo.MBEWH', N'MATNR') IS NOT NULL
     BEGIN
         EXEC exp.CopyTable N'dbo.MBEWH', N't.MATNR IN (SELECT MATNR FROM exp.MARA)';
-        EXEC exp.FitRows   N'dbo.MBEWH', @Rows, @Seed, N'', @pf;
+        EXEC exp.FitRows   N'dbo.MBEWH', @Rows, @Seed, N'', @pf, @Recent = @rf;
     END;
-    ELSE EXEC exp.CopyRandom N'dbo.MBEWH', @Rows, @Seed, @pf;
+    ELSE EXEC exp.CopyRandom N'dbo.MBEWH', @Rows, @Seed, @pf, @Recent = @rf;
 
     -- ANLA：EKKN / BSEG 有 ANLN1 才串得起來；兩邊都有 ANLN2（資產子編號）時一起比
     DECLARE @anla NVARCHAR(MAX) = NULL;
@@ -431,16 +453,16 @@ BEGIN
         EXEC exp.CopyTable N'dbo.ANLA', @anla;
         DECLARE @anlaKeys NVARCHAR(100) = IIF(COL_LENGTH(N'dbo.ANLA', N'ANLN2') IS NOT NULL,
                                               N'BUKRS,ANLN1,ANLN2', N'BUKRS,ANLN1');
-        EXEC exp.FitRows N'dbo.ANLA', @Rows, @Seed, @anlaKeys, @pf;
+        EXEC exp.FitRows N'dbo.ANLA', @Rows, @Seed, @anlaKeys, @pf, @Recent = @rf;
     END;
-    ELSE EXEC exp.CopyRandom N'dbo.ANLA', @Rows, @Seed, @pf;
+    ELSE EXEC exp.CopyRandom N'dbo.ANLA', @Rows, @Seed, @pf, @Recent = @rf;
 
-    EXEC exp.CopyRandom N'dbo.ZTM105',       @Rows, @Seed, @pf;
-    EXEC exp.CopyRandom N'dbo.ZTM80',        @Rows, @Seed, @pf;
-    EXEC exp.CopyRandom N'dbo.ADT_CONTRACT', @Rows, @Seed, @pf;
-    EXEC exp.CopyRandom N'dbo.ADT_ECAR',     @Rows, @Seed, @pf;
-    EXEC exp.CopyRandom N'dbo.ADT_OSWEB',    @Rows, @Seed, @pf;
-    EXEC exp.CopyRandom N'dbo.ADT_POAS',     @Rows, @Seed, @pf;
+    EXEC exp.CopyRandom N'dbo.ZTM105',       @Rows, @Seed, @pf, @Recent = @rf;
+    EXEC exp.CopyRandom N'dbo.ZTM80',        @Rows, @Seed, @pf, @Recent = @rf;
+    EXEC exp.CopyRandom N'dbo.ADT_CONTRACT', @Rows, @Seed, @pf, @Recent = @rf;
+    EXEC exp.CopyRandom N'dbo.ADT_ECAR',     @Rows, @Seed, @pf, @Recent = @rf;
+    EXEC exp.CopyRandom N'dbo.ADT_OSWEB',    @Rows, @Seed, @pf, @Recent = @rf;
+    EXEC exp.CopyRandom N'dbo.ADT_POAS',     @Rows, @Seed, @pf, @Recent = @rf;
 
     SELECT Src AS [來源], N'exp.' + PARSENAME(Src, 1) AS [抽樣表], Rows AS [筆數], Note AS [說明],
            @Seed AS [Seed]

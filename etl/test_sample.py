@@ -62,8 +62,9 @@ pr = lambda i: f"10{i:08d}"
 ins("T001", [{"BUKRS": "1000", "WAERS": "TWD"}])
 for i in range(N):
     v, m = V[i % 6], M[i % 8]
+    # PO 日期一天一張，測最近的優先
     ins("EKKO", [{"EBELN": po(i), "BSTYP": "F", "BSART": "NB", "BUKRS": "1000", "EKORG": "TW01",
-                  "BEDAT": "2025-03-01", "LIFNR": v, "WAERS": "TWD", "WKURS": 1}])
+                  "BEDAT": f"2025-03-{i + 1:02d}", "LIFNR": v, "WAERS": "TWD", "WKURS": 1}])
     for item in ("00010", "00020"):
         # 前一半的 PO 由 PR 轉來
         ins("EKPO", [{"EBELN": po(i), "EBELP": item, "MATNR": m, "WERKS": "1100", "MENGE": 10,
@@ -215,8 +216,9 @@ for t in ("mst.PurchasingInfoRecord", "mst.PurchasingCondA017", "mst.PurchasingC
     LINK[t] = PAIR
 
 check("PO 明細剛好 5 筆", cnt("SELECT COUNT(*) FROM exp.PurchaseOrderDetail"), 5)
-check("PO 明細空欄位少的優先（5 筆都有匯率）",
-      cnt("SELECT COUNT(*) FROM exp.PurchaseOrderDetail WHERE ExchangeRate IS NOT NULL"), 5)
+check("PO 明細日期新的優先（最後 3 張 PO）", set(keys("SELECT PoNumber FROM exp.PurchaseOrderDetail")) <= {po(29), po(28), po(27)}, True)
+check("同一天的再看空欄位（PO 27 留有收貨的 00010）",
+      pairs(f"SELECT PoNumber, PoItem FROM exp.PurchaseOrderDetail WHERE PoNumber = '{po(27)}'"), [(po(27), "00010")])
 for t, cond in LINK.items():
     name = t.split(".")[1]
     total = cnt(f"SELECT COUNT(*) FROM {t}")
@@ -305,8 +307,14 @@ check("同一個 seed 抽同一批（PO、ADT）",
       (pairs("SELECT PoNumber, PoItem FROM exp.PurchaseOrderDetail"), keys("SELECT Id FROM exp.ADT_ECAR")),
       (po_before, ecar))
 sample(5, 7)
-check("換 seed 換一批", (pairs("SELECT PoNumber, PoItem FROM exp.PurchaseOrderDetail") != po_before,
-                       keys("SELECT Id FROM exp.ADT_ECAR") != ecar), (True, True))
+check("最近的優先時換 seed，交易類還是同一批（日期決定）；沒有日期的表換一批",
+      (pairs("SELECT PoNumber, PoItem FROM exp.PurchaseOrderDetail") == po_before,
+       keys("SELECT Id FROM exp.ADT_ECAR") != ecar), (True, True))
+one("EXEC exp.SampleAll @Rows = 5, @Seed = 42, @RecentFirst = 0")
+po42 = pairs("SELECT PoNumber, PoItem FROM exp.PurchaseOrderDetail")
+one("EXEC exp.SampleAll @Rows = 5, @Seed = 7, @RecentFirst = 0")
+check("@RecentFirst = 0 換 seed 交易類也換一批",
+      pairs("SELECT PoNumber, PoItem FROM exp.PurchaseOrderDetail") != po42, True)
 seed = {r[4] for r in one("EXEC exp.SampleAll @Rows = 5")}
 check("不給 seed 也會列出用的是哪一個", len(seed) == 1 and None not in seed, True)
 
@@ -314,6 +322,8 @@ check("不給 seed 也會列出用的是哪一個", len(seed) == 1 and None not 
 res = {r[0]: r for r in one("EXEC exp.SampleAll @Rows = 5, @Seed = 42, @CapRaw = 1")}
 check("@CapRaw = 1 一對多的 EKET 也砍到 5 筆", (cnt("SELECT COUNT(*) FROM exp.EKET"), res["dbo.EKET"][3]),
       (5, "用到的 10 筆，隨機留 5 筆"))
+check("@CapRaw 砍的時候日期新的優先（EKET 留 05-01 那批）",
+      cnt("SELECT COUNT(*) FROM exp.EKET WHERE EINDT = '2025-05-01'"), 5)
 check("@CapRaw = 1 不足的不補（EKBE）", cnt("SELECT COUNT(*) FROM exp.EKBE") <= 5, True)
 
 # ---- @PreferFilled = 0 ----
@@ -321,6 +331,11 @@ res = {r[0]: r for r in one("EXEC exp.SampleAll @Rows = 5, @Seed = 42, @PreferFi
 check("@PreferFilled = 0 不挑，抽得到缺 Memo 的",
       any(i % 5 and i < 100 for i in keys("SELECT Id FROM exp.ADT_ECAR")), True)
 check("@PreferFilled = 0 說明只寫隨機", res["dbo.ADT_ECAR"][3], "隨機")
+one("EXEC exp.SampleAll @Rows = 5, @Seed = 42, @RecentFirst = 0")
+check("@RecentFirst = 0 不看日期：空欄位少的優先（5 筆都有匯率）",
+      cnt("SELECT COUNT(*) FROM exp.PurchaseOrderDetail WHERE ExchangeRate IS NOT NULL"), 5)
+check("exp.DateColumn 預設有交易類的表", cnt("SELECT COUNT(*) FROM exp.DateColumn WHERE TableName IN "
+      "('PurchaseOrderDetail','GoodsReceipt','AccountsPayable','EKBE')"), 4)
 
 sample(1000, 1)
 check("@Rows 比資料多時整張都抽", (cnt("SELECT COUNT(*) FROM exp.PurchaseOrderDetail"),

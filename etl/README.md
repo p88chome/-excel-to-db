@@ -65,6 +65,7 @@ EXEC exp.SampleAll;                          -- 每張業務表 1000 筆
 EXEC exp.SampleAll @Rows = 500, @Seed = 42;  -- 同一個 seed 抽同一批
 EXEC exp.SampleAll @PreferFilled = 0;        -- 不挑空欄位少的，純隨機
 EXEC exp.SampleAll @CapRaw = 1;              -- 一對多的原表也砍到 1000 筆（明細會不完整）
+EXEC exp.SampleAll @RecentFirst = 0;         -- 交易類不挑最近的
 ```
 
 1. **業務表各 `@Rows` 筆**：PO 明細隨機抽，其他業務表先帶跟這批 PO 有關的，再調到 `@Rows` 筆（超過隨機留、不足隨機補）。
@@ -72,7 +73,9 @@ EXEC exp.SampleAll @CapRaw = 1;              -- 一對多的原表也砍到 1000
    一對多的（EKKN、EKET、EKBE、EBKN、BSEG、MAKT、MBEW、KONP）照實際帶，`@CapRaw = 1` 才砍。
 3. **沒組進業務表的表各 `@Rows` 筆**：LFBK、MBEWH、ANLA 先帶有關聯的再調；ZTM、ADT 直接隨機；T 開頭的設定表整張。
 
-挑資料時空欄位（NULL）少的優先：先比**重要欄位**（`exp.ImportantColumn`，預設是 ETL 用到的欄位、業務表全部欄位），再比全部欄位。
+挑資料的順序：**重要欄位**空值少的（`exp.ImportantColumn`，預設是原表裡 ETL 用到的欄位）→ 交易類**日期新的**
+（`exp.DateColumn`，`@RecentFirst = 0` 關掉）→ 全部欄位空值少的 → seed 隨機。業務表預設沒有重要欄位，所以是日期新的優先。
+最近的優先時，交易類的結果主要由日期決定，換 seed 只會換掉同一天裡的那幾筆；要換 seed 就換一批，給 `@RecentFirst = 0`。
 結果最後一欄是這次用的 seed。每次執行會重建 exp 裡的表。**exp 裡仍是客戶真實資料，不要帶出客戶環境。**
 
 ## 規格改了
