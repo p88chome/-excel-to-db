@@ -247,12 +247,16 @@ ORDER BY c.Pref, c.ValidFrom DESC, c.ConditionType;
 GO
 
 -- PO 項目的收貨日期（K10、K19 共用）：只算收貨異動類型（白名單 GrMovementType）的借方（S）。
+-- 只看基準日當時已經存在的收貨（過帳日、系統輸入日都 <= @AsOfDate），回補歷史基準日時不會看到之後才補的收貨。
+-- FirstDate = 每筆收貨的過帳日、系統輸入日取較早（過帳日可以手動填，輸入日不行），再取最早一筆。
 -- HasExcludedText = 任何一筆收貨的項目說明符合排除關鍵字（ExcludeTextPattern，LIKE 樣式）。
-CREATE OR ALTER FUNCTION kri.PoReceipt (@KriCode NVARCHAR(10))
+-- 限制：沖銷（102 或 H）不扣回；沖銷後重收的，第一次收貨日仍是被沖銷那筆。
+CREATE OR ALTER FUNCTION kri.PoReceipt (@KriCode NVARCHAR(10), @AsOfDate DATE)
 RETURNS TABLE
 AS RETURN
 WITH g AS (
     SELECT g.PoNumber, g.PoItem, g.PostingDate, g.EntryDate,
+           (SELECT MIN(v) FROM (VALUES (g.PostingDate), (g.EntryDate)) x(v)) AS EarlierDate,
            IIF(EXISTS (SELECT 1 FROM kri.ValueList x
                        WHERE x.KriCode IN (@KriCode, '*') AND x.ListName = 'ExcludeTextPattern'
                          AND g.ItemText LIKE x.ListValue), 1, 0) AS Excluded
@@ -261,9 +265,11 @@ WITH g AS (
       AND g.DebitCreditInd = 'S'
       AND g.MovementType IN (SELECT ListValue FROM kri.ValueList
                              WHERE KriCode IN (@KriCode, '*') AND ListName = 'GrMovementType')
+      AND ISNULL(g.PostingDate, g.EntryDate) <= @AsOfDate
+      AND ISNULL(g.EntryDate, g.PostingDate) <= @AsOfDate
 )
 SELECT PoNumber, PoItem, MIN(PostingDate) AS FirstGrDate, MIN(EntryDate) AS FirstGrEntryDate,
-       COUNT(*) AS GrCount, CAST(MAX(Excluded) AS BIT) AS HasExcludedText
+       MIN(EarlierDate) AS FirstDate, COUNT(*) AS GrCount, CAST(MAX(Excluded) AS BIT) AS HasExcludedText
 FROM g
 GROUP BY PoNumber, PoItem;
 GO
@@ -283,6 +289,17 @@ BEGIN
     IF @q > 0 SET @s = LEFT(@s, @q - 1);
     RETURN TRY_CONVERT(INT, @s);
 END;
+GO
+
+-- KRI 查詢用的索引。01_create_tables.sql 會整張重建資料表，重跑 01 之後要再跑這支。
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_kri_AP_Po' AND object_id = OBJECT_ID('fin.AccountsPayable'))
+    CREATE INDEX IX_kri_AP_Po ON fin.AccountsPayable (PoNumber, PoItem) INCLUDE (PaymentTerms, PostingDate, EntryDate);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_kri_AP_Vendor' AND object_id = OBJECT_ID('fin.AccountsPayable'))
+    CREATE INDEX IX_kri_AP_Vendor ON fin.AccountsPayable (Vendor, PostingDate) INCLUDE (CompanyCode, EntryDate, AccountingDoc, FiscalYear);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_kri_PO_Date' AND object_id = OBJECT_ID('prc.PurchaseOrderDetail'))
+    CREATE INDEX IX_kri_PO_Date ON prc.PurchaseOrderDetail (PoDate);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_kri_GR_Po' AND object_id = OBJECT_ID('prc.GoodsReceipt'))
+    CREATE INDEX IX_kri_GR_Po ON prc.GoodsReceipt (PoNumber, PoItem);
 GO
 
 -- ======================================================================

@@ -80,10 +80,10 @@ BEGIN
     FROM kri.K14_Detail
     WHERE RunId = @RunId AND IsFlagged = 1;
 
-    SELECT @Note = CONCAT(N'已比對 ', SUM(IIF(MatchStatus = N'已比對', 1, 0)), N' / ', COUNT(*),
-                          N'；無主檔價 ', SUM(IIF(MatchStatus = N'無主檔價', 1, 0)),
-                          N'、幣別不同 ', SUM(IIF(MatchStatus = N'幣別不同', 1, 0)),
-                          N'、單位不同 ', SUM(IIF(MatchStatus = N'單位不同', 1, 0)))
+    SELECT @Note = CONCAT(N'已比對 ', COUNT(CASE WHEN MatchStatus = N'已比對' THEN 1 END), N' / ', COUNT(*),
+                          N'；無主檔價 ', COUNT(CASE WHEN MatchStatus = N'無主檔價' THEN 1 END),
+                          N'、幣別不同 ', COUNT(CASE WHEN MatchStatus = N'幣別不同' THEN 1 END),
+                          N'、單位不同 ', COUNT(CASE WHEN MatchStatus = N'單位不同' THEN 1 END))
     FROM kri.K14_Detail WHERE RunId = @RunId;
 END;
 GO
@@ -421,7 +421,7 @@ BEGIN
     WHERE RunId = @RunId AND IsFlagged = 1;
 
     SELECT @Note = CONCAT(N'建立日晚於生效日的條件記錄 ', COUNT(*), N'；超過門檻但期間內沒有 PO ',
-                          SUM(IIF(BackdateDays > @days AND PoCount = 0, 1, 0)))
+                          COUNT(CASE WHEN BackdateDays > @days AND PoCount = 0 THEN 1 END))
     FROM kri.K21_Detail WHERE RunId = @RunId;
 END;
 GO
@@ -470,11 +470,14 @@ BEGIN
             @same INT = kri.Param('K01', 'RequireSameMaterial');
 
     WITH q AS (
-        SELECT IssueNo, Status, Material, OpenedOn,
-               IIF(IsClosed = 1, ClosedOn, @AsOfDate) AS WindowEnd,
-               -- 純數字的供應商代碼補前導零到 10 碼（SAP 的 LIFNR 格式）
+        SELECT IssueNo, Status, OpenedOn,
+               -- 結案日晚於基準日（回補歷史基準日）時，當時還沒結案，算到基準日
+               IIF(IsClosed = 1 AND ClosedOn <= @AsOfDate, ClosedOn, @AsOfDate) AS WindowEnd,
+               -- 純數字的代碼補前導零：供應商 10 碼（LIFNR）、料號 18 碼（MATNR）
                IIF(Vendor NOT LIKE '%[^0-9]%' AND LEN(Vendor) < 10,
-                   RIGHT(REPLICATE('0', 10) + Vendor, 10), Vendor) AS Vendor
+                   RIGHT(REPLICATE('0', 10) + Vendor, 10), Vendor) AS Vendor,
+               IIF(ISNULL(Material, '') <> '' AND Material NOT LIKE '%[^0-9]%' AND LEN(Material) < 18,
+                   RIGHT(REPLICATE('0', 18) + Material, 18), Material) AS Material
         FROM ext.QualityIssue
         WHERE ISNULL(Vendor, '') <> '' AND OpenedOn <= @PeriodTo
           AND (IsClosed = 0 OR ClosedOn >= @PeriodFrom)
@@ -485,10 +488,9 @@ BEGIN
                IIF(ISNULL(q.Material, '') <> '' AND b.Material = q.Material, 1, 0) AS SameMaterial,
                kri.ToLocal(b.NetValue, b.Currency, b.LocalCurrency, b.ExchangeRate) AS AmountLocal
         FROM q
-        CROSS APPLY kri.PoBase('K01', IIF(q.OpenedOn > @PeriodFrom, q.OpenedOn, @PeriodFrom),
-                                      IIF(q.WindowEnd < @PeriodTo, q.WindowEnd, @PeriodTo)) b
-        WHERE b.Vendor = q.Vendor
-          AND (@same = 0 OR (ISNULL(q.Material, '') <> '' AND b.Material = q.Material))
+        JOIN kri.PoBase('K01', @PeriodFrom, @PeriodTo) b      -- 整段期間只叫一次，再依每張單的期間對
+          ON b.Vendor = q.Vendor AND b.PoDate BETWEEN q.OpenedOn AND q.WindowEnd
+        WHERE (@same = 0 OR (ISNULL(q.Material, '') <> '' AND b.Material = q.Material))
     )
     INSERT kri.K01_Detail
     SELECT @RunId, IssueNo, PoNumber, PoItem, Status, OpenedOn, WindowEnd, PoDate, CompanyCode, PurchOrg,
@@ -502,7 +504,7 @@ BEGIN
     INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, CompanyCode, PurchOrg, Plant, Vendor, Material,
                      DocNumber, DocItem, DocDate, MetricValue, ThresholdValue, EffectLocal, LocalCurrency, Reason)
     SELECT @RunId, 'K01', CONCAT(PoNumber, '-', PoItem), 'PO', MAX(CompanyCode), MAX(PurchOrg), MAX(Plant),
-           MAX(Vendor), MAX(Material), PoNumber, PoItem, MAX(PoDate), COUNT(*), @min,
+           MAX(Vendor), MAX(Material), PoNumber, PoItem, MAX(PoDate), MAX(IssuePoCount), @min,
            MAX(AmountLocal), MAX(LocalCurrency),
            CONCAT(N'下單時供應商有 ', COUNT(*), N' 張品質異常單未結案（', MIN(IssueNo),
                   IIF(COUNT(*) > 1, N' 等', N''), N'）', IIF(MAX(CAST(SameMaterial AS INT)) = 1, N'，含同料號', N''))
@@ -524,6 +526,7 @@ GO
 -- 凍結欄位（白名單 BlockField）從有值改成空白 = 解凍；同一個 Table + TableKey + 欄位
 -- 下一次改回有值 = 再凍結。解凍期間 <= MaxOpenDays 天，而且期間內有 PO 或應付傳票 → 標記。
 -- LFM1 只看該採購組織的 PO，LFB1 只看該公司別的 PO 與傳票（TableKey 第 14 碼起 4 碼）。
+-- 採購凍結（SPERM）只算 PO、過帳凍結（SPERR）只算應付傳票；其他凍結欄位兩種都算。
 -- ======================================================================
 IF OBJECT_ID(N'kri.K03_Detail', N'U') IS NULL
 CREATE TABLE kri.K03_Detail (
@@ -571,7 +574,8 @@ BEGIN
         FROM u
         OUTER APPLY (SELECT TOP 1 x.ChangeDate, x.ChangedBy FROM h x
                      WHERE x.Vendor = u.Vendor AND x.TableName = u.TableName AND x.TableKey = u.TableKey
-                       AND x.FieldName = u.FieldName AND ISNULL(x.NewValue, '') <> '' AND x.ChangeAt > u.ChangeAt
+                       AND x.FieldName = u.FieldName AND ISNULL(x.NewValue, '') <> ''
+                       AND (x.ChangeAt > u.ChangeAt OR (x.ChangeAt = u.ChangeAt AND x.ChangeNumber > u.ChangeNumber))
                        AND x.ChangeDate <= @AsOfDate          -- 回補歷史基準日時，不能看到基準日之後的異動
                      ORDER BY x.ChangeAt, x.ChangeNumber) r
     )
@@ -589,6 +593,7 @@ BEGIN
                SUM(kri.ToLocal(b.NetValue, b.Currency, b.LocalCurrency, b.ExchangeRate)) AS Amount
         FROM kri.PoBase('K03', w.ChangeDate, ISNULL(w.ReblockDate, @AsOfDate)) b
         WHERE b.Vendor = w.Vendor
+          AND w.FieldName <> 'SPERR'                            -- 過帳凍結只擋傳票，不算 PO
           AND (w.TableName <> 'LFM1' OR b.PurchOrg = w.Scope)
           AND (w.TableName <> 'LFB1' OR b.CompanyCode = w.Scope)
     ) po
@@ -596,13 +601,15 @@ BEGIN
         SELECT COUNT(DISTINCT CONCAT(a.CompanyCode, '-', a.AccountingDoc, '-', a.FiscalYear)) AS Cnt
         FROM fin.AccountsPayable a
         WHERE a.Vendor = w.Vendor
+          AND w.FieldName <> 'SPERM'                            -- 採購凍結只擋 PO，不算傳票
           AND a.PostingDate BETWEEN w.ChangeDate AND ISNULL(w.ReblockDate, @AsOfDate)
+          AND ISNULL(a.EntryDate, a.PostingDate) <= @AsOfDate   -- 基準日之後才補入帳的不算
           AND (w.TableName <> 'LFB1' OR a.CompanyCode = w.Scope)
     ) ap;
 
     INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, PurchOrg, CompanyCode, Vendor,
                      DocNumber, DocDate, MetricValue, ThresholdValue, EffectLocal, LocalCurrency, Reason)
-    SELECT RunId, 'K03', CONCAT(Vendor, '-', TableName, '-', FieldName, '-', UnblockChange), 'VENDOR',
+    SELECT RunId, 'K03', CONCAT(Vendor, '-', TableName, '-', Scope, '-', FieldName, '-', UnblockChange), 'VENDOR',
            IIF(TableName = 'LFM1', Scope, NULL), IIF(TableName = 'LFB1', Scope, NULL), Vendor,
            UnblockChange, UnblockDate, OpenDays, @days, PoAmountLocal, LocalCurrency,
            CONCAT(TableName, N'.', FieldName, N' 解凍 ', OpenDays, N' 天後再凍結；期間內 PO 項目 ', PoCount,
@@ -610,7 +617,7 @@ BEGIN
     FROM kri.K03_Detail
     WHERE RunId = @RunId AND IsFlagged = 1;
 
-    SELECT @Note = CONCAT(N'解凍事件 ', COUNT(*), N'；尚未再凍結 ', SUM(IIF(ReblockDate IS NULL, 1, 0)))
+    SELECT @Note = CONCAT(N'解凍事件 ', COUNT(*), N'；尚未再凍結 ', COUNT(CASE WHEN ReblockDate IS NULL THEN 1 END))
     FROM kri.K03_Detail WHERE RunId = @RunId;
 END;
 GO
@@ -645,8 +652,12 @@ CREATE TABLE kri.K04_Detail (
     LocalCurrency  NVARCHAR(5)   NULL,
     IsFlagged      BIT           NOT NULL,
     EffectLocal    DECIMAL(19,4) NULL,
+    DaysEstimated  BIT           NULL,      -- 1 = 用到的天數有從代碼推估的（不在 kri.PaymentTerm）
     CONSTRAINT PK_kri_K04_Detail PRIMARY KEY (RunId, PoNumber, PoItem)
 );
+GO
+IF COL_LENGTH('kri.K04_Detail', 'DaysEstimated') IS NULL
+    ALTER TABLE kri.K04_Detail ADD DaysEstimated BIT NULL;
 GO
 
 CREATE OR ALTER PROCEDURE kri.Run_K04
@@ -658,30 +669,53 @@ BEGIN
             @rate DECIMAL(19,6) = kri.Param('K04', 'AnnualRate'),
             @lvl  INT           = kri.Param('K04', 'MasterLevel');   -- 1 = 只認 LFM1；2 = 和 LFB1 一樣也算一致
 
-    WITH b AS (
-        SELECT b.PoNumber, b.PoItem, b.PoDate, b.CompanyCode, b.PurchOrg, b.Vendor, b.VendorName,
-               b.NetValue, b.Currency, b.ExchangeRate, b.LocalCurrency, p.PaymentTerm AS PoTerm,
-               (SELECT TOP 1 v.PurchOrgPaymentTerms FROM mst.Vendor v
-                WHERE v.Vendor = b.Vendor AND v.PurchOrg = b.PurchOrg AND ISNULL(v.PurchOrgPaymentTerms, '') <> ''
-                ORDER BY v.CompanyCode) AS MasterTerm,
-               (SELECT TOP 1 v.PaymentTerms FROM mst.Vendor v
-                WHERE v.Vendor = b.Vendor AND v.CompanyCode = b.CompanyCode AND ISNULL(v.PaymentTerms, '') <> ''
-                ORDER BY v.PurchOrg) AS CompanyTerm,
-               (SELECT TOP 1 a.PaymentTerms FROM fin.AccountsPayable a
-                WHERE a.PoNumber = b.PoNumber AND a.PoItem = b.PoItem AND ISNULL(a.PaymentTerms, '') <> ''
-                ORDER BY ISNULL(kri.TermDays(a.PaymentTerms), 2147483647), a.PaymentTerms) AS ApTerm
-        FROM kri.PoBase('K04', @PeriodFrom, @PeriodTo) b
-        JOIN prc.PurchaseOrderDetail p ON p.PoNumber = b.PoNumber AND p.PoItem = b.PoItem
-        WHERE ISNULL(b.Vendor, '') <> '' AND ISNULL(p.PaymentTerm, '') <> ''
-    ), d AS (
-        SELECT b.*, kri.TermDays(PoTerm) AS PoDays, kri.TermDays(MasterTerm) AS MasterDays,
-               kri.TermDays(ApTerm) AS ApDays,
-               kri.ToLocal(NetValue, Currency, LocalCurrency, ExchangeRate) AS AmountLocal
-        FROM b
+    SELECT b.PoNumber, b.PoItem, b.PoDate, b.CompanyCode, b.PurchOrg, b.Vendor, b.VendorName,
+           b.LocalCurrency, p.PaymentTerm AS PoTerm,
+           (SELECT TOP 1 v.PurchOrgPaymentTerms FROM mst.Vendor v
+            WHERE v.Vendor = b.Vendor AND v.PurchOrg = b.PurchOrg AND ISNULL(v.PurchOrgPaymentTerms, '') <> ''
+            ORDER BY v.CompanyCode) AS MasterTerm,
+           (SELECT TOP 1 v.PaymentTerms FROM mst.Vendor v
+            WHERE v.Vendor = b.Vendor AND v.CompanyCode = b.CompanyCode AND ISNULL(v.PaymentTerms, '') <> ''
+            ORDER BY v.PurchOrg) AS CompanyTerm,
+           kri.ToLocal(b.NetValue, b.Currency, b.LocalCurrency, b.ExchangeRate) AS AmountLocal
+    INTO #b
+    FROM kri.PoBase('K04', @PeriodFrom, @PeriodTo) b
+    JOIN prc.PurchaseOrderDetail p ON p.PoNumber = b.PoNumber AND p.PoItem = b.PoItem
+    WHERE ISNULL(b.Vendor, '') <> '' AND ISNULL(p.PaymentTerm, '') <> '';
+
+    -- 應付傳票上出現過的付款條件（只看基準日當時已入帳的）
+    SELECT DISTINCT a.PoNumber, a.PoItem, a.PaymentTerms AS Code
+    INTO #ap
+    FROM fin.AccountsPayable a
+    JOIN #b ON #b.PoNumber = a.PoNumber AND #b.PoItem = a.PoItem
+    WHERE ISNULL(a.PaymentTerms, '') <> ''
+      AND a.PostingDate <= @AsOfDate AND ISNULL(a.EntryDate, a.PostingDate) <= @AsOfDate;
+
+    -- 每個代碼只算一次天數；Estimated = 不在 kri.PaymentTerm、從代碼推估
+    SELECT c.Code, kri.TermDays(c.Code) AS Days,
+           CAST(IIF(EXISTS (SELECT 1 FROM kri.PaymentTerm t WHERE t.Code = c.Code), 0, 1) AS BIT) AS Estimated
+    INTO #term
+    FROM (SELECT PoTerm AS Code FROM #b UNION SELECT MasterTerm FROM #b
+          UNION SELECT CompanyTerm FROM #b UNION SELECT Code FROM #ap) c
+    WHERE ISNULL(c.Code, '') <> '';
+
+    WITH apmin AS (     -- 每個 PO 項目取天數最少（最早付款）的應付付款條件
+        SELECT a.PoNumber, a.PoItem, a.Code,
+               ROW_NUMBER() OVER (PARTITION BY a.PoNumber, a.PoItem
+                                  ORDER BY ISNULL(t.Days, 2147483647), a.Code) AS rn
+        FROM #ap a JOIN #term t ON t.Code = a.Code
     ), m AS (           -- PO 和主檔算不算不同：MasterLevel = 2 時，和公司別層（LFB1）一樣也算一致
-        SELECT d.*, IIF(PoTerm <> MasterTerm AND NOT (@lvl = 2 AND PoTerm = CompanyTerm), 1, 0) AS PoDiff,
-               IIF(ApTerm IS NOT NULL AND ApTerm <> PoTerm, 1, 0) AS ApDiff
-        FROM d
+        SELECT b.*, ap.Code AS ApTerm,
+               tp.Days AS PoDays, tm.Days AS MasterDays, ta.Days AS ApDays,
+               IIF(b.PoTerm <> b.MasterTerm
+                   AND NOT (@lvl = 2 AND ISNULL(b.CompanyTerm, '') <> '' AND b.PoTerm = b.CompanyTerm), 1, 0) AS PoDiff,
+               IIF(ap.Code IS NOT NULL AND ap.Code <> b.PoTerm, 1, 0) AS ApDiff,
+               tp.Estimated AS PoEst, tm.Estimated AS MasterEst, ta.Estimated AS ApEst
+        FROM #b b
+        LEFT JOIN apmin ap ON ap.PoNumber = b.PoNumber AND ap.PoItem = b.PoItem AND ap.rn = 1
+        LEFT JOIN #term tp ON tp.Code = b.PoTerm
+        LEFT JOIN #term tm ON tm.Code = b.MasterTerm
+        LEFT JOIN #term ta ON ta.Code = ap.Code
     ), s AS (
         SELECT m.*,
                CASE WHEN MasterTerm IS NULL THEN N'缺主檔'
@@ -691,15 +725,21 @@ BEGIN
                     WHEN PoTerm <> MasterTerm THEN N'同公司別主檔'
                     ELSE N'一致' END AS Status,
                (SELECT MAX(v) FROM (VALUES (IIF(PoDiff = 1, MasterDays - PoDays, NULL)),
-                                           (IIF(ApDiff = 1, PoDays - ApDays, NULL))) x(v)) AS WorseDays
+                                           (IIF(ApDiff = 1, PoDays - ApDays, NULL))) x(v)) AS WorseDays,
+               -- 用到的天數裡有推估的
+               CAST(IIF(PoEst = 1 OR (PoDiff = 1 AND MasterEst = 1) OR (ApDiff = 1 AND ApEst = 1), 1, 0) AS BIT)
+                   AS DaysEstimated
         FROM m
     )
-    INSERT kri.K04_Detail
+    INSERT kri.K04_Detail (RunId, PoNumber, PoItem, PoDate, CompanyCode, PurchOrg, Vendor, VendorName,
+           PoTerm, MasterTerm, CompanyTerm, ApTerm, PoDays, MasterDays, ApDays, Status, WorseDays,
+           AmountLocal, LocalCurrency, IsFlagged, EffectLocal, DaysEstimated)
     SELECT @RunId, PoNumber, PoItem, PoDate, CompanyCode, PurchOrg, Vendor, VendorName,
            PoTerm, MasterTerm, CompanyTerm, ApTerm, PoDays, MasterDays, ApDays, Status, WorseDays,
            AmountLocal, LocalCurrency,
            IIF(WorseDays >= @min, 1, 0),
-           IIF(WorseDays >= @min, AmountLocal * WorseDays / 365.0 * @rate, NULL)
+           IIF(WorseDays >= @min, AmountLocal * WorseDays / 365.0 * @rate, NULL),
+           DaysEstimated
     FROM s;
 
     INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, CompanyCode, PurchOrg, Vendor,
@@ -707,16 +747,18 @@ BEGIN
     SELECT RunId, 'K04', CONCAT(PoNumber, '-', PoItem), 'PO', CompanyCode, PurchOrg, Vendor,
            PoNumber, PoItem, PoDate, WorseDays, @min, EffectLocal, LocalCurrency,
            CONCAT(N'付款條件 PO ', PoTerm, N' / 主檔 ', MasterTerm,
-                  IIF(ApTerm IS NOT NULL, CONCAT(N' / 應付 ', ApTerm), N''), N'，提早 ', WorseDays, N' 天付款')
+                  IIF(ApTerm IS NOT NULL, CONCAT(N' / 應付 ', ApTerm), N''), N'，提早 ', WorseDays, N' 天付款',
+                  IIF(DaysEstimated = 1, N'（天數為推估）', N''))
     FROM kri.K04_Detail
     WHERE RunId = @RunId AND IsFlagged = 1;
 
-    SELECT @Note = CONCAT(N'PO 項目 ', COUNT(*), N'；PO與主檔不同 ', SUM(IIF(Status IN (N'PO與主檔不同', N'都不同'), 1, 0)),
-                          N'、AP與PO不同 ', SUM(IIF(Status IN (N'AP與PO不同', N'都不同'), 1, 0)),
-                          N'、缺主檔 ', SUM(IIF(Status = N'缺主檔', 1, 0)),
-                          N'、和 LFM1 不同但同 LFB1 ', SUM(IIF(Status = N'同公司別主檔', 1, 0)),
+    SELECT @Note = CONCAT(N'PO 項目 ', COUNT(*), N'；PO與主檔不同 ', COUNT(CASE WHEN Status IN (N'PO與主檔不同', N'都不同') THEN 1 END),
+                          N'、AP與PO不同 ', COUNT(CASE WHEN Status IN (N'AP與PO不同', N'都不同') THEN 1 END),
+                          N'、缺主檔 ', COUNT(CASE WHEN Status = N'缺主檔' THEN 1 END),
+                          N'、和 LFM1 不同但同 LFB1 ', COUNT(CASE WHEN Status = N'同公司別主檔' THEN 1 END),
                           N'；條件不同但推不出天數 ',
-                          SUM(IIF(Status NOT IN (N'一致', N'缺主檔', N'同公司別主檔') AND WorseDays IS NULL, 1, 0)))
+                          COUNT(CASE WHEN Status NOT IN (N'一致', N'缺主檔', N'同公司別主檔') AND WorseDays IS NULL THEN 1 END),
+                          N'；標記中天數為推估 ', COUNT(CASE WHEN IsFlagged = 1 AND DaysEstimated = 1 THEN 1 END))
     FROM kri.K04_Detail WHERE RunId = @RunId;
 END;
 GO
@@ -745,7 +787,7 @@ CREATE TABLE kri.K10_Detail (
     FirstGrEntryDate DATE          NULL,
     GapDays          INT           NULL,     -- 較早的收貨日 − PO 日；負數 = 收貨早於 PO
     HasExcludedText  BIT           NOT NULL,
-    PoAmountLocal    DECIMAL(19,4) NULL,     -- 整張 PO 的本幣金額（母體內的項目合計）
+    PoAmountLocal    DECIMAL(19,4) NULL,     -- 整張 PO 的本幣金額（母體內所有項目合計，含未收貨；有項目換不出本幣 = NULL）
     AmountCheck      NVARCHAR(20)  NOT NULL, -- 未超過 / 超過上限 / 未判斷 / 不限
     ItemAmountLocal  DECIMAL(19,4) NULL,
     LocalCurrency    NVARCHAR(5)   NULL,
@@ -762,15 +804,19 @@ BEGIN
     DECLARE @gap INT           = kri.Param('K10', 'MaxGapDays'),
             @max DECIMAL(19,4) = kri.Param('K10', 'MaxPoAmount');    -- 0 = 不限
 
-    WITH b AS (
+    WITH b AS (         -- 整張 PO 的金額要算全部項目（含還沒收貨的），所以先 LEFT JOIN 收貨
         SELECT b.PoNumber, b.PoItem, b.PoDate, b.CompanyCode, b.PurchOrg, b.Plant, b.Vendor, b.VendorName,
-               b.Material, b.LocalCurrency, r.FirstGrDate, r.FirstGrEntryDate, r.HasExcludedText,
+               b.Material, b.LocalCurrency, r.PoNumber AS GrPo, r.FirstGrDate, r.FirstGrEntryDate, r.FirstDate,
+               r.HasExcludedText,
                kri.ToLocal(b.NetValue, b.Currency, b.LocalCurrency, b.ExchangeRate) AS ItemAmountLocal
         FROM kri.PoBase('K10', @PeriodFrom, @PeriodTo) b
-        JOIN kri.PoReceipt('K10') r ON r.PoNumber = b.PoNumber AND r.PoItem = b.PoItem
+        LEFT JOIN kri.PoReceipt('K10', @AsOfDate) r ON r.PoNumber = b.PoNumber AND r.PoItem = b.PoItem
     ), t AS (
-        SELECT b.*, SUM(ItemAmountLocal) OVER (PARTITION BY PoNumber) AS PoAmountLocal,
-               DATEDIFF(DAY, PoDate, IIF(FirstGrEntryDate < FirstGrDate, FirstGrEntryDate, FirstGrDate)) AS GapDays
+        SELECT b.*,
+               -- 有任何一個項目換不出本幣，整張 PO 金額就不算（留 NULL → 未判斷）
+               IIF(COUNT(*) OVER (PARTITION BY PoNumber) = COUNT(ItemAmountLocal) OVER (PARTITION BY PoNumber),
+                   SUM(ItemAmountLocal) OVER (PARTITION BY PoNumber), NULL) AS PoAmountLocal,
+               DATEDIFF(DAY, PoDate, FirstDate) AS GapDays
         FROM b
     ), c AS (
         SELECT t.*,
@@ -781,6 +827,7 @@ BEGIN
                     WHEN PoAmountLocal > @max THEN N'超過上限'
                     ELSE N'未超過' END AS AmountCheck
         FROM t
+        WHERE GrPo IS NOT NULL      -- 明細只留有收貨的項目
     )
     INSERT kri.K10_Detail
     SELECT @RunId, PoNumber, PoItem, PoDate, CompanyCode, PurchOrg, Plant, Vendor, VendorName, Material,
@@ -798,10 +845,10 @@ BEGIN
     FROM kri.K10_Detail
     WHERE RunId = @RunId AND IsFlagged = 1;
 
-    SELECT @Note = CONCAT(N'有收貨的 PO 項目 ', COUNT(*), N'；收貨早於 PO ', SUM(IIF(GapDays < 0, 1, 0)),
-                          N'；排除關鍵字 ', SUM(IIF(HasExcludedText = 1, 1, 0)),
-                          N'；超過金額上限 ', SUM(IIF(AmountCheck = N'超過上限', 1, 0)),
-                          N'；金額未判斷 ', SUM(IIF(AmountCheck = N'未判斷', 1, 0)))
+    SELECT @Note = CONCAT(N'有收貨的 PO 項目 ', COUNT(*), N'；收貨早於 PO ', COUNT(CASE WHEN GapDays < 0 THEN 1 END),
+                          N'；排除關鍵字 ', COUNT(CASE WHEN HasExcludedText = 1 THEN 1 END),
+                          N'；超過金額上限 ', COUNT(CASE WHEN AmountCheck = N'超過上限' THEN 1 END),
+                          N'；金額未判斷 ', COUNT(CASE WHEN AmountCheck = N'未判斷' THEN 1 END))
     FROM kri.K10_Detail WHERE RunId = @RunId;
 END;
 GO
@@ -842,16 +889,15 @@ BEGIN
     WITH b AS (
         SELECT b.PoNumber, b.PoItem, b.PoDate, b.CompanyCode, b.PurchOrg, b.Plant, b.Vendor, b.Material,
                b.LocalCurrency, p.PrNumber, p.PrItem, pr.PrDate,
-               r.FirstGrDate, r.FirstGrEntryDate, r.HasExcludedText,
+               r.FirstGrDate, r.FirstGrEntryDate, r.FirstDate, r.HasExcludedText,
                kri.ToLocal(b.NetValue, b.Currency, b.LocalCurrency, b.ExchangeRate) AS ItemAmountLocal
         FROM kri.PoBase('K19', @PeriodFrom, @PeriodTo) b
-        JOIN kri.PoReceipt('K19') r ON r.PoNumber = b.PoNumber AND r.PoItem = b.PoItem
+        JOIN kri.PoReceipt('K19', @AsOfDate) r ON r.PoNumber = b.PoNumber AND r.PoItem = b.PoItem
         JOIN prc.PurchaseOrderDetail p ON p.PoNumber = b.PoNumber AND p.PoItem = b.PoItem
         LEFT JOIN prc.PurchaseRequisition pr ON pr.PrNumber = p.PrNumber AND pr.PrItem = p.PrItem
     ), t AS (
         SELECT b.*, IIF(PrDate IS NOT NULL, 'PR', 'PO') AS RefType, ISNULL(PrDate, PoDate) AS RefDate,
-               DATEDIFF(DAY, ISNULL(PrDate, PoDate),
-                        IIF(FirstGrEntryDate < FirstGrDate, FirstGrEntryDate, FirstGrDate)) AS GapDays
+               DATEDIFF(DAY, ISNULL(PrDate, PoDate), FirstDate) AS GapDays
         FROM b
     )
     INSERT kri.K19_Detail
@@ -869,8 +915,8 @@ BEGIN
     FROM kri.K19_Detail
     WHERE RunId = @RunId AND IsFlagged = 1;
 
-    SELECT @Note = CONCAT(N'有收貨的 PO 項目 ', COUNT(*), N'（有 PR ', SUM(IIF(RefType = 'PR', 1, 0)),
-                          N'）；排除關鍵字 ', SUM(IIF(HasExcludedText = 1, 1, 0)))
+    SELECT @Note = CONCAT(N'有收貨的 PO 項目 ', COUNT(*), N'（有 PR ', COUNT(CASE WHEN RefType = 'PR' THEN 1 END),
+                          N'）；排除關鍵字 ', COUNT(CASE WHEN HasExcludedText = 1 THEN 1 END))
     FROM kri.K19_Detail WHERE RunId = @RunId;
 END;
 GO
