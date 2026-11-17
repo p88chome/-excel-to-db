@@ -2,8 +2,8 @@
 
 | 項目 | 內容 |
 |---|---|
-| 版本 | v1.2（2026-10-19） |
-| 狀態 | 第一期已實作（`etl/sql/10～12`，測試 `etl/test_kri.py`），待客戶實際資料驗收 |
+| 版本 | v1.3（2026-11-18） |
+| 狀態 | 第一期與第二批已實作（`etl/sql/10～12`，測試 `etl/test_kri.py`），待客戶實際資料驗收 |
 | 依據 | 客戶提供的 KRI 擬定清單與會議記錄、資料移轉規格 v2.3、過往專案 KRI 程式研究 |
 | 範圍 | KRI 計算框架、KRI 邏輯、評分方向；不含 Power BI 畫面設計 |
 
@@ -233,16 +233,16 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 
 | KRI | 名稱 | 期別 | 卡在哪裡 |
 |---|---|---|---|
-| K01 | 供應商評選不符門檻仍有交易 | 🔌 第四期 | 品質異常系統、服務需求單系統 |
+| **K01** | **品質異常期間仍下單** | ✅ 第二批 | 讀 `ext.QualityIssue`；已結案的單要有結案日才算得到期間 |
 | K02 | 工商登記關聯供應商 | 🔌 第四期 | 商工登記；`LFA1` 統編欄位待確認 |
-| K03 | 已停用供應商短暫啟用交易 | ⏩ 第二期 | 資料已有（VendorChangeHistory），排在第一批之後 |
-| K04 | 付款條件比主檔差 | 📥 第三期 | **客戶曾回覆不執行，待確認**；需 T052 |
+| **K03** | **已停用供應商短暫啟用交易** | ✅ 第二批 | PO 日暫用 BEDAT（待 `EKKO.AEDAT`） |
+| **K04** | **付款條件比主檔差** | ✅ 第二批 | **客戶是否執行待確認**；天數先從代碼推估，T052 到了填 `kri.PaymentTerm` |
 | K05 | Open PO 超過供應商資本額 | 🔌 第四期 | 商工登記 |
 | K06 | 用量 vs 請購量 vs 庫存 | 📥 第三期 | 歷史庫存 MBEWH |
 | K07 | 本期 vs 預期請購量 | 📥 第三期 | ZRM449；資料期間只有 3 年 |
 | **K08** | **疑似拆單（PR）** | ✅ 第一期 | 程式先做；**核決權限表由客戶提供後才有結果** |
 | K09 | 疑似拆單（direct AP） | ⏩ 第二期 | 未入選；AP 借貸別缺 |
-| K10 / K19 | 先入庫才補單／GR 貼近 PO | ⏩ 第二期 | 需補 `EKKO.AEDAT`、FirstGrDate、`EKPO.TXZ01` |
+| **K10 / K19** | **先入庫才補單／GR 貼近 PR、PO** | ✅ 第二批 | 排除關鍵字先比對收貨的項目說明；`EKPO.TXZ01`、`EKKO.AEDAT` 進來後再補 |
 | K11 | 非緊急之緊急採購 | 🔌 第四期 | 零件生命週期系統 |
 | K12 | 集中且買貴 | ⏩ 第二期 | single source 定義（ZISK） |
 | **K13** | **跨據點同料號單價差異** | ✅ 第一期 | — |
@@ -257,9 +257,10 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | K24 | 休眠供應商重新啟用、價格偏高（新增） | ⏩ 第二期 | — |
 
 **第一期**：框架 + K08、K13、K14、K18、K21。
-**第二期**：評分、BI view、K03、K09、K10/19、K12、K22～K24。
+**第二批（已完成）**：K01、K03、K04、K10、K19。
+**第二期**：評分、BI view、K09、K12、K22～K24。
 **第三期**：補資料後的 K04、K06、K07、K15/16、K20；文字分群。
-**第四期**：外部系統 K01、K02、K05、K11、K17。
+**第四期**：外部系統 K02、K05、K11、K17。
 
 ---
 
@@ -323,7 +324,35 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
   2. 倒填天數 > `BackdateDays` → 標記。
   3. 附上「生效日到建立日之間」用這個供應商＋料號下的 PO：筆數與金額。
 - **影響金額**：倒填期間內相關 PO 的金額合計，換算本幣。
-- **參數**：`BackdateDays` = 30（暫定）；`WindowMonths` = 12。
+- **參數**：`BackdateDays` = 30（暫定）；`RequirePo` = 1：倒填期間內有 PO 才標記（v1.3：實際資料裡批次回溯調價很常見，沒有影響 PO 的不標）；`WindowMonths` = 12。
+
+## 9b. 第二批 KRI 規格（v1.3）
+
+共通：參數一律暫定（`IsTentative = 1`）；PO 日目前用文件日 BEDAT。
+
+### K01 品質異常期間仍下單（客戶清單 TEST 1）
+- **母體**：`ext.QualityIssue`（品質異常單，由各環境把原系統匯出整理進來；原始表到 ext 的對應不放在 repo）。
+- **邏輯**：期間 = [開單日, 結案日]，未結案算到基準日；已結案但沒有結案日的單略過並在備註列出筆數。期間內同供應商的 PO 項目進明細（純數字供應商代碼補前導零到 10 碼），同料號另外註明。一張單期間內 PO 項目數 ≥ `MinPoCount` → 標記。標記以 PO 項目為單位。
+- **影響金額**：PO 項目本幣金額。
+- **參數**：`MinPoCount` = 1；`RequireSameMaterial` = 0（1 = 只看同料號）。
+- **已知限制**：原系統只有狀態沒有結案日時，只有未結案的單能用。
+
+### K03 已停用供應商短暫啟用交易（TEST 3）
+- **邏輯**：凍結欄位（`kri.ValueList` 的 `BlockField`，預設 SPERM、SPERR）從有值改成空白 = 解凍；同一 Table + TableKey + 欄位下一次改回有值 = 再凍結（只看基準日以前的異動）。解凍天數 ≤ `MaxOpenDays`，且期間內有 PO 或應付傳票 → 標記。LFM1 只看該採購組織、LFB1 只看該公司別。
+- **影響金額**：期間內 PO 本幣金額合計。
+- **參數**：`MaxOpenDays` = 30。
+
+### K04 付款條件比主檔差（TEST 4，客戶是否執行待確認）
+- **邏輯**：PO 付款條件 vs 主檔（LFM1）；應付傳票 vs PO。天數 = `kri.PaymentTerm` 對照表，沒有就取代碼中的數字。提早付款天數 ≥ `MinDaysWorse` → 標記。`MasterLevel` = 2 時，PO 和公司別層（LFB1）一樣也算一致（實際資料裡 PO 大多跟 LFB1 一致、和 LFM1 不同，那比較像主檔兩層不一致）。
+- **影響金額**：金額 × 提早天數 ÷ 365 × `AnnualRate`（資金成本）。
+- **參數**：`MinDaysWorse` = 1；`AnnualRate` = 0.02；`MasterLevel` = 2。
+- **已知限制**：主檔是現在的值，不是下單當時的值；付款條件代碼的天數是推估。
+
+### K10 先入庫才補請採購單（TEST 10）／K19 GR 貼近 PR、PO 建立日（TEST 19）
+- **共用**：`kri.PoReceipt`：每個 PO 項目的第一次收貨（`GrMovementType` 白名單、借方）。收貨日取過帳日與系統輸入日較早的一個。項目說明符合 `ExcludeTextPattern`（緊急採購關鍵字，LIKE 樣式）的排除。
+- **K10**：PO 日 → 第一次收貨 ≤ `MaxGapDays`（含收貨早於 PO），整張 PO 本幣金額 ≤ `MaxPoAmount`。本幣不在 `AmountCurrency` 白名單的公司別不判斷金額（標「未判斷」，照樣可以標記）。
+- **K19**：PR 日（沒有 PR 用 PO 日）→ 第一次收貨 ≤ `MaxGapDays`，不限金額。同一筆可能兩題都標，彙總影響金額時要去重。
+- **參數**：K10 `MaxGapDays` = 1、`MaxPoAmount` = 500000、`AmountCurrency` = TWD；K19 `MaxGapDays` = 3。
 
 ---
 
@@ -373,3 +402,4 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | 2026-10-19 | v1.0 | 初版：框架決策 D1～D12、分期、第一期 KRI 規格 |
 | 2026-10-19 | v1.1 | `kri.Exclusion` 改為 `kri.ValueList`，同時放排除名單與白名單；K08 影響金額以 PR 幣別計（PR 沒有匯率） |
 | 2026-10-19 | v1.2 | 第一期實作完成：框架 + K08、K13、K14、K18、K21，LocalDB 測試 37 項通過 |
+| 2026-11-18 | v1.3 | 第二批：K01、K03、K04、K10、K19（第 9b 節）；新增 `ext.QualityIssue`、`kri.PaymentTerm`；K21 加 `RequirePo`；LocalDB 測試 63 項通過 |

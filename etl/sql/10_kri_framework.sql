@@ -68,6 +68,39 @@ CREATE TABLE kri.ApprovalMatrix (
 );
 GO
 
+-- 付款條件天數對照（K04 用）。沒有列在這裡的付款條件，從代碼裡的數字推估天數。
+-- 拿到 T052 後把正式的天數填進來（IsTentative = 0）。
+IF OBJECT_ID(N'kri.PaymentTerm', N'U') IS NULL
+CREATE TABLE kri.PaymentTerm (
+    Code        NVARCHAR(4)   NOT NULL PRIMARY KEY,
+    Days        INT           NOT NULL,
+    Note        NVARCHAR(400) NULL,
+    IsTentative BIT           NOT NULL DEFAULT 1
+);
+GO
+
+-- ======================================================================
+-- 外部系統資料（ext）：不在 SAP 裡、由各系統匯出後整理成固定格式。
+-- KRI 只讀這裡的表，不直接讀各系統的原始匯出表，原始表到這裡的對應由各環境自己維護。
+-- ======================================================================
+IF SCHEMA_ID(N'ext') IS NULL EXEC (N'CREATE SCHEMA ext');
+GO
+
+-- 品質異常單（K01 用）：一張單一列。結案但沒有結案日的單，K01 會略過並在備註列出筆數。
+IF OBJECT_ID(N'ext.QualityIssue', N'U') IS NULL
+CREATE TABLE ext.QualityIssue (
+    IssueNo   NVARCHAR(50)  NOT NULL PRIMARY KEY,
+    Vendor    NVARCHAR(20)  NULL,       -- SAP 供應商代碼；純數字的會自動補前導零比對
+    Material  NVARCHAR(40)  NULL,       -- 有對應料號才填
+    Status    NVARCHAR(50)  NULL,       -- 原系統的狀態（顯示用）
+    IsClosed  BIT           NOT NULL,
+    OpenedOn  DATE          NOT NULL,
+    ClosedOn  DATE          NULL,
+    Category  NVARCHAR(100) NULL,
+    Note      NVARCHAR(400) NULL
+);
+GO
+
 -- ======================================================================
 -- 執行紀錄與輸出
 -- ======================================================================
@@ -211,6 +244,45 @@ WHERE ISNULL(c.DeletionInd, '') = ''
   AND c.InfoCategory  IN (SELECT ListValue FROM kri.ValueList
                           WHERE KriCode IN (@KriCode, '*') AND ListName = 'AllowedInfoCategory')
 ORDER BY c.Pref, c.ValidFrom DESC, c.ConditionType;
+GO
+
+-- PO 項目的收貨日期（K10、K19 共用）：只算收貨異動類型（白名單 GrMovementType）的借方（S）。
+-- HasExcludedText = 任何一筆收貨的項目說明符合排除關鍵字（ExcludeTextPattern，LIKE 樣式）。
+CREATE OR ALTER FUNCTION kri.PoReceipt (@KriCode NVARCHAR(10))
+RETURNS TABLE
+AS RETURN
+WITH g AS (
+    SELECT g.PoNumber, g.PoItem, g.PostingDate, g.EntryDate,
+           IIF(EXISTS (SELECT 1 FROM kri.ValueList x
+                       WHERE x.KriCode IN (@KriCode, '*') AND x.ListName = 'ExcludeTextPattern'
+                         AND g.ItemText LIKE x.ListValue), 1, 0) AS Excluded
+    FROM prc.GoodsReceipt g
+    WHERE ISNULL(g.PoNumber, '') <> ''
+      AND g.DebitCreditInd = 'S'
+      AND g.MovementType IN (SELECT ListValue FROM kri.ValueList
+                             WHERE KriCode IN (@KriCode, '*') AND ListName = 'GrMovementType')
+)
+SELECT PoNumber, PoItem, MIN(PostingDate) AS FirstGrDate, MIN(EntryDate) AS FirstGrEntryDate,
+       COUNT(*) AS GrCount, CAST(MAX(Excluded) AS BIT) AS HasExcludedText
+FROM g
+GROUP BY PoNumber, PoItem;
+GO
+
+-- 付款條件天數：先查 kri.PaymentTerm，沒有就取代碼裡的第一串數字（例：XX30 → 30）。都沒有回 NULL。
+CREATE OR ALTER FUNCTION kri.TermDays (@Code NVARCHAR(4))
+RETURNS INT
+AS
+BEGIN
+    IF ISNULL(@Code, '') = '' RETURN NULL;
+    DECLARE @d INT = (SELECT Days FROM kri.PaymentTerm WHERE Code = @Code);
+    IF @d IS NOT NULL RETURN @d;
+    DECLARE @p INT = PATINDEX('%[0-9]%', @Code);
+    IF @p = 0 RETURN NULL;
+    DECLARE @s NVARCHAR(4) = SUBSTRING(@Code, @p, 4);
+    DECLARE @q INT = PATINDEX('%[^0-9]%', @s);
+    IF @q > 0 SET @s = LEFT(@s, @q - 1);
+    RETURN TRY_CONVERT(INT, @s);
+END;
 GO
 
 -- ======================================================================
