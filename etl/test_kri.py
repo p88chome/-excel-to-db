@@ -211,6 +211,8 @@ ins("mst.VendorChangeHistory", [
     dict(chg("0000000029", "C018", "2025-03-01", "LFA1", "1000000000029", "SPERM", "", "X"), ChangeTime=None),
     chg("0000000030", "C019", "2025-03-01", "LFA1", "1000000000030", "SPERR", "X", ""),
     chg("0000000030", "C020", "2025-03-05", "LFA1", "1000000000030", "SPERR", "", "X"),       # 傳票在解凍期間輸入
+    chg("0000000031", "C021", "2025-03-01", "LFA1", "1000000000031", "SPERR", "X", ""),
+    chg("0000000031", "C022", "2025-03-05", "LFA1", "1000000000031", "SPERR", "", "X"),       # 再凍結後才輸入
 ])
 ins("prc.PurchaseOrderDetail", [
     po("4570000001", Vendor="0000000020", NetPrice=10, PoDate="2025-04-05"),
@@ -230,6 +232,8 @@ ins("fin.AccountsPayable", [
          Vendor="0000000028", PostingDate="2025-03-03"),
     dict(CompanyCode="1000", AccountingDoc="5100000006", FiscalYear="2025", LineItem="001",
          Vendor="0000000030", PostingDate="2025-02-20", EntryDate="2025-03-02"),   # 過帳日倒填到解凍前
+    dict(CompanyCode="1000", AccountingDoc="5100000011", FiscalYear="2025", LineItem="001",
+         Vendor="0000000031", PostingDate="2025-03-03", EntryDate="2025-03-10"),   # 過帳日在期間、輸入在再凍結後
 ])
 
 # ---------------------------------------------------------------- K04
@@ -399,7 +403,7 @@ check("K01 備註：結案沒結案日的略過 1 張", "略過 1" in res["K01"]
 d = {x.Vendor: x for x in one("SELECT * FROM kri.K03_Detail WHERE RunId = ?", rid)}
 check("K03 明細：只有凍結欄位的解凍事件", sorted(d),
       ["0000000020", "0000000021", "0000000022", "0000000023", "0000000024", "0000000026",
-       "0000000027", "0000000028", "0000000029", "0000000030"])
+       "0000000027", "0000000028", "0000000029", "0000000030", "0000000031"])
 check("K03 基準日之後的再凍結看不到", (d["0000000026"].ReblockDate, d["0000000026"].OpenDays, d["0000000026"].IsFlagged),
       (None, 30, False))
 check("K03 解凍 9 天、期間有 PO → 標記", (d["0000000020"].OpenDays, d["0000000020"].PoCount, d["0000000020"].IsFlagged),
@@ -418,6 +422,8 @@ check("K03 採購凍結只算 PO、過帳凍結只算傳票", (d["0000000028"].A
 check("K03 同一天、沒有時間：用異動單號排先後", (d["0000000029"].ReblockDate is not None, d["0000000029"].OpenDays,
       d["0000000029"].IsFlagged), (True, 0, True))
 check("K03 過帳凍結：解凍期間輸入、過帳日倒填的傳票也算", (d["0000000030"].ApCount, d["0000000030"].IsFlagged), (1, True))
+check("K03 過帳凍結：再凍結後才輸入的不算（過帳日在期間內也一樣）",
+      (d["0000000031"].ApCount, d["0000000031"].IsFlagged), (0, False))
 
 # K04
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K04_Detail WHERE RunId = ?", rid)}
@@ -443,8 +449,8 @@ check("K04 天數從代碼推估的註明", d["4550000001"].DaysEstimated, True)
 check("K04 貸項通知單不跟 PO 比", (d["4550000002"].ApTerm, d["4550000002"].Status), (None, "同公司別主檔"))
 check("K04 PO 條件空白算立即付款 → 提早 45 天", (d["4550000009"].PoDays, d["4550000009"].WorseDays,
       d["4550000009"].IsFlagged), (0, 45, True))
-check("K04 PO 空白但發票照主檔付：不標記", (d["4550000010"].PoDays, d["4550000010"].WorseDays,
-      d["4550000010"].IsFlagged), (45, 0, False))
+check("K04 PO 空白但發票照主檔付：一致、不標記", (d["4550000010"].Status, d["4550000010"].PoDays,
+      d["4550000010"].IsFlagged), ("一致", 45, False))
 
 # K10
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K10_Detail WHERE RunId = ?", rid)}
@@ -457,6 +463,7 @@ x = one("SELECT MetricValue, ThresholdValue, Reason FROM kri.Flag WHERE RunId = 
         "AND DocNumber = '4560000011'", rid)[0]
 check("K10 只因送貨單日標記：指標用送貨單日", (float(x.MetricValue), float(x.ThresholdValue), x.Reason.startswith("送貨單")),
       (-5.0, 0.0, True))
+check("K10 備註列出送貨單早於 PO 的筆數", "送貨單早於 PO 1" in res["K10"][7], True)
 check("K10 整張 PO 金額含沒收貨的項目：超過上限不標記",
       (float(d["4560000008"].PoAmountLocal), d["4560000008"].AmountCheck, d["4560000008"].IsFlagged),
       (510000.0, "超過上限", False))

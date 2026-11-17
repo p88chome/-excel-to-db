@@ -602,9 +602,8 @@ BEGIN
         FROM fin.AccountsPayable a
         WHERE a.Vendor = w.Vendor
           AND w.FieldName <> 'SPERM'                            -- 採購凍結只擋 PO，不算傳票
-          AND ((a.PostingDate BETWEEN w.ChangeDate AND ISNULL(w.ReblockDate, @AsOfDate)
-                AND ISNULL(a.EntryDate, a.PostingDate) >= w.ChangeDate)   -- 凍結中輸入的，輸入時已被擋過
-               OR a.EntryDate BETWEEN w.ChangeDate AND ISNULL(w.ReblockDate, @AsOfDate))  -- 過帳凍結擋的是輸入當下
+          -- 凍結擋的是輸入當下：系統輸入日（沒有才用過帳日）落在解凍期間才算，過帳日倒填也抓得到
+          AND ISNULL(a.EntryDate, a.PostingDate) BETWEEN w.ChangeDate AND ISNULL(w.ReblockDate, @AsOfDate)
           AND ISNULL(a.EntryDate, a.PostingDate) <= @AsOfDate   -- 基準日之後才補入帳的不算
           AND (w.TableName <> 'LFB1' OR a.CompanyCode = w.Scope)
     ) ap;
@@ -709,13 +708,14 @@ BEGIN
         FROM #ap a JOIN #term t ON t.Code = a.Code
         JOIN #b b ON b.PoNumber = a.PoNumber AND b.PoItem = a.PoItem
     ), m AS (           -- PO 和主檔算不算不同：MasterLevel = 2 時，和公司別層（LFB1）一樣也算一致
-        SELECT b.*, ap.Code AS ApTerm,
+        SELECT b.*, ap.Code AS ApTerm, eff.Term AS EffTerm,
                -- PO 條件空白：發票會帶主檔條件，有應付就用應付的天數；沒有應付才當立即付款（0 天）
                IIF(b.PoTerm = '', IIF(ap.Code IS NULL, 0, ta.Days), tp.Days) AS PoDays,
                tm.Days AS MasterDays, ta.Days AS ApDays,
-               IIF(b.PoTerm <> b.MasterTerm
-                   AND NOT (@lvl = 2 AND ISNULL(b.CompanyTerm, '') <> '' AND b.PoTerm = b.CompanyTerm), 1, 0) AS PoDiff,
-               IIF(ap.Code IS NOT NULL AND ap.Code <> b.PoTerm, 1, 0) AS ApDiff,
+               -- PO 條件空白而且有應付：實際條件 = 應付的條件（發票帶主檔），用它跟主檔比、應付不再跟 PO 比
+               IIF(eff.Term <> b.MasterTerm
+                   AND NOT (@lvl = 2 AND ISNULL(b.CompanyTerm, '') <> '' AND eff.Term = b.CompanyTerm), 1, 0) AS PoDiff,
+               IIF(ap.Code IS NOT NULL AND ap.Code <> eff.Term, 1, 0) AS ApDiff,
                IIF(b.PoTerm = '', IIF(ap.Code IS NULL, 0, ta.Estimated), tp.Estimated) AS PoEst,
                tm.Estimated AS MasterEst, ta.Estimated AS ApEst
         FROM #b b
@@ -723,13 +723,14 @@ BEGIN
         LEFT JOIN #term tp ON tp.Code = b.PoTerm
         LEFT JOIN #term tm ON tm.Code = b.MasterTerm
         LEFT JOIN #term ta ON ta.Code = ap.Code
+        CROSS APPLY (SELECT IIF(b.PoTerm = '' AND ap.Code IS NOT NULL, ap.Code, b.PoTerm) AS Term) eff
     ), s AS (
         SELECT m.*,
                CASE WHEN MasterTerm IS NULL THEN N'缺主檔'
                     WHEN PoDiff = 1 AND ApDiff = 1 THEN N'都不同'
                     WHEN PoDiff = 1 THEN N'PO與主檔不同'
                     WHEN ApDiff = 1 THEN N'AP與PO不同'
-                    WHEN PoTerm <> MasterTerm THEN N'同公司別主檔'
+                    WHEN EffTerm <> MasterTerm THEN N'同公司別主檔'
                     ELSE N'一致' END AS Status,
                (SELECT MAX(v) FROM (VALUES (IIF(PoDiff = 1, MasterDays - PoDays, NULL)),
                                            (IIF(ApDiff = 1, PoDays - ApDays, NULL))) x(v)) AS WorseDays,
