@@ -602,7 +602,8 @@ BEGIN
         FROM fin.AccountsPayable a
         WHERE a.Vendor = w.Vendor
           AND w.FieldName <> 'SPERM'                            -- 採購凍結只擋 PO，不算傳票
-          AND (a.PostingDate BETWEEN w.ChangeDate AND ISNULL(w.ReblockDate, @AsOfDate)
+          AND ((a.PostingDate BETWEEN w.ChangeDate AND ISNULL(w.ReblockDate, @AsOfDate)
+                AND ISNULL(a.EntryDate, a.PostingDate) >= w.ChangeDate)   -- 凍結中輸入的，輸入時已被擋過
                OR a.EntryDate BETWEEN w.ChangeDate AND ISNULL(w.ReblockDate, @AsOfDate))  -- 過帳凍結擋的是輸入當下
           AND ISNULL(a.EntryDate, a.PostingDate) <= @AsOfDate   -- 基準日之後才補入帳的不算
           AND (w.TableName <> 'LFB1' OR a.CompanyCode = w.Scope)
@@ -709,11 +710,14 @@ BEGIN
         JOIN #b b ON b.PoNumber = a.PoNumber AND b.PoItem = a.PoItem
     ), m AS (           -- PO 和主檔算不算不同：MasterLevel = 2 時，和公司別層（LFB1）一樣也算一致
         SELECT b.*, ap.Code AS ApTerm,
-               IIF(b.PoTerm = '', 0, tp.Days) AS PoDays, tm.Days AS MasterDays, ta.Days AS ApDays,
+               -- PO 條件空白：發票會帶主檔條件，有應付就用應付的天數；沒有應付才當立即付款（0 天）
+               IIF(b.PoTerm = '', IIF(ap.Code IS NULL, 0, ta.Days), tp.Days) AS PoDays,
+               tm.Days AS MasterDays, ta.Days AS ApDays,
                IIF(b.PoTerm <> b.MasterTerm
                    AND NOT (@lvl = 2 AND ISNULL(b.CompanyTerm, '') <> '' AND b.PoTerm = b.CompanyTerm), 1, 0) AS PoDiff,
                IIF(ap.Code IS NOT NULL AND ap.Code <> b.PoTerm, 1, 0) AS ApDiff,
-               ISNULL(tp.Estimated, 1) AS PoEst, tm.Estimated AS MasterEst, ta.Estimated AS ApEst
+               IIF(b.PoTerm = '', IIF(ap.Code IS NULL, 0, ta.Estimated), tp.Estimated) AS PoEst,
+               tm.Estimated AS MasterEst, ta.Estimated AS ApEst
         FROM #b b
         LEFT JOIN apmin ap ON ap.PoNumber = b.PoNumber AND ap.PoItem = b.PoItem AND ap.rn = 1
         LEFT JOIN #term tp ON tp.Code = b.PoTerm
@@ -853,14 +857,18 @@ BEGIN
     INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, CompanyCode, PurchOrg, Plant, Vendor, Material,
                      DocNumber, DocItem, DocDate, MetricValue, ThresholdValue, EffectLocal, LocalCurrency, Reason)
     SELECT RunId, 'K10', CONCAT(PoNumber, '-', PoItem), 'PO', CompanyCode, PurchOrg, Plant, Vendor, Material,
-           PoNumber, PoItem, PoDate, GapDays, @gap, ItemAmountLocal, LocalCurrency,
-           CONCAT(IIF(GapDays < 0, CONCAT(N'收貨早於 PO ', -GapDays, N' 天'), CONCAT(N'PO 後 ', GapDays, N' 天就收貨')),
-                  IIF(DocGapDays < 0, CONCAT(N'；送貨單早於 PO ', -DocGapDays, N' 天'), N''),
+           PoNumber, PoItem, PoDate,
+           IIF(GapDays > @gap AND DocGapDays < 0, DocGapDays, GapDays), IIF(GapDays > @gap AND DocGapDays < 0, 0, @gap),
+           ItemAmountLocal, LocalCurrency,
+           CONCAT(IIF(GapDays > @gap AND DocGapDays < 0, CONCAT(N'送貨單早於 PO ', -DocGapDays, N' 天；'), N''),
+                  IIF(GapDays < 0, CONCAT(N'收貨早於 PO ', -GapDays, N' 天'), CONCAT(N'PO 後 ', GapDays, N' 天就收貨')),
+                  IIF(GapDays <= @gap AND DocGapDays < 0, CONCAT(N'；送貨單早於 PO ', -DocGapDays, N' 天'), N''),
                   IIF(AmountCheck = N'未判斷', N'（金額上限未判斷）', N''))
     FROM kri.K10_Detail
     WHERE RunId = @RunId AND IsFlagged = 1;
 
     SELECT @Note = CONCAT(N'有收貨的 PO 項目 ', COUNT(*), N'；收貨早於 PO ', COUNT(CASE WHEN GapDays < 0 THEN 1 END),
+                          N'；送貨單早於 PO ', COUNT(CASE WHEN DocGapDays < 0 THEN 1 END),
                           N'；排除關鍵字 ', COUNT(CASE WHEN HasExcludedText = 1 THEN 1 END),
                           N'；超過金額上限 ', COUNT(CASE WHEN AmountCheck = N'超過上限' THEN 1 END),
                           N'；金額未判斷 ', COUNT(CASE WHEN AmountCheck = N'未判斷' THEN 1 END))

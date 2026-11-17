@@ -247,6 +247,7 @@ ins("prc.PurchaseOrderDetail", [
     po("4550000007", Vendor="V30", PaymentTerm="T045", NetPrice=10),     # 傳票在基準日之後才入帳
     po("4550000008", Vendor="V32", PaymentTerm="T030", NetPrice=10),     # LFB1 空白，照樣跟 LFM1 比
     po("4550000009", Vendor="V30", PaymentTerm="", NetPrice=10),         # PO 條件空白 = 立即付款
+    po("4550000010", Vendor="V30", PaymentTerm="", NetPrice=10),         # PO 空白，但發票照主檔 T045
 ])
 ins("fin.AccountsPayable", [
     dict(CompanyCode="1000", AccountingDoc="5100000002", FiscalYear="2025", LineItem="001", Vendor="V30",
@@ -261,6 +262,8 @@ ins("fin.AccountsPayable", [
     dict(CompanyCode="1000", AccountingDoc="5100000009", FiscalYear="2025", LineItem="001", Vendor="V30",
          PostingDate="2025-04-01", PoNumber="4550000001", PoItem="00010", PaymentTerms="ZZZZ",
          DebitCreditInd="H"),                                              # 兩種條件：一樣的、推不出天數的
+    dict(CompanyCode="1000", AccountingDoc="5100000010", FiscalYear="2025", LineItem="001", Vendor="V30",
+         PostingDate="2025-04-01", PoNumber="4550000010", PoItem="00010", PaymentTerms="T045", DebitCreditInd="H"),
 ])
 
 # ---------------------------------------------------------------- K10 / K19
@@ -419,7 +422,7 @@ check("K03 過帳凍結：解凍期間輸入、過帳日倒填的傳票也算", 
 # K04
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K04_Detail WHERE RunId = ?", rid)}
 check("K04 母體：有供應商的 PO（含條件空白）", sorted(k for k in d if k.startswith("455")),
-      [f"455000000{i}" for i in range(1, 10)])
+      [f"455000000{i}" for i in range(1, 10)] + ["4550000010"])
 check("K04 其他題的 PO 沒主檔：缺主檔、不標記", {d[k].Status for k in d if not k.startswith("455")}, {"缺主檔"})
 check("K04 比主檔好不標記", (d["4550000006"].Status, d["4550000006"].WorseDays, d["4550000006"].IsFlagged),
       ("PO與主檔不同", -5, False))
@@ -440,6 +443,8 @@ check("K04 天數從代碼推估的註明", d["4550000001"].DaysEstimated, True)
 check("K04 貸項通知單不跟 PO 比", (d["4550000002"].ApTerm, d["4550000002"].Status), (None, "同公司別主檔"))
 check("K04 PO 條件空白算立即付款 → 提早 45 天", (d["4550000009"].PoDays, d["4550000009"].WorseDays,
       d["4550000009"].IsFlagged), (0, 45, True))
+check("K04 PO 空白但發票照主檔付：不標記", (d["4550000010"].PoDays, d["4550000010"].WorseDays,
+      d["4550000010"].IsFlagged), (45, 0, False))
 
 # K10
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K10_Detail WHERE RunId = ?", rid)}
@@ -448,6 +453,10 @@ check("K10 明細：有收貨（101 借方）、基準日當時已存在的 PO",
        "4560000010", "4560000011"])
 check("K10 送貨單日早於 PO：照樣標記", (d["4560000011"].GapDays, d["4560000011"].DocGapDays, d["4560000011"].IsFlagged),
       (10, -5, True))
+x = one("SELECT MetricValue, ThresholdValue, Reason FROM kri.Flag WHERE RunId = ? AND KriCode = 'K10' "
+        "AND DocNumber = '4560000011'", rid)[0]
+check("K10 只因送貨單日標記：指標用送貨單日", (float(x.MetricValue), float(x.ThresholdValue), x.Reason.startswith("送貨單")),
+      (-5.0, 0.0, True))
 check("K10 整張 PO 金額含沒收貨的項目：超過上限不標記",
       (float(d["4560000008"].PoAmountLocal), d["4560000008"].AmountCheck, d["4560000008"].IsFlagged),
       (510000.0, "超過上限", False))
@@ -477,7 +486,7 @@ check("vFlagLatest 各題標記數", [(x[0], x[1]) for x in r],
 
 # 參數與對照表改了，結果跟著變
 cur.execute("UPDATE kri.Parameter SET ParamValue = 1 WHERE KriCode = 'K01' AND ParamName = 'RequireSameMaterial'")
-cur.execute("INSERT kri.PaymentTerm (Code, Days) VALUES ('IMMD', 0)")
+cur.execute("INSERT kri.PaymentTerm (Code, Days) VALUES ('IMMD', 0), ('T045', 45)")
 res, rid1 = run("K01,K04")
 check("K01 只看同料號：剩 2 筆", sorted(x.PoNumber for x in one("SELECT PoNumber FROM kri.K01_Detail WHERE RunId = ?", rid1)),
       ["4540000001", "4540000006"])
@@ -489,6 +498,8 @@ check("K01 MinPoCount = 2：只標期間內有 2 筆以上的單（Q1）",
       ["Q1", "Q1"])
 x = one("SELECT PoDays, WorseDays, IsFlagged FROM kri.K04_Detail WHERE RunId = ? AND PoNumber = '4550000005'", rid1)[0]
 check("K04 kri.PaymentTerm 有值時用對照表的天數", (x.PoDays, x.WorseDays, x.IsFlagged), (0, 45, True))
+x = one("SELECT DaysEstimated FROM kri.K04_Detail WHERE RunId = ? AND PoNumber = '4550000009'", rid1)[0]
+check("K04 PO 條件空白的 0 天是規則、不算推估（主檔天數查得到時）", x.DaysEstimated, False)
 
 # ---------------------------------------------------------------- 框架行為
 cur.execute("UPDATE kri.Parameter SET ParamValue = 0.25 WHERE KriCode = 'K14' AND ParamName = 'PriceTolerance'")
