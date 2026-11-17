@@ -252,6 +252,8 @@ ins("prc.PurchaseOrderDetail", [
     po("4550000008", Vendor="V32", PaymentTerm="T030", NetPrice=10),     # LFB1 空白，照樣跟 LFM1 比
     po("4550000009", Vendor="V30", PaymentTerm="", NetPrice=10),         # PO 條件空白 = 立即付款
     po("4550000010", Vendor="V30", PaymentTerm="", NetPrice=10),         # PO 空白，但發票照主檔 T045
+    po("4550000011", Vendor="V30", PaymentTerm="", NetPrice=10),         # PO 空白，發票有主檔條件和推不出天數的
+    po("4550000012", Vendor="V30", PaymentTerm="", NetPrice=3650),       # PO 空白，發票 T030 比主檔早 15 天
 ])
 ins("fin.AccountsPayable", [
     dict(CompanyCode="1000", AccountingDoc="5100000002", FiscalYear="2025", LineItem="001", Vendor="V30",
@@ -268,6 +270,12 @@ ins("fin.AccountsPayable", [
          DebitCreditInd="H"),                                              # 兩種條件：一樣的、推不出天數的
     dict(CompanyCode="1000", AccountingDoc="5100000010", FiscalYear="2025", LineItem="001", Vendor="V30",
          PostingDate="2025-04-01", PoNumber="4550000010", PoItem="00010", PaymentTerms="T045", DebitCreditInd="H"),
+    dict(CompanyCode="1000", AccountingDoc="5100000012", FiscalYear="2025", LineItem="001", Vendor="V30",
+         PostingDate="2025-04-01", PoNumber="4550000011", PoItem="00010", PaymentTerms="T045", DebitCreditInd="H"),
+    dict(CompanyCode="1000", AccountingDoc="5100000013", FiscalYear="2025", LineItem="001", Vendor="V30",
+         PostingDate="2025-04-01", PoNumber="4550000011", PoItem="00010", PaymentTerms="ZZZZ", DebitCreditInd="H"),
+    dict(CompanyCode="1000", AccountingDoc="5100000014", FiscalYear="2025", LineItem="001", Vendor="V30",
+         PostingDate="2025-04-01", PoNumber="4550000012", PoItem="00010", PaymentTerms="T030", DebitCreditInd="H"),
 ])
 
 # ---------------------------------------------------------------- K10 / K19
@@ -428,7 +436,7 @@ check("K03 過帳凍結：再凍結後才輸入的不算（過帳日在期間內
 # K04
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K04_Detail WHERE RunId = ?", rid)}
 check("K04 母體：有供應商的 PO（含條件空白）", sorted(k for k in d if k.startswith("455")),
-      [f"455000000{i}" for i in range(1, 10)] + ["4550000010"])
+      [f"455000000{i}" for i in range(1, 10)] + ["4550000010", "4550000011", "4550000012"])
 check("K04 其他題的 PO 沒主檔：缺主檔、不標記", {d[k].Status for k in d if not k.startswith("455")}, {"缺主檔"})
 check("K04 比主檔好不標記", (d["4550000006"].Status, d["4550000006"].WorseDays, d["4550000006"].IsFlagged),
       ("PO與主檔不同", -5, False))
@@ -451,6 +459,10 @@ check("K04 PO 條件空白算立即付款 → 提早 45 天", (d["4550000009"].P
       d["4550000009"].IsFlagged), (0, 45, True))
 check("K04 PO 空白但發票照主檔付：一致、不標記", (d["4550000010"].Status, d["4550000010"].PoDays,
       d["4550000010"].IsFlagged), ("一致", 45, False))
+check("K04 PO 空白、發票有推不出天數的條件：列出來、算推不出天數",
+      (d["4550000011"].ApTerm, d["4550000011"].WorseDays, d["4550000011"].IsFlagged), ("ZZZZ", None, False))
+check("K04 PO 空白、發票比主檔早 15 天 → 標記", (d["4550000012"].ApTerm, d["4550000012"].WorseDays,
+      d["4550000012"].IsFlagged, float(d["4550000012"].EffectLocal)), ("T030", 15, True, 300.0))
 
 # K10
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K10_Detail WHERE RunId = ?", rid)}
@@ -488,7 +500,7 @@ check("K19 備註列出 PR 找不到的筆數", "PR 找不到 1" in res["K19"][7
 # Flag 與 view
 r = one("SELECT KriCode, COUNT(*) FROM kri.vFlagLatest GROUP BY KriCode ORDER BY KriCode")
 check("vFlagLatest 各題標記數", [(x[0], x[1]) for x in r],
-      [("K01", 5), ("K03", 5), ("K04", 4), ("K08", 2), ("K10", 5), ("K13", 1), ("K14", 4),
+      [("K01", 5), ("K03", 5), ("K04", 5), ("K08", 2), ("K10", 5), ("K13", 1), ("K14", 4),
        ("K18", 1), ("K19", 5), ("K21", 2)])
 
 # 參數與對照表改了，結果跟著變

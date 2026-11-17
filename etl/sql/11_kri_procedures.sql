@@ -704,7 +704,8 @@ BEGIN
     WITH apmin AS (     -- 每個 PO 項目取天數最少（最早付款）的應付付款條件
         SELECT a.PoNumber, a.PoItem, a.Code,
                ROW_NUMBER() OVER (PARTITION BY a.PoNumber, a.PoItem       -- 和 PO 不同的優先，再取天數最少
-                                  ORDER BY IIF(a.Code = b.PoTerm, 1, 0), ISNULL(t.Days, 2147483647), a.Code) AS rn
+                                  ORDER BY IIF(a.Code = IIF(b.PoTerm = '', b.MasterTerm, b.PoTerm), 1, 0),  -- PO 空白時跟主檔比
+                                           ISNULL(t.Days, 2147483647), a.Code) AS rn
         FROM #ap a JOIN #term t ON t.Code = a.Code
         JOIN #b b ON b.PoNumber = a.PoNumber AND b.PoItem = a.PoItem
     ), m AS (           -- PO 和主檔算不算不同：MasterLevel = 2 時，和公司別層（LFB1）一樣也算一致
