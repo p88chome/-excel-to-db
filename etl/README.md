@@ -78,6 +78,19 @@ EXEC exp.SampleAll @RecentFirst = 0;         -- 交易類不挑最近的
 最近的優先時，交易類的結果主要由日期決定，換 seed 只會換掉同一天裡的那幾筆；要換 seed 就換一批，給 `@RecentFirst = 0`。
 結果最後一欄是這次用的 seed。每次執行會重建 exp 裡的表。**exp 裡仍是客戶真實資料，不要帶出客戶環境。**
 
+## 把 CSV 匯進資料庫
+
+SSMS 匯出的 CSV（`|` 分隔、每格雙引號，例如 exp 的抽樣結果）放在 `Data/`，在專案根目錄跑：
+
+```
+python load_csv.py                                   # Data/ → 本機 LocalDB 的 umc_test（沒有就建）
+python load_csv.py --folder D:\sample --conn "Driver={ODBC Driver 17 for SQL Server};Server=...;Database=...;Uid=...;Pwd=..."
+```
+
+業務表（檔名 = 規格上的表名）先跑 `01_create_tables.sql` 建好再寫入；其他檔案建在 `dbo`，型別照 excel-to-db 的規則判斷。
+每次整張重建。建資料庫的定序預設 `Chinese_Taiwan_Stroke_CI_AS_WS`（分全形半形），要跟來源資料庫一樣，
+不一樣用 `--collation` 指定。`Data/` 已在 `.gitignore`，不會進版控。
+
 ## 規格改了
 
 ```

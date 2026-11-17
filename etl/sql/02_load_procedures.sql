@@ -204,7 +204,9 @@ BEGIN
     BEGIN TRAN;
     TRUNCATE TABLE mst.Vendor;
 
-    CREATE TABLE #org (EKORG nvarchar(10) PRIMARY KEY, BUKRS nvarchar(10) NOT NULL);
+    -- COLLATE DATABASE_DEFAULT：暫存表預設用伺服器的定序，資料庫定序不同時跟 EKKO JOIN 會衝突
+    CREATE TABLE #org (EKORG nvarchar(10) COLLATE DATABASE_DEFAULT PRIMARY KEY,
+                       BUKRS nvarchar(10) COLLATE DATABASE_DEFAULT NOT NULL);
     IF OBJECT_ID(N'dbo.T024E', N'U') IS NOT NULL
         -- 動態 SQL：T024E 不存在時靜態寫法會在執行期報錯
         EXEC (N'INSERT #org SELECT EKORG, ISNULL(BUKRS, '''') FROM dbo.T024E;');
