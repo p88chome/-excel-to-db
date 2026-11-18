@@ -316,6 +316,85 @@ ins("prc.GoodsReceipt", [
 ])
 cur.execute("INSERT kri.ValueList (KriCode, ListName, ListValue) VALUES ('*', 'ExcludeTextPattern', '%URGENT%')")
 
+# ---------------------------------------------------------------- K09
+cur.execute("INSERT kri.ApprovalMatrix (DocType, Currency, MinAmount, MaxAmount, ApprovalLevel) "
+            "VALUES ('AP','TWD',0,10000,1), ('AP','TWD',10000,999999999,2)")
+def ap(doc, vendor, date, amount, dc="H", cc=None):
+    return dict(CompanyCode="1000", AccountingDoc=doc, FiscalYear="2025", LineItem="001", Vendor=vendor,
+                PostingDate=date, LocalAmount=amount, DocAmount=amount, Currency="TWD", DebitCreditInd=dc, CostCenter=cc)
+
+
+ins("fin.AccountsPayable", [
+    ap("5200000001", "V40", "2025-05-01", 6000),
+    ap("5200000002", "V40", "2025-05-15", 6000),                 # 15 天內合計 12000 → 第 2 層 → 標記
+    ap("5200000003", "V41", "2025-05-01", 6000),
+    ap("5200000004", "V41", "2025-06-15", 6000),                 # 隔 45 天
+    ap("5200000005", "V42", "2025-05-01", 6000, dc="S"),         # 借方不算
+    ap("5200000006", "V42", "2025-05-10", 6000),
+    ap("5200000007", "V43", "2025-05-01", 6000, cc="CC1"),
+    ap("5200000008", "V43", "2025-05-10", 6000, cc="CC2"),       # 不同成本中心
+])
+
+# ---------------------------------------------------------------- K12
+def k12(no, material, vendor, prior, cur_price, group="G1"):
+    return [po(no + "1", Material=material, Vendor=vendor, MaterialGroup=group, NetPrice=prior, PoDate="2024-04-01"),
+            po(no + "2", Material=material, Vendor=vendor, MaterialGroup=group, NetPrice=cur_price, PoDate="2025-03-01")]
+
+
+ins("prc.PurchaseOrderDetail",
+    k12("462000001", "M70", "V50", 100, 130)                     # 獨家漲 30%，群組其他平均 5% → 標記
+    + k12("462000002", "M71", "V51", 100, 105) + k12("462000003", "M71", "V52", 100, 105)   # 兩家
+    + k12("462000004", "M72", "V53", 100, 105) + k12("462000005", "M73", "V54", 100, 105)
+    + k12("462000006", "M74", "V55", 100, 115, "G2")             # 群組沒得比，基準 0 → 漲 15% 標記
+    + k12("462000007", "M75", "V56", 100, 200, "G2"))            # 合理獨家白名單
+cur.execute("INSERT kri.ValueList (KriCode, ListName, ListValue) VALUES ('K12', 'AllowedSingleSource', 'M75')")
+
+# ---------------------------------------------------------------- K22 / K23
+ins("mst.PurchasingCondA017", [
+    cond(Vendor="V60", Material="M80", Plant="1100", ConditionRecord="0000700001", ConditionPrice=10,
+         ValidFrom="2025-01-01", CreatedOn="2025-01-01"),
+    cond(Vendor="V60", Material="M80", Plant="1100", ConditionRecord="0000700002", ConditionPrice=13,
+         ValidFrom="2025-06-01", CreatedOn="2025-06-01"),                       # 漲 30% → 標記
+    cond(Vendor="V60", Material="M81", Plant="1100", ConditionRecord="0000700003", ConditionPrice=10,
+         ValidFrom="2025-01-01", CreatedOn="2025-01-01"),
+    cond(Vendor="V60", Material="M81", Plant="1100", ConditionRecord="0000700004", ConditionPrice=11,
+         ValidFrom="2025-06-01", CreatedOn="2025-06-01"),                       # 漲 10%
+    cond(Vendor="V61", Material="M85", Plant="1100", ConditionRecord="0000700010", ConditionPrice=20,
+         ValidFrom="2024-01-01", CreatedOn="2024-01-01"),
+    cond(Vendor="V61", Material="M85", Plant="1100", ConditionRecord="0000700011", ConditionPrice=15,
+         ValidFrom="2025-08-01", CreatedOn="2025-08-01"),                       # 降價
+])
+ins("prc.PurchaseOrderDetail", [
+    po("4630000001", Vendor="V60", Material="M80", NetPrice=13, PoDate="2025-07-01"),   # 多付 3 × 100
+    po("4600000001", Vendor="V61", Material="M85", NetPrice=20, PoDate="2025-05-01", GrQty=40),  # 未收 60 → 標記
+    po("4600000002", Vendor="V61", Material="M85", NetPrice=20, PoDate="2025-05-02", DelivComplInd="X"),
+    po("4600000003", Vendor="V61", Material="M85", NetPrice=15, PoDate="2025-09-01"),   # 降價後才下單
+])
+
+# ---------------------------------------------------------------- K24
+ins("prc.PurchaseOrderDetail", [
+    po("4610000001", Vendor="V70", Material="M90", NetPrice=10, PoDate="2023-06-01"),
+    po("4610000002", Vendor="V70", Material="M90", NetPrice=13, PoDate="2025-03-01"),   # 休眠後重新下單、高 30%
+    po("4610000003", Vendor="V71", Material="M90", NetPrice=10, PoDate="2024-09-01"),
+    po("4610000004", Vendor="V70", Material="M91", NetPrice=10, PoDate="2025-04-01"),   # 沒有別家可比
+    po("4610000005", Vendor="V70", Material="M90", NetPrice=13, PoDate="2025-08-01"),   # 超過 90 天
+    po("4610000006", Vendor="V70", Material="M93", NetPrice=50, PoDate="2025-03-15"),   # 參考價 10～60 太分散
+    po("4610000007", Vendor="V74", Material="M93", NetPrice=10, PoDate="2024-10-01"),
+    po("4610000008", Vendor="V75", Material="M93", NetPrice=60, PoDate="2024-10-01"),
+])
+ins("mst.PurchasingCondA017", [
+    cond(Vendor="V62", Material="M83", Plant="1100", ConditionRecord="0000700020", ConditionPrice=10,
+         ValidFrom="2025-01-01", CreatedOn=None),
+    cond(Vendor="V62", Material="M83", Plant="1100", ConditionRecord="0000700021", ConditionPrice=20,
+         ValidFrom="2025-07-01", CreatedOn=None),                               # 建立日空白，用生效日
+])
+ins("mst.PurchasingCondA018", [
+    cond(Vendor="V62", Material="M84", InfoCategory="2", ConditionRecord="0000700030", ConditionPrice=10,
+         ValidFrom="2025-01-01", CreatedOn="2025-01-01"),
+    cond(Vendor="V62", Material="M84", InfoCategory="2", ConditionRecord="0000700031", ConditionPrice=15,
+         ValidFrom="2025-07-01", CreatedOn="2025-07-01"),                       # 寄售類別也比（同類別）
+])
+
 
 # ---------------------------------------------------------------- 驗證
 def one(sql, *a):
@@ -340,8 +419,8 @@ def run(only=None):
 res, rid = run()
 for code, r in res.items():
     print(f"  {code} {r[1]:<14} 明細 {r[4]}  標記 {r[5]}  {r[6]}  {r[7] or ''}")
-ALL = ("K01", "K03", "K04", "K08", "K10", "K13", "K14", "K18", "K19", "K21")
-check("十題都成功", sorted((c, r[6]) for c, r in res.items()), [(c, "OK") for c in ALL])
+ALL = ("K01", "K03", "K04", "K08", "K09", "K10", "K12", "K13", "K14", "K18", "K19", "K21", "K22", "K23", "K24")
+check("每題都成功", sorted((c, r[6]) for c, r in res.items()), [(c, "OK") for c in ALL])
 
 # K14
 d = {(x.PoNumber, x.PoItem): x for x in one("SELECT * FROM kri.K14_Detail WHERE RunId = ?", rid)}
@@ -497,11 +576,53 @@ check("K19 有 PR 號碼但 PR 找不到：不退回 PO 日、不標記",
       (d["4560000010"].RefType, d["4560000010"].RefDate, d["4560000010"].IsFlagged), ("PR", None, False))
 check("K19 備註列出 PR 找不到的筆數", "PR 找不到 1" in res["K19"][7], True)
 
+# K09
+d = {x.AccountingDoc: x for x in one("SELECT * FROM kri.K09_Detail WHERE RunId = ?", rid)}
+check("K09 候選：同供應商、同成本中心、視窗內兩張以上（借方不算）", sorted(d), ["5200000002"])
+x = d["5200000002"]
+check("K09 合計 12000 第 2 層 > 單張第 1 層 → 標記", (float(x.WindowAmount), x.WindowLevel, x.OwnLevel, x.IsFlagged),
+      (12000.0, 2, 1, True))
+
+# K12
+d = {x.Material: x for x in one("SELECT * FROM kri.K12_Detail WHERE RunId = ?", rid) if x.Vendor != "V52"}
+check("K12 獨家漲 30%、群組平均 5% → 標記、影響 2500",
+      (round(float(d["M70"].PriceChange), 4), round(float(d["M70"].GroupChange), 4), d["M70"].IsFlagged,
+       float(d["M70"].EffectLocal)), (0.3, 0.05, True, 2500.0))
+check("K12 兩家供應商、漲幅正常都不標記", (d["M71"].VendorCount, d["M71"].IsFlagged, d["M72"].IsFlagged), (2, False, False))
+check("K12 群組沒得比：基準以 0 計 → 漲 15% 標記", (d["M74"].GroupChange, d["M74"].IsFlagged), (None, True))
+check("K12 合理獨家白名單不標記", d["M75"].IsFlagged, False)
+
+# K22
+d = {x.ConditionRecord: x for x in one("SELECT * FROM kri.K22_Detail WHERE RunId = ?", rid)}
+check("K22 漲 30% → 標記、生效後 PO 多付 300", (d["0000700002"].PrevRecord, round(float(d["0000700002"].IncreaseRatio), 4),
+      d["0000700002"].IsFlagged, d["0000700002"].PoCount, float(d["0000700002"].EffectLocal)),
+      ("0000700001", 0.3, True, 1, 300.0))
+check("K22 建立日空白用生效日、不限資訊記錄類別", (d["0000700021"].IsFlagged, d["0000700031"].IsFlagged), (True, True))
+check("K22 漲 10%、降價、沒有前一筆都不標記",
+      (d["0000700004"].IsFlagged, d["0000700011"].IsFlagged, d["0000700001"].CompareStatus), (False, False, "無前一筆"))
+
+# K23
+d = {x.PoNumber: x for x in one("SELECT * FROM kri.K23_Detail WHERE RunId = ?", rid)}
+check("K23 只有下單後主檔價變便宜、還沒收完的 PO", sorted(d), ["4600000001"])
+x = d["4600000001"]
+check("K23 主檔 15、PO 20 → 標記，未收 60 多付 300", (float(x.InfoUnitPrice), float(x.OpenQty), x.IsFlagged,
+      float(x.EffectLocal)), (15.0, 60.0, True, 300.0))
+
+# K24
+d = {x.PoNumber: x for x in one("SELECT * FROM kri.K24_Detail WHERE RunId = ?", rid)}
+check("K24 明細：休眠後重新下單 90 天內的 PO", sorted(k for k in d if k.startswith("461")),
+      ["4610000002", "4610000004", "4610000006"])
+check("K24 參考價太分散：不標記", (float(d["4610000006"].RefSpread), d["4610000006"].IsFlagged), (6.0, False))
+x = d["4610000002"]
+check("K24 比別家均價高 30% → 標記", (x.DormantDays, float(x.RefUnitPrice), x.IsFlagged, float(x.EffectLocal)),
+      (639, 10.0, True, 300.0))
+check("K24 沒有別家可比：留在明細、不標記", (d["4610000004"].RefUnitPrice, d["4610000004"].IsFlagged), (None, False))
+
 # Flag 與 view
 r = one("SELECT KriCode, COUNT(*) FROM kri.vFlagLatest GROUP BY KriCode ORDER BY KriCode")
 check("vFlagLatest 各題標記數", [(x[0], x[1]) for x in r],
-      [("K01", 5), ("K03", 5), ("K04", 5), ("K08", 2), ("K10", 5), ("K13", 1), ("K14", 4),
-       ("K18", 1), ("K19", 5), ("K21", 2)])
+      [("K01", 5), ("K03", 5), ("K04", 5), ("K08", 2), ("K09", 1), ("K10", 5), ("K12", 2), ("K13", 1),
+       ("K14", 4), ("K18", 1), ("K19", 5), ("K21", 2), ("K22", 3), ("K23", 1), ("K24", 1)])
 
 # 參數與對照表改了，結果跟著變
 cur.execute("UPDATE kri.Parameter SET ParamValue = 1 WHERE KriCode = 'K01' AND ParamName = 'RequireSameMaterial'")
@@ -538,9 +659,9 @@ run_file("12_kri_seed.sql")      # 重跑 seed 會把缺的參數補回來
 
 cur.execute("EXEC sp_rename 'mst.PurchasingCondA018', 'PurchasingCondA018_x'")
 res, _ = run()
-check("A018 不見：用到它的 K14、K21 失敗，其他照跑",
+check("A018 不見：用到它的 K14、K21、K22、K23 失敗，其他照跑",
       sorted((c, r[6]) for c, r in res.items()),
-      [(c, "FAILED" if c in ("K14", "K21") else "OK") for c in ALL])
+      [(c, "FAILED" if c in ("K14", "K21", "K22", "K23") else "OK") for c in ALL])
 cur.execute("EXEC sp_rename 'mst.PurchasingCondA018_x', 'PurchasingCondA018'")
 
 cur.execute("DELETE kri.ApprovalMatrix")

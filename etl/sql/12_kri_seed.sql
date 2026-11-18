@@ -24,7 +24,17 @@ USING (VALUES
  ('K10', N'先入庫才補請採購單', N'第一次收貨在 PO 日後 {MaxGapDays} 天內（含早於 PO），排除緊急採購關鍵字，整張 PO 金額不超過 {MaxPoAmount}。', N'請購', 'PO', 'kri.Run_K10', 12, 1, 2, 1, 1, 0, 0,
          N'緊急採購關鍵字放 kri.ValueList（ExcludeTextPattern，LIKE 樣式）。目前比對收貨的項目說明；EKPO.TXZ01 進來後再加 PO 項目說明。'),
  ('K19', N'GR 日期異常貼近 PR/PO 建立日', N'第一次收貨在 PR 建立日（沒有 PR 用 PO 日）後 {MaxGapDays} 天內。', N'驗收', 'PO', 'kri.Run_K19', 12, 1, 2, 1, 0, 1, 0,
-         N'和 K10 共用收貨日；K10 看 PO→GR，K19 看 PR→GR，同一筆可能兩題都標。')
+         N'和 K10 共用收貨日；K10 看 PO→GR，K19 看 PR→GR，同一筆可能兩題都標。'),
+ ('K09', N'疑似拆單（direct AP）', N'同公司別、同供應商（同成本中心）在 {WindowDays} 天內多張沒有 PO 的應付傳票，單張低於核決門檻、合計需要更高層級。', N'請款', 'AP', 'kri.Run_K09', 12, 1, 2, 1, 1, 0, 0,
+         N'需要 kri.ApprovalMatrix 的 AP 核決權限。成本中心目前只看供應商行；費用行進來後改從同傳票帶。沖銷傳票要等 BKPF.STBLG。'),
+ ('K12', N'集中且買貴', N'兩年內只跟一家買的料號，一年單價漲幅比同物料群組其他料號平均多 {PriceTolerance} 以上。', N'採購', 'MATERIAL', 'kri.Run_K12', 12, 1, 2, 0, 1, 0, 1,
+         N'獨家先用 PO 資料判斷（ZISK／製造商料號進來後改用）；合理獨家放 ValueList AllowedSingleSource。'),
+ ('K22', N'主檔價大漲', N'新建的價格條件比同組合前一筆漲 {IncreaseRatio} 以上，列出生效後受影響的 PO。', N'採購', 'CONDITION', 'kri.Run_K22', 12, 1, 2, 0, 1, 0, 1,
+         N'新增題目（不在原清單）。'),
+ ('K23', N'便宜主檔價已生效，舊 Open PO 仍用高價', N'Open PO 下單後生效的主檔價比 PO 單價低 {PriceTolerance} 以上，未收數量仍照舊價。', N'採購', 'PO', 'kri.Run_K23', 24, 1, 2, 0, 0, 1, 1,
+         N'新增題目（不在原清單）。主檔是現在的資料。'),
+ ('K24', N'休眠供應商重新啟用、價格偏高', N'供應商停了 {DormantDays} 天以上又下單，啟用後 {FollowDays} 天內的 PO 單價比其他供應商均價高 {PriceTolerance} 以上。', N'採購', 'PO', 'kri.Run_K24', 12, 1, 2, 0, 1, 0, 1,
+         N'新增題目（不在原清單）。休眠用 PO 資料判斷，資料期間開始前的交易看不到。')
 ) AS s (KriCode, Name, Description, Stage, EntityType, ProcName, WindowMonths, Enabled, Phase,
         IsCompliance, IsFraud, IsOperation, IsFinancial, Notes)
 ON t.KriCode = s.KriCode
@@ -60,7 +70,17 @@ FROM (VALUES
  ('K21', 'RequirePo',           1,      'code',   N'1 = 倒填期間內有 PO 才標記；0 = 只看倒填天數'),
  ('K10', 'MaxGapDays',          1,      'days',   N'PO 日到第一次收貨在幾天內（含收貨早於 PO）'),
  ('K10', 'MaxPoAmount',         500000, 'amount', N'整張 PO 本幣金額上限；0 = 不限。只在本幣屬於 AmountCurrency 時判斷'),
- ('K19', 'MaxGapDays',          3,      'days',   N'PR（或 PO）建立日到第一次收貨在幾天內')
+ ('K19', 'MaxGapDays',          3,      'days',   N'PR（或 PO）建立日到第一次收貨在幾天內'),
+ ('K09', 'WindowDays',          30,     'days',   N'滾動視窗天數'),
+ ('K09', 'MinCount',            2,      'count',  N'視窗內至少幾張傳票才算'),
+ ('K12', 'PriceTolerance',      0.10,   'ratio',  N'漲幅比群組基準多出多少才標記'),
+ ('K12', 'MinGroupMaterials',   3,      'count',  N'群組內至少幾個其他料號可比才當基準；不夠以 0 計'),
+ ('K22', 'IncreaseRatio',       0.20,   'ratio',  N'比前一筆條件漲多少以上'),
+ ('K23', 'PriceTolerance',      0.05,   'ratio',  N'PO 單價比新主檔價高出多少以上'),
+ ('K24', 'DormantDays',         365,    'days',   N'兩張 PO 間隔幾天以上算休眠'),
+ ('K24', 'FollowDays',          90,     'days',   N'重新啟用後看幾天內的 PO'),
+ ('K24', 'PriceTolerance',      0.10,   'ratio',  N'比其他供應商均價高出多少以上'),
+ ('K24', 'MaxRefSpread',        5,      'ratio',  N'參考 PO 最高價 ÷ 最低價超過這個倍數就不比（通用料號）')
 ) AS s (KriCode, ParamName, ParamValue, Unit, Description)
 WHERE NOT EXISTS (SELECT 1 FROM kri.Parameter p WHERE p.KriCode = s.KriCode AND p.ParamName = s.ParamName);
 
