@@ -410,7 +410,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | `ext.Contract` | K17 合約 | ContractNo、Vendor、PoNumber、SignedOn、ValidFrom、ValidTo |
 
 ### K02 工商登記關聯供應商（SAP 內部版）
-- **邏輯**：不同供應商代碼但統編、電話（去符號）、地址（去空白標點）相同（`MatchAttribute`），或 `ext.VendorRelation` 列為關聯；同一個值超過 `MaxGroupSize` 家共用的不配對。標記：①其中一家凍結（中央凍結，或每個組織都凍結；`ExcludeAccountGroup` 除外）、另一家期間內有 PO；②兩家期間內買過同料號。
+- **邏輯**：不同供應商代碼但統編、電話（去符號）、地址（去空白標點）相同（`MatchAttribute`），或 `ext.VendorRelation` 列為關聯；同一個值超過 `MaxGroupSize` 家共用的不配對。商工登記同一對的多種關係併成一筆（MatchType = 商工登記）。標記：①其中一家基準日當時凍結（中央凍結，或每個組織都凍結；`ExcludeAccountGroup` 除外；基準日之後才改的凍結用異動紀錄還原）、另一家期間內有 PO；②兩家期間內買過同料號。
 - **參數**：`MaxGroupSize` = 5。
 - **已知限制**：銀行帳號（LFBK）還沒有業務表；「前 50% 家數」的重大性篩選還沒做，目前全部供應商都看。
 
@@ -420,7 +420,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 - **已知限制**：未收數量用目前的收貨數；關聯企業合併計算等 K02 的關聯確定後再做。
 
 ### K06 用量 vs 請購量 vs 庫存
-- **邏輯**：請購當天（庫存 + 在途 PO）÷ 過去 `UsageMonths` 個月平均月耗用 = 覆蓋月數，> `MaxCoverageMonths` 仍請購 → 標記；沒有耗用、但有庫存或在途的（`FlagNoUsage` = 1）也標記。在途 = 請購當天以前下單、扣掉當天以前收貨的數量。耗用 = `ConsumptionMovementType`（201、221、261、281 和沖回）。
+- **邏輯**：請購當天（庫存 + 在途 PO）÷ 過去 `UsageMonths` 個月平均月耗用 = 覆蓋月數，> `MaxCoverageMonths` 仍請購 → 標記；沒有耗用、但有庫存或在途的（`FlagNoUsage` = 1）也標記。在途 = 請購當天以前下單、扣掉當天以前收貨的數量（收貨用比例換成 PO 單位）；不含這張 PR 自己轉的 PO、已結案（交貨完成且最後收貨在請購日以前）的 PO。耗用 = `ConsumptionMovementType`（201、221、261、281 和沖回）。
 - **參數**：`MaxCoverageMonths` = 6、`UsageMonths` = 12、`FlagNoUsage` = 1。
 - **已知限制**：PR、收貨、異動的單位假設都是基本單位；原物料和零件的請購邏輯不同，門檻之後可以分開。
 
@@ -436,10 +436,10 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 
 ### K15 已屆呆滯之警示 ／ K16 呆滯料仍進行採購
 - **共用**：`kri.SlowStatusAt`：優先用呆滯報表（指定日以前最新一份快照的認列日 SlowOn）；沒有報表而且 `UseSapFallback` = 1 時，用最後一次異動日 + `SlowDays` 推估。
-- **K15**：基準日有庫存、還沒認列、`WarnDays` 天內會認列 → 標記。影響金額 = 庫存金額。
+- **K15**：基準日有庫存（推估時用 `kri.StockAt` 回推）、還沒認列、`WarnDays` 天內會認列 → 標記。影響金額 = 庫存金額（推估時按基準日數量比例換算）。
 - **K16**：下單前一天已呆滯（認列日 ≤ 下單日，或狀態在 `SlowStatus`）、而且有庫存（推估時）仍下 PO；同料號 × 工廠最近 3 個月有 `MinConsecMonths` 個月以上這樣下單 → 標記。
 - **參數**：K15 `WarnDays` = 14、`SlowDays` = 365、`UseSapFallback` = 1；K16 `MinConsecMonths` = 1、`SlowDays` = 365、`UseSapFallback` = 1。
-- **已知限制**：建議直接用會計認列的呆滯報表，推估版只是先看得到東西；推估時「最後異動」包含所有異動類型。
+- **已知限制**：建議直接用會計認列的呆滯報表，推估版只是先看得到東西；推估時「最後異動」包含所有異動類型。`kri.StockAt` 逐筆回推，料號異動量很大時要注意效能（之後可改成先彙總每日淨異動）。
 
 ### K17 重大工程未簽合約
 - **邏輯**：工程類 PO（`ConstructionPoType`、`ConstructionMaterialGroup`、`ConstructionGlPattern` 任一，只在本地設定），整張 PO 本幣金額 ≥ `MajorAmount`（本幣在 `AmountCurrency`），PO 沒有參照 SAP 合約、`ext.Contract` 也對不到 → 「無合約」；合約簽約日晚於 PO → 「合約晚於PO」，都標記。合約先用 PO 號碼對，沒有再用供應商 + 有效期間對。

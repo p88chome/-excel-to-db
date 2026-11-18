@@ -1507,6 +1507,18 @@ BEGIN
     SET NOCOUNT ON;
     DECLARE @maxg INT = kri.Param('K02', 'MaxGroupSize');
 
+    -- 基準日之後才改的凍結欄位：基準日當時的值 = 基準日後第一筆異動的舊值
+    SELECT Vendor, TableName, FieldName, Scope, ISNULL(OldValue, '') AS OldValue
+    INTO #fut
+    FROM (SELECT h.Vendor, h.TableName, h.FieldName, h.OldValue,
+                 IIF(h.TableName IN ('LFM1', 'LFB1'), SUBSTRING(h.TableKey, 14, 4), '') AS Scope,
+                 ROW_NUMBER() OVER (PARTITION BY h.Vendor, h.TableName, h.TableKey, h.FieldName
+                                    ORDER BY h.ChangeDate, h.ChangeTime, h.ChangeNumber) AS rn
+          FROM mst.VendorChangeHistory h
+          WHERE h.ChangeDate > @AsOfDate AND h.FieldName IN ('SPERM', 'SPERR')
+            AND h.TableName IN ('LFA1', 'LFM1', 'LFB1')) x
+    WHERE rn = 1;
+
     SELECT Vendor,
            MAX(NULLIF(LTRIM(RTRIM(TaxNumber)), '')) AS Tax,
            MAX(NULLIF(REPLACE(REPLACE(REPLACE(Phone, '-', ''), ' ', ''), '+', ''), '')) AS Phone,
@@ -1515,11 +1527,17 @@ BEGIN
            IIF(MAX(ListValue) IS NULL AND (MAX(Central) = 1 OR MIN(OrgBlk) = 1), 1, 0) AS Blocked
     INTO #v
     FROM (SELECT v.*, x.ListValue,                                   -- 排除的帳戶群組（ExcludeAccountGroup）不算凍結
-                 IIF(ISNULL(CentralPurchBlock, '') <> '' OR ISNULL(CentralPostingBlock, '') <> '', 1, 0) AS Central,
-                 IIF(ISNULL(PurchasingBlock, '') <> '' OR ISNULL(PostingBlock, '') <> '', 1, 0) AS OrgBlk
+                 IIF(COALESCE(f1.OldValue, v.CentralPurchBlock, '') <> '' OR COALESCE(f2.OldValue, v.CentralPostingBlock, '') <> '', 1, 0) AS Central,
+                 IIF(COALESCE(f3.OldValue, v.PurchasingBlock, '') <> '' OR COALESCE(f4.OldValue, v.PostingBlock, '') <> '', 1, 0) AS OrgBlk
           FROM mst.Vendor v
           LEFT JOIN kri.ValueList x ON x.KriCode IN ('K02', '*') AND x.ListName = 'ExcludeAccountGroup'
-                                   AND x.ListValue = v.VendorAccountGroup) v
+                                   AND x.ListValue = v.VendorAccountGroup
+          OUTER APPLY (SELECT MAX(OldValue) AS OldValue FROM #fut WHERE Vendor = v.Vendor AND TableName = 'LFA1' AND FieldName = 'SPERM') f1
+          OUTER APPLY (SELECT MAX(OldValue) AS OldValue FROM #fut WHERE Vendor = v.Vendor AND TableName = 'LFA1' AND FieldName = 'SPERR') f2
+          OUTER APPLY (SELECT MAX(OldValue) AS OldValue FROM #fut WHERE Vendor = v.Vendor AND TableName = 'LFM1' AND FieldName = 'SPERM'
+                         AND Scope = v.PurchOrg) f3
+          OUTER APPLY (SELECT MAX(OldValue) AS OldValue FROM #fut WHERE Vendor = v.Vendor AND TableName = 'LFB1' AND FieldName = 'SPERR'
+                         AND Scope = v.CompanyCode) f4) v
     GROUP BY Vendor;
 
     WITH a AS (
@@ -1529,15 +1547,19 @@ BEGIN
     ), g AS (
         SELECT a.*, COUNT(*) OVER (PARTITION BY MatchType, MatchValue) AS n FROM a
         WHERE MatchType IN (SELECT ListValue FROM kri.ValueList WHERE KriCode IN ('K02', '*') AND ListName = 'MatchAttribute')
+    ), r AS (           -- 商工登記：A、B 正反兩筆、多種關係都併成一對
+        SELECT IIF(VendorA < VendorB, VendorA, VendorB) AS VendorA, IIF(VendorA < VendorB, VendorB, VendorA) AS VendorB,
+               RelationType + ISNULL(N'（' + Note + N'）', N'') AS Rel
+        FROM ext.VendorRelation WHERE VendorA <> VendorB
     )
     SELECT x.Vendor AS VendorA, y.Vendor AS VendorB, x.MatchType, x.MatchValue
     INTO #p
     FROM g x JOIN g y ON y.MatchType = x.MatchType AND y.MatchValue = x.MatchValue AND x.Vendor < y.Vendor
     WHERE x.n <= @maxg
-    UNION
-    SELECT IIF(VendorA < VendorB, VendorA, VendorB), IIF(VendorA < VendorB, VendorB, VendorA),
-           LEFT(N'商工:' + RelationType, 30), Note
-    FROM ext.VendorRelation WHERE VendorA <> VendorB;
+    UNION ALL
+    SELECT VendorA, VendorB, N'商工登記', LEFT(STRING_AGG(CAST(Rel AS NVARCHAR(MAX)), N'；'), 200)
+    FROM (SELECT DISTINCT VendorA, VendorB, Rel FROM r) r
+    GROUP BY VendorA, VendorB;
 
     SELECT b.Vendor, b.Material, b.LocalCurrency,
            kri.ToLocal(b.NetValue, b.Currency, b.LocalCurrency, b.ExchangeRate) AS AmountLocal
@@ -1578,7 +1600,7 @@ BEGIN
     FROM kri.K02_Detail
     WHERE RunId = @RunId AND IsFlagged = 1;
 
-    SELECT @Note = CONCAT(N'關聯供應商配對 ', COUNT(*), N'（商工登記 ', COUNT(CASE WHEN MatchType LIKE N'商工:%' THEN 1 END),
+    SELECT @Note = CONCAT(N'關聯供應商配對 ', COUNT(*), N'（商工登記 ', COUNT(CASE WHEN MatchType = N'商工登記' THEN 1 END),
                           N'）；有凍結的配對 ', COUNT(CASE WHEN ABlocked = 1 OR BBlocked = 1 THEN 1 END))
     FROM kri.K02_Detail WHERE RunId = @RunId;
 END;
@@ -1615,10 +1637,11 @@ BEGIN
 
     WITH o AS (
         SELECT b.Vendor, MAX(b.VendorName) AS VendorName, COUNT(*) AS Cnt,
-               SUM(kri.ToLocal((b.OrderQty - ISNULL(b.GrQty, 0)) * b.UnitPrice, b.Currency, b.LocalCurrency, b.ExchangeRate)) AS Amt,
+               IIF(COUNT(*) = COUNT(b.OpenLocal), SUM(b.OpenLocal), NULL) AS Amt,     -- 有任一項目換不了本幣就不判斷
                COUNT(DISTINCT b.LocalCurrency) AS Curs, MAX(b.LocalCurrency) AS Cur
-        FROM kri.PoBase('K05', @PeriodFrom, @PeriodTo) b
-        WHERE ISNULL(b.Vendor, '') <> '' AND ISNULL(b.DelivComplInd, '') = '' AND ISNULL(b.GrQty, 0) < b.OrderQty
+        FROM (SELECT b.*, kri.ToLocal((b.OrderQty - ISNULL(b.GrQty, 0)) * b.UnitPrice, b.Currency, b.LocalCurrency, b.ExchangeRate) AS OpenLocal
+              FROM kri.PoBase('K05', @PeriodFrom, @PeriodTo) b
+              WHERE ISNULL(b.Vendor, '') <> '' AND ISNULL(b.DelivComplInd, '') = '' AND ISNULL(b.GrQty, 0) < b.OrderQty) b
         GROUP BY b.Vendor
     ), t AS (
         SELECT o.*, c.Capital, c.Currency AS CapCur
@@ -1704,14 +1727,21 @@ BEGIN
         SELECT r.*, st.StockQty AS StockAtPr, ISNULL(op.Qty, 0) AS OpenPoQty, ISNULL(u.Qty, 0) / @months AS AvgMonthlyUse
         FROM r
         OUTER APPLY kri.StockAt(r.Material, r.Plant, r.PrDate) st
-        OUTER APPLY (       -- 請購當天的在途：當天以前下單、扣掉當天以前收貨的數量
-            SELECT SUM(IIF(p.OrderQty - ISNULL(g.Qty, 0) > 0, p.OrderQty - ISNULL(g.Qty, 0), 0)) AS Qty
+        OUTER APPLY (       -- 請購當天的在途：當天以前下單、扣掉當天以前收貨的數量（PO 訂購單位）
+            SELECT SUM(IIF(q.OpenQty > 0, q.OpenQty, 0)) AS Qty
             FROM prc.PurchaseOrderDetail p
-            OUTER APPLY (SELECT SUM(IIF(gr.DebitCreditInd = 'H', -gr.Quantity, gr.Quantity)) AS Qty
-                         FROM prc.GoodsReceipt gr
-                         WHERE gr.PoNumber = p.PoNumber AND gr.PoItem = p.PoItem AND gr.PostingDate <= r.PrDate) g
+            OUTER APPLY (SELECT SUM(gr.Qty) AS Tot, SUM(gr.AsOfQty) AS AsOf, MAX(gr.PostingDate) AS LastGr
+                         FROM (SELECT gr.PostingDate, IIF(gr.DebitCreditInd = 'H', -gr.Quantity, gr.Quantity) AS Qty,
+                                      IIF(gr.PostingDate <= r.PrDate AND ISNULL(gr.EntryDate, gr.PostingDate) <= r.PrDate,
+                                          IIF(gr.DebitCreditInd = 'H', -gr.Quantity, gr.Quantity), 0) AS AsOfQty
+                               FROM prc.GoodsReceipt gr
+                               WHERE gr.PoNumber = p.PoNumber AND gr.PoItem = p.PoItem) gr) g
+            -- 收貨的單位可能是基本單位：用「當天以前收貨 ÷ 全部收貨」的比例換成 PO 上的已收數量
+            CROSS APPLY (SELECT p.OrderQty - IIF(g.Tot > 0, ISNULL(p.GrQty, 0) * g.AsOf / g.Tot, ISNULL(p.GrQty, 0)) AS OpenQty) q
             WHERE p.Material = r.Material AND p.Plant = r.Plant AND p.PoDate <= r.PrDate
-              AND p.PoDate > DATEADD(YEAR, -2, r.PrDate) AND ISNULL(p.DeletionInd, '') = '') op
+              AND p.PoDate > DATEADD(YEAR, -2, r.PrDate) AND ISNULL(p.DeletionInd, '') = '' AND p.OrderQty > 0
+              AND NOT (ISNULL(p.PrNumber, '') = r.PrNumber AND ISNULL(p.PrItem, '') = r.PrItem)    -- 這張 PR 自己轉的 PO 不算
+              AND NOT (ISNULL(p.DelivComplInd, '') <> '' AND ISNULL(g.LastGr, p.PoDate) <= r.PrDate)) op   -- 已結案的不算
         OUTER APPLY (
             SELECT SUM(IIF(m.DebitCreditInd = 'H', m.Quantity, -m.Quantity)) AS Qty
             FROM inv.MaterialMovement m
@@ -1784,7 +1814,7 @@ BEGIN
         SELECT Material, Plant, ISNULL(Uom, '') AS Uom, DATEFROMPARTS(YEAR(PrDate), MONTH(PrDate), 1) AS Month,
                SUM(ReqQty) AS Qty
         FROM prc.PurchaseRequisition
-        WHERE PrDate BETWEEN DATEADD(MONTH, -12, @PeriodFrom) AND @PeriodTo
+        WHERE PrDate BETWEEN DATEADD(MONTH, -12, DATEFROMPARTS(YEAR(@PeriodFrom), MONTH(@PeriodFrom), 1)) AND @PeriodTo
           AND ISNULL(DeletionInd, '') = '' AND ReqQty > 0
           AND ISNULL(Material, '') <> '' AND ISNULL(Plant, '') <> ''
         GROUP BY Material, Plant, ISNULL(Uom, ''), DATEFROMPARTS(YEAR(PrDate), MONTH(PrDate), 1)
@@ -1880,7 +1910,7 @@ BEGIN
     FROM e
     OUTER APPLY kri.StockAt(e.Material, e.Plant, DATEADD(DAY, -1, e.PoDate)) st
     OUTER APPLY (SELECT TOP 1 Mou, WaitingForUse FROM ext.PartUsage x
-                 WHERE x.Material = e.Material AND x.Plant = e.Plant AND x.SnapshotDate <= e.PoDate
+                 WHERE x.Material = e.Material AND x.Plant = e.Plant AND x.SnapshotDate < e.PoDate
                  ORDER BY x.SnapshotDate DESC) u
     WHERE e.EmergencyBy IS NOT NULL;
 
@@ -1908,21 +1938,22 @@ GO
 -- 呆滯判斷（K15、K16 共用）：優先用呆滯報表快照（ext.SlowMoving，取指定日以前最新一份）；
 -- 沒有快照而且 UseSapFallback = 1 時，用最後一次異動日 + SlowDays 推估認列呆滯的日期。
 -- ======================================================================
-CREATE OR ALTER FUNCTION kri.SlowStatusAt (@KriCode NVARCHAR(10), @Material NVARCHAR(18), @Plant NVARCHAR(4), @OnDate DATE)
+CREATE OR ALTER FUNCTION kri.SlowStatusAt (@Material NVARCHAR(18), @Plant NVARCHAR(4), @OnDate DATE,
+                                            @SlowDays INT, @UseSapFallback INT)
 RETURNS TABLE
 AS RETURN
 SELECT TOP 1 *
 FROM (
     SELECT 1 AS Pref, N'呆滯報表' AS Source, s.SnapshotDate, s.Status, s.SlowOn, CAST(NULL AS DATE) AS LastMoveDate,
-           s.StockQty, s.StockValue
+           s.StockQty, s.StockValue, s.Currency
     FROM ext.SlowMoving s
     WHERE s.Material = @Material AND s.Plant = @Plant AND s.SnapshotDate <= @OnDate
       AND s.SnapshotDate = (SELECT MAX(SnapshotDate) FROM ext.SlowMoving WHERE SnapshotDate <= @OnDate)
     UNION ALL
-    SELECT 2, N'SAP推估', NULL, NULL, DATEADD(DAY, kri.Param(@KriCode, 'SlowDays'), m.LastMove), m.LastMove, NULL, NULL
+    SELECT 2, N'SAP推估', NULL, NULL, DATEADD(DAY, @SlowDays, m.LastMove), m.LastMove, NULL, NULL, NULL
     FROM (SELECT MAX(PostingDate) AS LastMove FROM inv.MaterialMovement
           WHERE Material = @Material AND Plant = @Plant AND PostingDate <= @OnDate) m
-    WHERE kri.Param(@KriCode, 'UseSapFallback') = 1 AND m.LastMove IS NOT NULL
+    WHERE @UseSapFallback = 1 AND m.LastMove IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM ext.SlowMoving WHERE SnapshotDate <= @OnDate)
 ) x
 ORDER BY Pref;
@@ -1949,6 +1980,9 @@ CREATE TABLE kri.K15_Detail (
     CONSTRAINT PK_kri_K15_Detail PRIMARY KEY (RunId, Material, Plant)
 );
 GO
+IF COL_LENGTH('kri.K15_Detail', 'Currency') IS NULL
+    ALTER TABLE kri.K15_Detail ADD Currency NVARCHAR(5) NULL;
+GO
 
 CREATE OR ALTER PROCEDURE kri.Run_K15
     @RunId INT, @AsOfDate DATE, @PeriodFrom DATE, @PeriodTo DATE, @Note NVARCHAR(400) OUTPUT
@@ -1959,28 +1993,42 @@ BEGIN
             @slow INT = kri.Param('K15', 'SlowDays'),
             @fb   INT = kri.Param('K15', 'UseSapFallback');
 
-    WITH k AS (         -- 有呆滯報表用報表的料號；沒有用庫存表裡有庫存的料號
+    WITH k AS (         -- 有呆滯報表用報表的料號；沒有用庫存表裡的料號（基準日庫存另外回推）
         SELECT Material, Plant FROM ext.SlowMoving
         WHERE SnapshotDate = (SELECT MAX(SnapshotDate) FROM ext.SlowMoving WHERE SnapshotDate <= @AsOfDate)
         UNION
         SELECT Material, Plant FROM inv.InventoryBalance
         WHERE NOT EXISTS (SELECT 1 FROM ext.SlowMoving WHERE SnapshotDate <= @AsOfDate)
-        GROUP BY Material, Plant HAVING SUM(ISNULL(StockQty, 0)) > 0
+        GROUP BY Material, Plant
+    ), d AS (
+        SELECT k.Material, k.Plant, s.Source, s.SnapshotDate, s.Status, s.LastMoveDate, s.SlowOn,
+               IIF(s.Source = N'呆滯報表', s.StockQty, st.StockQty) AS Qty,
+               -- 推估：金額用目前的庫存金額按基準日數量比例換算
+               IIF(s.Source = N'呆滯報表', s.StockValue, ib.Value * st.StockQty / NULLIF(ib.Qty, 0)) AS Value,
+               IIF(s.Source = N'呆滯報表', s.Currency, cc.LocalCurrency) AS Currency
+        FROM k
+        CROSS APPLY kri.SlowStatusAt(k.Material, k.Plant, @AsOfDate, @slow, @fb) s
+        OUTER APPLY (SELECT StockQty FROM kri.StockAt(k.Material, k.Plant, @AsOfDate) WHERE s.Source = N'SAP推估') st
+        OUTER APPLY (SELECT SUM(ISNULL(StockQty, 0) + ISNULL(QualityStock, 0) + ISNULL(BlockedStock, 0)) AS Qty,
+                            SUM(StockValue) AS Value
+                     FROM inv.InventoryBalance i
+                     WHERE i.Material = k.Material AND i.Plant = k.Plant AND s.Source = N'SAP推估') ib
+        OUTER APPLY (SELECT TOP 1 c.LocalCurrency FROM inv.MaterialMovement m      -- 工廠的本幣：從異動的公司別帶
+                     JOIN kri.vCompanyCurrency c ON c.CompanyCode = m.CompanyCode
+                     WHERE m.Material = k.Material AND m.Plant = k.Plant AND s.Source = N'SAP推估'
+                     ORDER BY m.PostingDate DESC) cc
     )
-    INSERT kri.K15_Detail
-    SELECT @RunId, k.Material, k.Plant, s.Source, s.SnapshotDate, s.Status, s.LastMoveDate, s.SlowOn,
-           DATEDIFF(DAY, @AsOfDate, s.SlowOn),
-           COALESCE(s.StockQty, ib.Qty), COALESCE(s.StockValue, ib.Value),
-           IIF(DATEDIFF(DAY, @AsOfDate, s.SlowOn) BETWEEN 0 AND @warn, 1, 0)
-    FROM k
-    CROSS APPLY kri.SlowStatusAt('K15', k.Material, k.Plant, @AsOfDate) s
-    OUTER APPLY (SELECT SUM(StockQty) AS Qty, SUM(StockValue) AS Value FROM inv.InventoryBalance i
-                 WHERE i.Material = k.Material AND i.Plant = k.Plant) ib;
+    INSERT kri.K15_Detail (RunId, Material, Plant, Source, SnapshotDate, Status, LastMoveDate, SlowOn, DaysToSlow,
+                           StockQty, StockValue, IsFlagged, Currency)
+    SELECT @RunId, Material, Plant, Source, SnapshotDate, Status, LastMoveDate, SlowOn, DATEDIFF(DAY, @AsOfDate, SlowOn),
+           Qty, Value, IIF(DATEDIFF(DAY, @AsOfDate, SlowOn) BETWEEN 0 AND @warn AND Qty > 0, 1, 0), Currency
+    FROM d
+    WHERE Source = N'呆滯報表' OR Qty > 0;           -- 推估時只留基準日有庫存的
 
     INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, Plant, Material, DocDate,
-                     MetricValue, ThresholdValue, EffectLocal, Reason)
+                     MetricValue, ThresholdValue, EffectLocal, LocalCurrency, Reason)
     SELECT RunId, 'K15', CONCAT(Material, '-', Plant), 'MATERIAL', Plant, Material, SlowOn,
-           DaysToSlow, @warn, StockValue,
+           DaysToSlow, @warn, IIF(Currency IS NULL, NULL, StockValue), Currency,
            CONCAT(N'再 ', DaysToSlow, N' 天（', SlowOn, N'）認列呆滯；庫存 ', FORMAT(StockQty, 'N0'),
                   IIF(Source = N'SAP推估', CONCAT(N'（最後異動 ', LastMoveDate, N'，推估）'), N''))
     FROM kri.K15_Detail
@@ -2034,9 +2082,10 @@ BEGIN
     SELECT @RunId, b.PoNumber, b.PoItem, b.PoDate, b.CompanyCode, b.PurchOrg, b.Plant, b.Vendor, b.Material,
            s.Source, s.Status, s.SlowOn, s.LastMoveDate, st.StockQty, NULL,
            kri.ToLocal(b.NetValue, b.Currency, b.LocalCurrency, b.ExchangeRate), b.LocalCurrency, 0
-    FROM kri.PoBase('K16', DATEADD(MONTH, -2, @PeriodFrom), @PeriodTo) b      -- 往前多抓兩個月算連續月數
-    CROSS APPLY kri.SlowStatusAt('K16', b.Material, b.Plant, DATEADD(DAY, -1, b.PoDate)) s
-    OUTER APPLY kri.StockAt(b.Material, b.Plant, DATEADD(DAY, -1, b.PoDate)) st
+    FROM kri.PoBase('K16', DATEADD(MONTH, -2, DATEFROMPARTS(YEAR(@PeriodFrom), MONTH(@PeriodFrom), 1)), @PeriodTo) b   -- 往前多抓兩個月算月數
+    CROSS APPLY kri.SlowStatusAt(b.Material, b.Plant, DATEADD(DAY, -1, b.PoDate), @slow, @fb) s
+    OUTER APPLY (SELECT StockQty FROM kri.StockAt(b.Material, b.Plant, DATEADD(DAY, -1, b.PoDate))
+                 WHERE s.Source = N'SAP推估') st                                  -- 有呆滯報表時不用回推庫存
     WHERE ISNULL(b.Material, '') <> ''
       AND (s.SlowOn <= b.PoDate
            OR s.Status IN (SELECT ListValue FROM kri.ValueList WHERE KriCode IN ('K16', '*') AND ListName = 'SlowStatus'))
@@ -2125,7 +2174,7 @@ BEGIN
                             OR (k.PoNumber IS NULL AND k.Vendor = po.Vendor
                                 AND po.PoDate BETWEEN ISNULL(k.ValidFrom, '1900-01-01') AND ISNULL(k.ValidTo, '9999-12-31')))
                        AND ISNULL(k.SignedOn, '1900-01-01') <= @AsOfDate
-                     ORDER BY IIF(k.PoNumber IS NULL, 1, 0), k.SignedOn) x
+                     ORDER BY IIF(k.PoNumber IS NULL, 1, 0), IIF(k.SignedOn IS NULL, 1, 0), k.SignedOn) x
         WHERE po.Amount >= @major
           AND po.LocalCurrency IN (SELECT ListValue FROM kri.ValueList WHERE KriCode IN ('K17', '*') AND ListName = 'AmountCurrency')
     )
@@ -2198,15 +2247,17 @@ BEGIN
     WHERE m.StorLoc IN (SELECT ListValue FROM kri.ValueList WHERE KriCode IN ('K20', '*') AND ListName = 'ReturnStorLoc')
       AND m.PostingDate <= @AsOfDate AND m.Quantity > 0;
 
+    SELECT f.Material, f.Plant, f.StorLoc, f.Batch, f.PostingDate,        -- 出待退倉：累計出量
+           SUM(Quantity) OVER (PARTITION BY Material, Plant, StorLoc, Batch
+                               ORDER BY PostingDate, MaterialDoc, MaterialDocItem ROWS UNBOUNDED PRECEDING) AS CumOut
+    INTO #o
+    FROM #f f WHERE DebitCreditInd = 'H';
+    CREATE CLUSTERED INDEX cx ON #o (Material, Plant, StorLoc, Batch, CumOut);
+
     WITH i AS (         -- 進待退倉：累計進量
         SELECT f.*, SUM(Quantity) OVER (PARTITION BY Material, Plant, StorLoc, Batch
                                         ORDER BY PostingDate, MaterialDoc, MaterialDocItem ROWS UNBOUNDED PRECEDING) AS CumIn
         FROM #f f WHERE DebitCreditInd = 'S'
-    ), o AS (           -- 出待退倉：累計出量
-        SELECT f.Material, f.Plant, f.StorLoc, f.Batch, f.PostingDate,
-               SUM(Quantity) OVER (PARTITION BY Material, Plant, StorLoc, Batch
-                                   ORDER BY PostingDate, MaterialDoc, MaterialDocItem ROWS UNBOUNDED PRECEDING) AS CumOut
-        FROM #f f WHERE DebitCreditInd = 'H'
     )
     INSERT kri.K20_Detail
     SELECT @RunId, i.MaterialDoc, i.MaterialDocYear, i.MaterialDocItem, i.PostingDate, i.Material, i.Plant, i.StorLoc,
@@ -2214,7 +2265,7 @@ BEGIN
            DATEDIFF(DAY, i.PostingDate, ISNULL(c.ClearedOn, @AsOfDate)), i.LocalAmount,
            IIF(DATEDIFF(DAY, i.PostingDate, ISNULL(c.ClearedOn, @AsOfDate)) > @days, 1, 0)
     FROM i
-    OUTER APPLY (SELECT MIN(o.PostingDate) AS ClearedOn FROM o
+    OUTER APPLY (SELECT MIN(o.PostingDate) AS ClearedOn FROM #o o
                  WHERE o.Material = i.Material AND o.Plant = i.Plant AND o.StorLoc = i.StorLoc AND o.Batch = i.Batch
                    AND o.CumOut >= i.CumIn AND o.PostingDate >= i.PostingDate) c
     WHERE i.PostingDate BETWEEN @PeriodFrom AND @PeriodTo

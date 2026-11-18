@@ -416,12 +416,18 @@ ins("mst.Vendor", [
     vend("V81", TaxNumber="12345678"),                               # 同統編、期間內有 PO → 標記
     vend("V82", Phone="02-1234-5678"), vend("V83", Phone="0212345678"),   # 同電話、買同料號 → 標記
     vend("V84", Address="No. 1, Test Rd."), vend("V85", Address="NO1 TEST RD"),   # 同地址、沒交易
+    vend("V86", TaxNumber="11112222", CentralPurchBlock="X"),        # 基準日之後才凍結 → 基準日當時沒凍結
+    vend("V87", TaxNumber="11112222"),
 ])
-ins("ext.VendorRelation", [dict(VendorA="V85", VendorB="V84", RelationType="同代表人")])
+ins("mst.VendorChangeHistory", [chg("V86", "C086", "2026-02-01", "LFA1", "100V86", "SPERM", "", "X")])
+ins("ext.VendorRelation", [dict(VendorA="V85", VendorB="V84", RelationType="同代表人"),
+                           dict(VendorA="V84", VendorB="V85", RelationType="同代表人", Note="反向"),
+                           dict(VendorA="V84", VendorB="V85", RelationType="同地址")])
 ins("prc.PurchaseOrderDetail", [
     po("4670000001", Vendor="V81", NetPrice=10, PoDate="2025-04-01"),
     po("4670000002", Vendor="V82", Material="M100", NetPrice=10, PoDate="2025-04-01"),
     po("4670000003", Vendor="V83", Material="M100", NetPrice=10, PoDate="2025-05-01"),
+    po("4670000004", Vendor="V87", NetPrice=10, PoDate="2025-05-01"),
 ])
 
 # ---------------------------------------------------------------- K05
@@ -457,6 +463,13 @@ ins("prc.PurchaseRequisition", [
     dict(PrNumber="1000000102", PrItem="00010", PrDate="2025-06-15", Material="M111", Plant="1100", ReqQty=10, ValPrice=1, Currency="TWD"),
     dict(PrNumber="1000000103", PrItem="00010", PrDate="2025-06-20", Material="M112", Plant="1100", ReqQty=10, ValPrice=1, Currency="TWD"),
 ])
+ins("prc.PurchaseOrderDetail", [
+    po("4690000001", Material="M110", NetPrice=1, OrderQty=500, PoDate="2025-06-15", PrNumber="1000000101", PrItem="00010"),  # PR 自己轉的
+    po("4690000002", Material="M112", NetPrice=1, PoDate="2025-02-01", GrQty=5, DelivComplInd="X"),      # 收 5 就結案
+    po("4690000003", Material="M112", NetPrice=1, OrderQty=10, OrderUom="BOX", PoDate="2025-02-01", GrQty=4),   # 收 4 BOX（48 EA）
+])
+ins("prc.GoodsReceipt", [dict(gr("5000000090", "4690000002", "2025-03-01"), Quantity=5),
+                         dict(gr("5000000091", "4690000003", "2025-03-01"), Quantity=48)])
 
 # ---------------------------------------------------------------- K07
 ins("prc.PurchaseRequisition",
@@ -660,7 +673,7 @@ check("K04 PO 空白、發票比主檔早 15 天 → 標記", (d["4550000012"].A
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K10_Detail WHERE RunId = ?", rid)}
 check("K10 明細：有收貨（101 借方）、基準日當時已存在的 PO", sorted(d),
       ["4560000001", "4560000002", "4560000003", "4560000004", "4560000005", "4560000006", "4560000008",
-       "4560000010", "4560000011", "4600000001"])
+       "4560000010", "4560000011", "4600000001", "4690000002", "4690000003"])
 check("K10 送貨單日早於 PO：照樣標記", (d["4560000011"].GapDays, d["4560000011"].DocGapDays, d["4560000011"].IsFlagged),
       (10, -5, True))
 x = one("SELECT MetricValue, ThresholdValue, Reason FROM kri.Flag WHERE RunId = ? AND KriCode = 'K10' "
@@ -735,7 +748,11 @@ check("K24 沒有別家可比：留在明細、不標記", (d["4610000004"].RefU
 # K02
 d = {(x.VendorA, x.VendorB, x.MatchType): x for x in one("SELECT * FROM kri.K02_Detail WHERE RunId = ?", rid)}
 check("K02 配對：統編、電話（去符號）、地址（去空白標點）、商工登記", sorted(d),
-      [("V80", "V81", "TaxNumber"), ("V82", "V83", "Phone"), ("V84", "V85", "Address"), ("V84", "V85", "商工:同代表人")])
+      [("V80", "V81", "TaxNumber"), ("V82", "V83", "Phone"), ("V84", "V85", "Address"), ("V84", "V85", "商工登記"),
+       ("V86", "V87", "TaxNumber")])
+check("K02 基準日之後才凍結的不算凍結；商工登記正反、多種關係併成一筆",
+      (d[("V86", "V87", "TaxNumber")].ABlocked, d[("V86", "V87", "TaxNumber")].IsFlagged,
+       d[("V84", "V85", "商工登記")].MatchValue), (False, False, "同代表人；同代表人（反向）；同地址"))
 check("K02 凍結廠商的關聯廠商仍交易、關聯廠商買同料號 → 標記",
       (d[("V80", "V81", "TaxNumber")].Scenario, d[("V82", "V83", "Phone")].Scenario, d[("V84", "V85", "Address")].IsFlagged),
       ("凍結廠商關聯交易", "關聯廠商同料號", False))
@@ -753,6 +770,8 @@ check("K06 回推請購當天庫存 1600、月耗用 100 → 可用 16 個月 �
       (float(x.StockAtPr), float(x.AvgMonthlyUse), float(x.CoverageMonths), x.IsFlagged), (1600.0, 100.0, 16.0, True))
 check("K06 沒有耗用但有庫存 → 標記；庫存用完的不標", (d["1000000102"].Status, d["1000000102"].IsFlagged,
       float(d["1000000103"].StockAtPr), d["1000000103"].IsFlagged), ("無耗用", True, 0.0, False))
+check("K06 在途不含 PR 自己轉的 PO、已結案的 PO；收貨換成 PO 單位",
+      (float(d["1000000101"].OpenPoQty), float(d["1000000103"].OpenPoQty)), (0.0, 6.0))
 
 # K07
 d = {(x.Material, str(x.Month)): x for x in one("SELECT * FROM kri.K07_Detail WHERE RunId = ?", rid)}
