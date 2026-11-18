@@ -1105,10 +1105,13 @@ BEGIN
                IIF(b.PoDate >= @PeriodFrom, 1, 0) AS IsCur
         FROM kri.PoBase('K12', @prevFrom, @PeriodTo) b
         WHERE ISNULL(b.Material, '') <> '' AND ISNULL(b.Vendor, '') <> '' AND b.NetValue IS NOT NULL
-    ), vc AS (          -- 供應商家數不套 PoBase 的排除條件，免得被排掉的供應商讓料號看起來像獨家
-        SELECT Material, COUNT(DISTINCT Vendor) AS VendorCount FROM prc.PurchaseOrderDetail
+    ), vc AS (          -- 供應商家數不套工廠、採購組織等排除條件，免得被排掉的供應商讓料號看起來像獨家
+        SELECT Material, COUNT(DISTINCT Vendor) AS VendorCount FROM prc.PurchaseOrderDetail d
         WHERE PoDate BETWEEN @prevFrom AND @PeriodTo AND ISNULL(DeletionInd, '') = '' AND ISNULL(Vendor, '') <> ''
-          AND Material IN (SELECT Material FROM p)
+          AND OrderQty > 0 AND Material IN (SELECT Material FROM p)
+          AND NOT EXISTS (SELECT 1 FROM kri.ValueList x       -- 刻意排除的供應商（關係企業等）不算來源
+                          WHERE x.KriCode IN ('K12', '*') AND x.ListName = 'ExcludeVendorPrefix'
+                            AND d.Vendor LIKE x.ListValue + '%')
         GROUP BY Material
     ), a AS (
         SELECT Material, Vendor, Currency, OrderUom, MAX(MaterialGroup) AS MaterialGroup,
@@ -1331,15 +1334,17 @@ BEGIN
            b.LocalCurrency, IIF(d.Ratio > @tol, 1, 0)
     FROM kri.PoBase('K23', @PeriodFrom, @PeriodTo) b
     CROSS APPLY kri.InfoPriceAt('K23', b.Vendor, b.Material, b.PurchOrg, b.Plant, @AsOfDate) i
-    OUTER APPLY (SELECT SUM(IIF(g.DebitCreditInd = 'H', -g.Quantity, g.Quantity)) AS Qty   -- 基準日當時已收的數量
+    -- 基準日當時已收：收貨資料是基本單位、PO 是訂購單位，所以用「基準日前已收 ÷ 全部已收」的比例乘 PO 的已收量
+    OUTER APPLY (SELECT SUM(IIF(g.DebitCreditInd = 'H', -g.Quantity, g.Quantity)) AS Tot,
+                        SUM(IIF(g.PostingDate <= @AsOfDate AND ISNULL(g.EntryDate, g.PostingDate) <= @AsOfDate,
+                                IIF(g.DebitCreditInd = 'H', -g.Quantity, g.Quantity), 0)) AS AsOf
                  FROM prc.GoodsReceipt g
-                 WHERE g.PoNumber = b.PoNumber AND g.PoItem = b.PoItem
-                   AND g.PostingDate <= @AsOfDate AND ISNULL(g.EntryDate, g.PostingDate) <= @AsOfDate) gr
-    CROSS APPLY (SELECT b.OrderQty - ISNULL(gr.Qty, 0) AS OpenQty) q
+                 WHERE g.PoNumber = b.PoNumber AND g.PoItem = b.PoItem) gr
+    CROSS APPLY (SELECT b.OrderQty - IIF(gr.Tot > 0, ISNULL(b.GrQty, 0) * gr.AsOf / gr.Tot, ISNULL(b.GrQty, 0)) AS OpenQty) q
     CROSS APPLY (SELECT b.UnitPrice / NULLIF(i.UnitPrice, 0) - 1 AS Ratio) d
     WHERE ISNULL(b.DelivComplInd, '') = '' AND q.OpenQty > 0
       AND i.ValidFrom > b.PoDate                       -- 下單之後才生效的主檔價
-      AND ISNULL(i.Currency, b.Currency) = b.Currency AND ISNULL(i.OrderUom, b.OrderUom) = b.OrderUom
+      AND i.Currency = b.Currency AND ISNULL(i.OrderUom, b.OrderUom) = b.OrderUom
       AND d.Ratio > 0;
 
     INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, CompanyCode, PurchOrg, Plant, Vendor, Material,
@@ -1460,5 +1465,774 @@ BEGIN
                           N'；參考 PO 太少 ', COUNT(CASE WHEN RefPoCount BETWEEN 1 AND @minref - 1 THEN 1 END),
                           N'；參考價太分散不比 ', COUNT(CASE WHEN RefSpread > @spread THEN 1 END))
     FROM kri.K24_Detail WHERE RunId = @RunId;
+END;
+GO
+
+-- ######################################################################
+-- 第四批：K02、K05、K06、K07、K11、K15、K16、K17、K20（要外部資料或補欄位的題目）。
+-- 外部資料在 ext.*，沒資料時程式照跑、備註說明。規格見 docs/KRI_PRD.md 第 9d 節。
+-- ######################################################################
+
+-- ======================================================================
+-- K02 工商登記關聯供應商（先做 SAP 內部版）
+-- 不同供應商代碼但統編、電話或地址相同（MatchAttribute 白名單），或商工登記列為關聯（ext.VendorRelation）。
+-- 同一個值超過 MaxGroupSize 家共用（代理商、園區總機）的不配對。
+-- 標記：①其中一家凍結（帳戶群組 ExcludeAccountGroup 除外），另一家期間內有 PO；②兩家期間內買過同料號。
+-- ======================================================================
+IF OBJECT_ID(N'kri.K02_Detail', N'U') IS NULL
+CREATE TABLE kri.K02_Detail (
+    RunId           INT           NOT NULL,
+    VendorA         NVARCHAR(10)  NOT NULL,
+    VendorB         NVARCHAR(10)  NOT NULL,
+    MatchType       NVARCHAR(30)  NOT NULL,   -- TaxNumber / Phone / Address / 商工登記的關係類型
+    MatchValue      NVARCHAR(200) NULL,
+    ABlocked        BIT           NOT NULL,
+    BBlocked        BIT           NOT NULL,
+    APoCount        INT           NULL,
+    BPoCount        INT           NULL,
+    APoAmountLocal  DECIMAL(19,4) NULL,
+    BPoAmountLocal  DECIMAL(19,4) NULL,
+    LocalCurrency   NVARCHAR(5)   NULL,
+    CommonMaterials INT           NULL,
+    Scenario        NVARCHAR(30)  NULL,       -- 凍結廠商關聯交易 / 關聯廠商同料號
+    IsFlagged       BIT           NOT NULL,
+    CONSTRAINT PK_kri_K02_Detail PRIMARY KEY (RunId, VendorA, VendorB, MatchType)
+);
+GO
+
+CREATE OR ALTER PROCEDURE kri.Run_K02
+    @RunId INT, @AsOfDate DATE, @PeriodFrom DATE, @PeriodTo DATE, @Note NVARCHAR(400) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @maxg INT = kri.Param('K02', 'MaxGroupSize');
+
+    SELECT Vendor,
+           MAX(NULLIF(LTRIM(RTRIM(TaxNumber)), '')) AS Tax,
+           MAX(NULLIF(REPLACE(REPLACE(REPLACE(Phone, '-', ''), ' ', ''), '+', ''), '')) AS Phone,
+           MAX(NULLIF(UPPER(REPLACE(REPLACE(REPLACE(Address, ' ', ''), ',', ''), '.', '')), '')) AS Addr,
+           -- 凍結 = 中央凍結，或每個採購組織／公司別都凍結（只凍結某一個組織不算）
+           IIF(MAX(ListValue) IS NULL AND (MAX(Central) = 1 OR MIN(OrgBlk) = 1), 1, 0) AS Blocked
+    INTO #v
+    FROM (SELECT v.*, x.ListValue,                                   -- 排除的帳戶群組（ExcludeAccountGroup）不算凍結
+                 IIF(ISNULL(CentralPurchBlock, '') <> '' OR ISNULL(CentralPostingBlock, '') <> '', 1, 0) AS Central,
+                 IIF(ISNULL(PurchasingBlock, '') <> '' OR ISNULL(PostingBlock, '') <> '', 1, 0) AS OrgBlk
+          FROM mst.Vendor v
+          LEFT JOIN kri.ValueList x ON x.KriCode IN ('K02', '*') AND x.ListName = 'ExcludeAccountGroup'
+                                   AND x.ListValue = v.VendorAccountGroup) v
+    GROUP BY Vendor;
+
+    WITH a AS (
+        SELECT Vendor, 'TaxNumber' AS MatchType, Tax AS MatchValue FROM #v WHERE Tax IS NOT NULL
+        UNION ALL SELECT Vendor, 'Phone', Phone FROM #v WHERE Phone IS NOT NULL AND LEN(Phone) >= 6
+        UNION ALL SELECT Vendor, 'Address', Addr FROM #v WHERE Addr IS NOT NULL AND LEN(Addr) >= 6
+    ), g AS (
+        SELECT a.*, COUNT(*) OVER (PARTITION BY MatchType, MatchValue) AS n FROM a
+        WHERE MatchType IN (SELECT ListValue FROM kri.ValueList WHERE KriCode IN ('K02', '*') AND ListName = 'MatchAttribute')
+    )
+    SELECT x.Vendor AS VendorA, y.Vendor AS VendorB, x.MatchType, x.MatchValue
+    INTO #p
+    FROM g x JOIN g y ON y.MatchType = x.MatchType AND y.MatchValue = x.MatchValue AND x.Vendor < y.Vendor
+    WHERE x.n <= @maxg
+    UNION
+    SELECT IIF(VendorA < VendorB, VendorA, VendorB), IIF(VendorA < VendorB, VendorB, VendorA),
+           LEFT(N'商工:' + RelationType, 30), Note
+    FROM ext.VendorRelation WHERE VendorA <> VendorB;
+
+    SELECT b.Vendor, b.Material, b.LocalCurrency,
+           kri.ToLocal(b.NetValue, b.Currency, b.LocalCurrency, b.ExchangeRate) AS AmountLocal
+    INTO #po
+    FROM kri.PoBase('K02', @PeriodFrom, @PeriodTo) b
+    WHERE b.Vendor IN (SELECT VendorA FROM #p UNION SELECT VendorB FROM #p);
+
+    WITH s AS (
+        SELECT Vendor, COUNT(*) AS Cnt, SUM(AmountLocal) AS Amt, COUNT(DISTINCT LocalCurrency) AS Curs,
+               MAX(LocalCurrency) AS Cur
+        FROM #po GROUP BY Vendor
+    )
+    INSERT kri.K02_Detail
+    SELECT @RunId, p.VendorA, p.VendorB, p.MatchType, p.MatchValue, va.Blocked, vb.Blocked,
+           ISNULL(sa.Cnt, 0), ISNULL(sb.Cnt, 0),
+           IIF(ISNULL(sa.Curs, 1) = 1 AND ISNULL(sb.Curs, 1) = 1 AND (sa.Cur IS NULL OR sb.Cur IS NULL OR sa.Cur = sb.Cur), sa.Amt, NULL),
+           IIF(ISNULL(sa.Curs, 1) = 1 AND ISNULL(sb.Curs, 1) = 1 AND (sa.Cur IS NULL OR sb.Cur IS NULL OR sa.Cur = sb.Cur), sb.Amt, NULL),
+           COALESCE(sa.Cur, sb.Cur), cm.n,
+           CASE WHEN (va.Blocked = 1 AND sb.Cnt > 0) OR (vb.Blocked = 1 AND sa.Cnt > 0) THEN N'凍結廠商關聯交易'
+                WHEN cm.n > 0 THEN N'關聯廠商同料號' END,
+           IIF((va.Blocked = 1 AND sb.Cnt > 0) OR (vb.Blocked = 1 AND sa.Cnt > 0) OR cm.n > 0, 1, 0)
+    FROM #p p
+    LEFT JOIN #v va ON va.Vendor = p.VendorA
+    LEFT JOIN #v vb ON vb.Vendor = p.VendorB
+    LEFT JOIN s sa ON sa.Vendor = p.VendorA
+    LEFT JOIN s sb ON sb.Vendor = p.VendorB
+    OUTER APPLY (SELECT COUNT(*) AS n FROM (SELECT DISTINCT Material FROM #po WHERE Vendor = p.VendorA AND ISNULL(Material, '') <> ''
+                                            INTERSECT
+                                            SELECT DISTINCT Material FROM #po WHERE Vendor = p.VendorB) m) cm
+    WHERE va.Vendor IS NOT NULL AND vb.Vendor IS NOT NULL;
+
+    INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, Vendor, MetricValue, ThresholdValue, EffectLocal, LocalCurrency, Reason)
+    SELECT RunId, 'K02', CONCAT(VendorA, '-', VendorB, '-', MatchType), 'VENDOR', VendorA, CommonMaterials, NULL,
+           CASE WHEN Scenario = N'凍結廠商關聯交易' THEN IIF(ABlocked = 1, BPoAmountLocal, APoAmountLocal)
+                ELSE ISNULL(APoAmountLocal, 0) + ISNULL(BPoAmountLocal, 0) END, LocalCurrency,
+           CONCAT(N'供應商 ', VendorA, N' 和 ', VendorB, N' ', MatchType, N' 相同；', Scenario,
+                  IIF(CommonMaterials > 0, CONCAT(N'（共同料號 ', CommonMaterials, N'）'), N''))
+    FROM kri.K02_Detail
+    WHERE RunId = @RunId AND IsFlagged = 1;
+
+    SELECT @Note = CONCAT(N'關聯供應商配對 ', COUNT(*), N'（商工登記 ', COUNT(CASE WHEN MatchType LIKE N'商工:%' THEN 1 END),
+                          N'）；有凍結的配對 ', COUNT(CASE WHEN ABlocked = 1 OR BBlocked = 1 THEN 1 END))
+    FROM kri.K02_Detail WHERE RunId = @RunId;
+END;
+GO
+
+-- ======================================================================
+-- K05 Open PO 超過供應商資本額
+-- 觀察期間（36 個月）內下單、未交貨完成的 PO 未收金額（本幣）合計 ÷ 實收資本額（ext.VendorCapital）> CapitalRatio → 標記。
+-- 本幣和資本額幣別不同、或跨不同本幣的標「未判斷」；查不到資本額（例如國外廠商）標「無資本額」，留在明細。
+-- ======================================================================
+IF OBJECT_ID(N'kri.K05_Detail', N'U') IS NULL
+CREATE TABLE kri.K05_Detail (
+    RunId            INT           NOT NULL,
+    Vendor           NVARCHAR(10)  NOT NULL,
+    VendorName       NVARCHAR(80)  NULL,
+    OpenPoCount      INT           NULL,
+    OpenAmountLocal  DECIMAL(19,4) NULL,
+    LocalCurrency    NVARCHAR(5)   NULL,
+    Capital          DECIMAL(19,2) NULL,
+    CapitalCurrency  NVARCHAR(5)   NULL,
+    Ratio            DECIMAL(19,6) NULL,
+    Status           NVARCHAR(10)  NOT NULL,  -- 已比對 / 無資本額 / 未判斷
+    IsFlagged        BIT           NOT NULL,
+    CONSTRAINT PK_kri_K05_Detail PRIMARY KEY (RunId, Vendor)
+);
+GO
+
+CREATE OR ALTER PROCEDURE kri.Run_K05
+    @RunId INT, @AsOfDate DATE, @PeriodFrom DATE, @PeriodTo DATE, @Note NVARCHAR(400) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @ratio DECIMAL(19,6) = kri.Param('K05', 'CapitalRatio');
+
+    WITH o AS (
+        SELECT b.Vendor, MAX(b.VendorName) AS VendorName, COUNT(*) AS Cnt,
+               SUM(kri.ToLocal((b.OrderQty - ISNULL(b.GrQty, 0)) * b.UnitPrice, b.Currency, b.LocalCurrency, b.ExchangeRate)) AS Amt,
+               COUNT(DISTINCT b.LocalCurrency) AS Curs, MAX(b.LocalCurrency) AS Cur
+        FROM kri.PoBase('K05', @PeriodFrom, @PeriodTo) b
+        WHERE ISNULL(b.Vendor, '') <> '' AND ISNULL(b.DelivComplInd, '') = '' AND ISNULL(b.GrQty, 0) < b.OrderQty
+        GROUP BY b.Vendor
+    ), t AS (
+        SELECT o.*, c.Capital, c.Currency AS CapCur
+        FROM o
+        OUTER APPLY (SELECT TOP 1 x.Capital, x.Currency FROM ext.VendorCapital x
+                     WHERE (x.Vendor = o.Vendor
+                            OR (x.Vendor IS NULL AND x.TaxNumber IN (SELECT NULLIF(LTRIM(RTRIM(v.TaxNumber)), '')
+                                                                     FROM mst.Vendor v WHERE v.Vendor = o.Vendor)))
+                       AND (x.DataDate IS NULL OR x.DataDate <= @AsOfDate)
+                     ORDER BY IIF(x.Vendor IS NULL, 1, 0), x.DataDate DESC) c
+    ), s AS (
+        SELECT t.*, CASE WHEN Capital IS NULL OR Capital <= 0 THEN N'無資本額'
+                         WHEN Curs <> 1 OR Cur <> CapCur OR Amt IS NULL THEN N'未判斷'
+                         ELSE N'已比對' END AS Status
+        FROM t
+    )
+    INSERT kri.K05_Detail
+    SELECT @RunId, Vendor, VendorName, Cnt, IIF(Curs = 1, Amt, NULL), IIF(Curs = 1, Cur, NULL), Capital, CapCur,
+           IIF(Status = N'已比對', Amt / Capital, NULL), Status,
+           IIF(Status = N'已比對' AND Amt / Capital > @ratio, 1, 0)
+    FROM s;
+
+    INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, Vendor, MetricValue, ThresholdValue, EffectLocal, LocalCurrency, Reason)
+    SELECT RunId, 'K05', Vendor, 'VENDOR', Vendor, Ratio, @ratio, OpenAmountLocal - Capital * @ratio, LocalCurrency,
+           CONCAT(N'Open PO 未收金額 ', FORMAT(OpenAmountLocal, 'N0'), N' 是實收資本額的 ', FORMAT(Ratio, 'P0'))
+    FROM kri.K05_Detail
+    WHERE RunId = @RunId AND IsFlagged = 1;
+
+    SELECT @Note = CONCAT(N'有 Open PO 的供應商 ', COUNT(*), N'；已比對 ', COUNT(CASE WHEN Status = N'已比對' THEN 1 END),
+                          N'、無資本額 ', COUNT(CASE WHEN Status = N'無資本額' THEN 1 END),
+                          N'、未判斷 ', COUNT(CASE WHEN Status = N'未判斷' THEN 1 END),
+                          IIF(NOT EXISTS (SELECT 1 FROM ext.VendorCapital), N'（ext.VendorCapital 沒有資料）', N''))
+    FROM kri.K05_Detail WHERE RunId = @RunId;
+END;
+GO
+
+-- ======================================================================
+-- K06 用量 vs 請購量 vs 庫存
+-- 請購當天的（庫存 + 在途 PO）÷ 過去 UsageMonths 個月平均月耗用 = 覆蓋月數，> MaxCoverageMonths 仍請購 → 標記。
+-- 過去沒有耗用、手上又有庫存或在途的（FlagNoUsage = 1）也標記。
+-- 庫存用 kri.StockAt 回推；耗用 = ConsumptionMovementType 的異動（貸方加、借方減）。
+-- ======================================================================
+IF OBJECT_ID(N'kri.K06_Detail', N'U') IS NULL
+CREATE TABLE kri.K06_Detail (
+    RunId          INT           NOT NULL,
+    PrNumber       NVARCHAR(10)  NOT NULL,
+    PrItem         NVARCHAR(5)   NOT NULL,
+    PrDate         DATE          NULL,
+    Material       NVARCHAR(18)  NULL,
+    Plant          NVARCHAR(4)   NULL,
+    CostCenter     NVARCHAR(10)  NULL,
+    ReqQty         DECIMAL(19,4) NULL,
+    Uom            NVARCHAR(3)   NULL,
+    StockAtPr      DECIMAL(19,4) NULL,
+    OpenPoQty      DECIMAL(19,4) NULL,
+    AvgMonthlyUse  DECIMAL(19,4) NULL,
+    CoverageMonths DECIMAL(19,4) NULL,
+    Status         NVARCHAR(10)  NOT NULL,  -- 已比對 / 無耗用 / 無庫存資料
+    Amount         DECIMAL(19,4) NULL,      -- PR 數量 × 評價價格（PR 幣別）
+    Currency       NVARCHAR(5)   NULL,
+    IsFlagged      BIT           NOT NULL,
+    CONSTRAINT PK_kri_K06_Detail PRIMARY KEY (RunId, PrNumber, PrItem)
+);
+GO
+
+CREATE OR ALTER PROCEDURE kri.Run_K06
+    @RunId INT, @AsOfDate DATE, @PeriodFrom DATE, @PeriodTo DATE, @Note NVARCHAR(400) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @cov    DECIMAL(19,4) = kri.Param('K06', 'MaxCoverageMonths'),
+            @months INT           = kri.Param('K06', 'UsageMonths'),
+            @nouse  INT           = kri.Param('K06', 'FlagNoUsage');
+
+    WITH r AS (
+        SELECT r.PrNumber, r.PrItem, r.PrDate, r.Material, r.Plant, r.CostCenter, r.ReqQty, r.Uom, r.Currency,
+               CAST(r.ReqQty * r.ValPrice AS DECIMAL(19,4)) AS Amount
+        FROM prc.PurchaseRequisition r
+        WHERE r.PrDate BETWEEN @PeriodFrom AND @PeriodTo
+          AND ISNULL(r.DeletionInd, '') = '' AND r.ReqQty > 0
+          AND ISNULL(r.Material, '') <> '' AND ISNULL(r.Plant, '') <> ''
+    ), x AS (
+        SELECT r.*, st.StockQty AS StockAtPr, ISNULL(op.Qty, 0) AS OpenPoQty, ISNULL(u.Qty, 0) / @months AS AvgMonthlyUse
+        FROM r
+        OUTER APPLY kri.StockAt(r.Material, r.Plant, r.PrDate) st
+        OUTER APPLY (       -- 請購當天的在途：當天以前下單、扣掉當天以前收貨的數量
+            SELECT SUM(IIF(p.OrderQty - ISNULL(g.Qty, 0) > 0, p.OrderQty - ISNULL(g.Qty, 0), 0)) AS Qty
+            FROM prc.PurchaseOrderDetail p
+            OUTER APPLY (SELECT SUM(IIF(gr.DebitCreditInd = 'H', -gr.Quantity, gr.Quantity)) AS Qty
+                         FROM prc.GoodsReceipt gr
+                         WHERE gr.PoNumber = p.PoNumber AND gr.PoItem = p.PoItem AND gr.PostingDate <= r.PrDate) g
+            WHERE p.Material = r.Material AND p.Plant = r.Plant AND p.PoDate <= r.PrDate
+              AND p.PoDate > DATEADD(YEAR, -2, r.PrDate) AND ISNULL(p.DeletionInd, '') = '') op
+        OUTER APPLY (
+            SELECT SUM(IIF(m.DebitCreditInd = 'H', m.Quantity, -m.Quantity)) AS Qty
+            FROM inv.MaterialMovement m
+            WHERE m.Material = r.Material AND m.Plant = r.Plant
+              AND m.PostingDate > DATEADD(MONTH, -@months, r.PrDate) AND m.PostingDate <= r.PrDate
+              AND m.MovementType IN (SELECT ListValue FROM kri.ValueList
+                                     WHERE KriCode IN ('K06', '*') AND ListName = 'ConsumptionMovementType')) u
+    ), s AS (
+        SELECT x.*,
+               CASE WHEN StockAtPr IS NULL THEN N'無庫存資料'
+                    WHEN AvgMonthlyUse <= 0 THEN N'無耗用'
+                    ELSE N'已比對' END AS Status,
+               IIF(AvgMonthlyUse > 0, (ISNULL(StockAtPr, 0) + OpenPoQty) / AvgMonthlyUse, NULL) AS Coverage
+        FROM x
+    )
+    INSERT kri.K06_Detail
+    SELECT @RunId, PrNumber, PrItem, PrDate, Material, Plant, CostCenter, ReqQty, Uom, StockAtPr, OpenPoQty,
+           AvgMonthlyUse, Coverage, Status, Amount, Currency,
+           IIF((Status = N'已比對' AND Coverage > @cov)
+               OR (Status = N'無耗用' AND @nouse = 1 AND StockAtPr + OpenPoQty > 0), 1, 0)
+    FROM s;
+
+    INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, Plant, Material, DocNumber, DocItem, DocDate,
+                     MetricValue, ThresholdValue, EffectLocal, LocalCurrency, Reason)
+    SELECT RunId, 'K06', CONCAT(PrNumber, '-', PrItem), 'PR', Plant, Material, PrNumber, PrItem, PrDate,
+           CoverageMonths, @cov, Amount, Currency,
+           IIF(Status = N'無耗用',
+               CONCAT(N'過去 ', @months, N' 個月沒有耗用，庫存 + 在途 ', FORMAT(StockAtPr + OpenPoQty, 'N0'), N' 仍請購'),
+               CONCAT(N'庫存 + 在途可用 ', FORMAT(CoverageMonths, 'N1'), N' 個月仍請購'))
+    FROM kri.K06_Detail
+    WHERE RunId = @RunId AND IsFlagged = 1;
+
+    SELECT @Note = CONCAT(N'有料號的 PR 項目 ', COUNT(*), N'；無耗用 ', COUNT(CASE WHEN Status = N'無耗用' THEN 1 END),
+                          N'；無庫存資料 ', COUNT(CASE WHEN Status = N'無庫存資料' THEN 1 END))
+    FROM kri.K06_Detail WHERE RunId = @RunId;
+END;
+GO
+
+-- ======================================================================
+-- K07 本期 vs 預期請購量
+-- 料號 × 工廠 × 月的請購量，和預期量比：有 ext.ExpectedDemand 用它，沒有用過去 12 個月「有請購的月份」的平均
+-- （有請購的月份少於 MinHistoryMonths 不判斷）。比例 > Multiplier → 標記。
+-- ======================================================================
+IF OBJECT_ID(N'kri.K07_Detail', N'U') IS NULL
+CREATE TABLE kri.K07_Detail (
+    RunId          INT           NOT NULL,
+    Material       NVARCHAR(18)  NOT NULL,
+    Plant          NVARCHAR(4)   NOT NULL,
+    Uom            NVARCHAR(3)   NOT NULL,
+    Month          DATE          NOT NULL,
+    MonthQty       DECIMAL(19,4) NULL,
+    ExpectedQty    DECIMAL(19,4) NULL,
+    ExpectedSource NVARCHAR(10)  NULL,      -- 預期量表 / 歷史平均
+    HistoryMonths  INT           NULL,      -- 過去 12 個月有請購的月份數
+    Ratio          DECIMAL(19,6) NULL,
+    IsFlagged      BIT           NOT NULL,
+    CONSTRAINT PK_kri_K07_Detail PRIMARY KEY (RunId, Material, Plant, Uom, Month)
+);
+GO
+
+CREATE OR ALTER PROCEDURE kri.Run_K07
+    @RunId INT, @AsOfDate DATE, @PeriodFrom DATE, @PeriodTo DATE, @Note NVARCHAR(400) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @mult DECIMAL(19,6) = kri.Param('K07', 'Multiplier'),
+            @minh INT           = kri.Param('K07', 'MinHistoryMonths');
+
+    WITH m AS (
+        SELECT Material, Plant, ISNULL(Uom, '') AS Uom, DATEFROMPARTS(YEAR(PrDate), MONTH(PrDate), 1) AS Month,
+               SUM(ReqQty) AS Qty
+        FROM prc.PurchaseRequisition
+        WHERE PrDate BETWEEN DATEADD(MONTH, -12, @PeriodFrom) AND @PeriodTo
+          AND ISNULL(DeletionInd, '') = '' AND ReqQty > 0
+          AND ISNULL(Material, '') <> '' AND ISNULL(Plant, '') <> ''
+        GROUP BY Material, Plant, ISNULL(Uom, ''), DATEFROMPARTS(YEAR(PrDate), MONTH(PrDate), 1)
+    ), c AS (
+        SELECT m.*, h.Qty AS HistQty, h.Months AS HistMonths, e.Qty AS ExtQty
+        FROM m
+        OUTER APPLY (SELECT SUM(h.Qty) AS Qty, COUNT(*) AS Months FROM m h      -- 過去 12 個月內有請購的月份
+                     WHERE h.Material = m.Material AND h.Plant = m.Plant AND h.Uom = m.Uom
+                       AND h.Month >= DATEADD(MONTH, -12, m.Month) AND h.Month < m.Month) h
+        LEFT JOIN ext.ExpectedDemand e ON e.Material = m.Material AND e.Plant = m.Plant AND e.Month = m.Month
+        WHERE m.Month >= DATEFROMPARTS(YEAR(@PeriodFrom), MONTH(@PeriodFrom), 1)
+    ), x AS (
+        SELECT c.*,
+               CASE WHEN ExtQty IS NOT NULL THEN ExtQty
+                    WHEN HistMonths >= @minh THEN HistQty / HistMonths END AS Expected,   -- 有請購月份的平均（零星採購不會被 0 稀釋）
+               CASE WHEN ExtQty IS NOT NULL THEN N'預期量表' WHEN HistMonths >= @minh THEN N'歷史平均' END AS Src
+        FROM c
+    )
+    INSERT kri.K07_Detail
+    SELECT @RunId, Material, Plant, Uom, Month, Qty, Expected, Src, HistMonths,
+           Qty / NULLIF(Expected, 0),
+           IIF(Expected > 0 AND Qty / Expected > @mult, 1, 0)
+    FROM x;
+
+    INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, Plant, Material, DocDate,
+                     MetricValue, ThresholdValue, Reason)
+    SELECT RunId, 'K07', CONCAT(Material, '-', Plant, '-', Uom, '-', FORMAT(Month, 'yyyyMM')), 'MATERIAL', Plant, Material, Month,
+           Ratio, @mult,
+           CONCAT(FORMAT(Month, 'yyyy-MM'), N' 請購 ', FORMAT(MonthQty, 'N0'), N'，是', ExpectedSource, N' ',
+                  FORMAT(ExpectedQty, 'N1'), N' 的 ', FORMAT(Ratio, 'N1'), N' 倍')
+    FROM kri.K07_Detail
+    WHERE RunId = @RunId AND IsFlagged = 1;
+
+    SELECT @Note = CONCAT(N'料號×工廠×月 ', COUNT(*), N'；用預期量表 ', COUNT(CASE WHEN ExpectedSource = N'預期量表' THEN 1 END),
+                          N'；歷史不足不判斷（過去 12 個月有請購的月份少於 ', @minh, N'）', COUNT(CASE WHEN ExpectedSource IS NULL THEN 1 END))
+    FROM kri.K07_Detail WHERE RunId = @RunId;
+END;
+GO
+
+-- ======================================================================
+-- K11 非緊急之緊急採購
+-- 緊急採購 = PO 類型在 EmergencyPoType，或收貨說明符合 EmergencyTextPattern。
+-- 下單前一天工廠庫存 > MinStockQty、或零件系統 MOU > MaxMou、或 waiting for use >= MinWaitingForUse → 不該走緊急 → 標記。
+-- ======================================================================
+IF OBJECT_ID(N'kri.K11_Detail', N'U') IS NULL
+CREATE TABLE kri.K11_Detail (
+    RunId         INT           NOT NULL,
+    PoNumber      NVARCHAR(10)  NOT NULL,
+    PoItem        NVARCHAR(5)   NOT NULL,
+    PoDate        DATE          NULL,
+    CompanyCode   NVARCHAR(4)   NULL,
+    PurchOrg      NVARCHAR(4)   NULL,
+    Plant         NVARCHAR(4)   NULL,
+    Vendor        NVARCHAR(10)  NULL,
+    Material      NVARCHAR(18)  NULL,
+    EmergencyBy   NVARCHAR(10)  NOT NULL,  -- PO類型 / 說明文字
+    StockAtPo     DECIMAL(19,4) NULL,      -- 下單前一天的工廠庫存
+    Mou           DECIMAL(19,4) NULL,
+    WaitingForUse DECIMAL(19,4) NULL,
+    AmountLocal   DECIMAL(19,4) NULL,
+    LocalCurrency NVARCHAR(5)   NULL,
+    IsFlagged     BIT           NOT NULL,
+    CONSTRAINT PK_kri_K11_Detail PRIMARY KEY (RunId, PoNumber, PoItem)
+);
+GO
+
+CREATE OR ALTER PROCEDURE kri.Run_K11
+    @RunId INT, @AsOfDate DATE, @PeriodFrom DATE, @PeriodTo DATE, @Note NVARCHAR(400) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @stock DECIMAL(19,4) = kri.Param('K11', 'MinStockQty'),
+            @mou   DECIMAL(19,4) = kri.Param('K11', 'MaxMou'),
+            @wfu   DECIMAL(19,4) = kri.Param('K11', 'MinWaitingForUse');
+
+    WITH e AS (
+        SELECT b.*, CASE WHEN p.PoType IN (SELECT ListValue FROM kri.ValueList
+                                           WHERE KriCode IN ('K11', '*') AND ListName = 'EmergencyPoType') THEN N'PO類型'
+                         WHEN EXISTS (SELECT 1 FROM prc.GoodsReceipt g JOIN kri.ValueList x
+                                        ON x.KriCode IN ('K11', '*') AND x.ListName = 'EmergencyTextPattern'
+                                       AND g.ItemText LIKE x.ListValue
+                                      WHERE g.PoNumber = b.PoNumber AND g.PoItem = b.PoItem
+                                        AND ISNULL(g.EntryDate, g.PostingDate) <= @AsOfDate) THEN N'說明文字' END AS EmergencyBy
+        FROM kri.PoBase('K11', @PeriodFrom, @PeriodTo) b
+        JOIN prc.PurchaseOrderDetail p ON p.PoNumber = b.PoNumber AND p.PoItem = b.PoItem
+        WHERE ISNULL(b.Material, '') <> ''
+    )
+    INSERT kri.K11_Detail
+    SELECT @RunId, e.PoNumber, e.PoItem, e.PoDate, e.CompanyCode, e.PurchOrg, e.Plant, e.Vendor, e.Material,
+           e.EmergencyBy, st.StockQty, u.Mou, u.WaitingForUse,
+           kri.ToLocal(e.NetValue, e.Currency, e.LocalCurrency, e.ExchangeRate), e.LocalCurrency,
+           IIF(st.StockQty > @stock OR u.Mou > @mou OR u.WaitingForUse >= @wfu, 1, 0)
+    FROM e
+    OUTER APPLY kri.StockAt(e.Material, e.Plant, DATEADD(DAY, -1, e.PoDate)) st
+    OUTER APPLY (SELECT TOP 1 Mou, WaitingForUse FROM ext.PartUsage x
+                 WHERE x.Material = e.Material AND x.Plant = e.Plant AND x.SnapshotDate <= e.PoDate
+                 ORDER BY x.SnapshotDate DESC) u
+    WHERE e.EmergencyBy IS NOT NULL;
+
+    INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, CompanyCode, PurchOrg, Plant, Vendor, Material,
+                     DocNumber, DocItem, DocDate, MetricValue, ThresholdValue, EffectLocal, LocalCurrency, Reason)
+    SELECT RunId, 'K11', CONCAT(PoNumber, '-', PoItem), 'PO', CompanyCode, PurchOrg, Plant, Vendor, Material,
+           PoNumber, PoItem, PoDate, StockAtPo, @stock, AmountLocal, LocalCurrency,
+           CONCAT(N'緊急採購（', EmergencyBy, N'）但',
+                  CONCAT_WS(N'、', IIF(StockAtPo > @stock, CONCAT(N'下單前庫存 ', FORMAT(StockAtPo, 'N0')), NULL),
+                                   IIF(Mou > @mou, CONCAT(N'MOU ', FORMAT(Mou, 'N1')), NULL),
+                                   IIF(WaitingForUse >= @wfu, CONCAT(N'待用 ', FORMAT(WaitingForUse, 'N0')), NULL)))
+    FROM kri.K11_Detail
+    WHERE RunId = @RunId AND IsFlagged = 1;
+
+    SELECT @Note = CONCAT(N'緊急採購 PO 項目 ', COUNT(*), N'；沒有庫存資料 ', COUNT(CASE WHEN StockAtPo IS NULL THEN 1 END),
+                          IIF(NOT EXISTS (SELECT 1 FROM ext.PartUsage), N'（ext.PartUsage 沒有資料，只看庫存）', N''),
+                          IIF(NOT EXISTS (SELECT 1 FROM kri.ValueList WHERE KriCode IN ('K11', '*')
+                                            AND ListName IN ('EmergencyPoType', 'EmergencyTextPattern')),
+                              N'（沒有設定緊急採購的判斷條件）', N''))
+    FROM kri.K11_Detail WHERE RunId = @RunId;
+END;
+GO
+
+-- ======================================================================
+-- 呆滯判斷（K15、K16 共用）：優先用呆滯報表快照（ext.SlowMoving，取指定日以前最新一份）；
+-- 沒有快照而且 UseSapFallback = 1 時，用最後一次異動日 + SlowDays 推估認列呆滯的日期。
+-- ======================================================================
+CREATE OR ALTER FUNCTION kri.SlowStatusAt (@KriCode NVARCHAR(10), @Material NVARCHAR(18), @Plant NVARCHAR(4), @OnDate DATE)
+RETURNS TABLE
+AS RETURN
+SELECT TOP 1 *
+FROM (
+    SELECT 1 AS Pref, N'呆滯報表' AS Source, s.SnapshotDate, s.Status, s.SlowOn, CAST(NULL AS DATE) AS LastMoveDate,
+           s.StockQty, s.StockValue
+    FROM ext.SlowMoving s
+    WHERE s.Material = @Material AND s.Plant = @Plant AND s.SnapshotDate <= @OnDate
+      AND s.SnapshotDate = (SELECT MAX(SnapshotDate) FROM ext.SlowMoving WHERE SnapshotDate <= @OnDate)
+    UNION ALL
+    SELECT 2, N'SAP推估', NULL, NULL, DATEADD(DAY, kri.Param(@KriCode, 'SlowDays'), m.LastMove), m.LastMove, NULL, NULL
+    FROM (SELECT MAX(PostingDate) AS LastMove FROM inv.MaterialMovement
+          WHERE Material = @Material AND Plant = @Plant AND PostingDate <= @OnDate) m
+    WHERE kri.Param(@KriCode, 'UseSapFallback') = 1 AND m.LastMove IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM ext.SlowMoving WHERE SnapshotDate <= @OnDate)
+) x
+ORDER BY Pref;
+GO
+
+-- ======================================================================
+-- K15 已屆呆滯之警示
+-- 基準日有庫存、還沒認列呆滯、WarnDays 天內就會認列的料號 × 工廠 → 標記（提前警示）。
+-- ======================================================================
+IF OBJECT_ID(N'kri.K15_Detail', N'U') IS NULL
+CREATE TABLE kri.K15_Detail (
+    RunId        INT           NOT NULL,
+    Material     NVARCHAR(18)  NOT NULL,
+    Plant        NVARCHAR(4)   NOT NULL,
+    Source       NVARCHAR(10)  NOT NULL,   -- 呆滯報表 / SAP推估
+    SnapshotDate DATE          NULL,
+    Status       NVARCHAR(20)  NULL,
+    LastMoveDate DATE          NULL,
+    SlowOn       DATE          NULL,
+    DaysToSlow   INT           NULL,
+    StockQty     DECIMAL(19,4) NULL,
+    StockValue   DECIMAL(19,4) NULL,
+    IsFlagged    BIT           NOT NULL,
+    CONSTRAINT PK_kri_K15_Detail PRIMARY KEY (RunId, Material, Plant)
+);
+GO
+
+CREATE OR ALTER PROCEDURE kri.Run_K15
+    @RunId INT, @AsOfDate DATE, @PeriodFrom DATE, @PeriodTo DATE, @Note NVARCHAR(400) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @warn INT = kri.Param('K15', 'WarnDays'),
+            @slow INT = kri.Param('K15', 'SlowDays'),
+            @fb   INT = kri.Param('K15', 'UseSapFallback');
+
+    WITH k AS (         -- 有呆滯報表用報表的料號；沒有用庫存表裡有庫存的料號
+        SELECT Material, Plant FROM ext.SlowMoving
+        WHERE SnapshotDate = (SELECT MAX(SnapshotDate) FROM ext.SlowMoving WHERE SnapshotDate <= @AsOfDate)
+        UNION
+        SELECT Material, Plant FROM inv.InventoryBalance
+        WHERE NOT EXISTS (SELECT 1 FROM ext.SlowMoving WHERE SnapshotDate <= @AsOfDate)
+        GROUP BY Material, Plant HAVING SUM(ISNULL(StockQty, 0)) > 0
+    )
+    INSERT kri.K15_Detail
+    SELECT @RunId, k.Material, k.Plant, s.Source, s.SnapshotDate, s.Status, s.LastMoveDate, s.SlowOn,
+           DATEDIFF(DAY, @AsOfDate, s.SlowOn),
+           COALESCE(s.StockQty, ib.Qty), COALESCE(s.StockValue, ib.Value),
+           IIF(DATEDIFF(DAY, @AsOfDate, s.SlowOn) BETWEEN 0 AND @warn, 1, 0)
+    FROM k
+    CROSS APPLY kri.SlowStatusAt('K15', k.Material, k.Plant, @AsOfDate) s
+    OUTER APPLY (SELECT SUM(StockQty) AS Qty, SUM(StockValue) AS Value FROM inv.InventoryBalance i
+                 WHERE i.Material = k.Material AND i.Plant = k.Plant) ib;
+
+    INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, Plant, Material, DocDate,
+                     MetricValue, ThresholdValue, EffectLocal, Reason)
+    SELECT RunId, 'K15', CONCAT(Material, '-', Plant), 'MATERIAL', Plant, Material, SlowOn,
+           DaysToSlow, @warn, StockValue,
+           CONCAT(N'再 ', DaysToSlow, N' 天（', SlowOn, N'）認列呆滯；庫存 ', FORMAT(StockQty, 'N0'),
+                  IIF(Source = N'SAP推估', CONCAT(N'（最後異動 ', LastMoveDate, N'，推估）'), N''))
+    FROM kri.K15_Detail
+    WHERE RunId = @RunId AND IsFlagged = 1;
+
+    SELECT @Note = CONCAT(N'料號×工廠 ', COUNT(*), N'；來源 ', ISNULL(MAX(Source), N'—'),
+                          N'；已呆滯 ', COUNT(CASE WHEN DaysToSlow < 0 THEN 1 END))
+    FROM kri.K15_Detail WHERE RunId = @RunId;
+END;
+GO
+
+-- ======================================================================
+-- K16 呆滯料仍進行採購
+-- PO 下單時料號已呆滯（呆滯報表的認列日 <= 下單日，或狀態在 SlowStatus；沒有報表時用最後異動 + SlowDays 推估）
+-- 而且下單前有庫存。同料號 × 工廠最近 3 個月有幾個月這樣下單 >= MinConsecMonths → 標記。
+-- ======================================================================
+IF OBJECT_ID(N'kri.K16_Detail', N'U') IS NULL
+CREATE TABLE kri.K16_Detail (
+    RunId         INT           NOT NULL,
+    PoNumber      NVARCHAR(10)  NOT NULL,
+    PoItem        NVARCHAR(5)   NOT NULL,
+    PoDate        DATE          NULL,
+    CompanyCode   NVARCHAR(4)   NULL,
+    PurchOrg      NVARCHAR(4)   NULL,
+    Plant         NVARCHAR(4)   NULL,
+    Vendor        NVARCHAR(10)  NULL,
+    Material      NVARCHAR(18)  NULL,
+    Source        NVARCHAR(10)  NOT NULL,
+    SlowStatus    NVARCHAR(20)  NULL,
+    SlowOn        DATE          NULL,
+    LastMoveDate  DATE          NULL,
+    StockAtPo     DECIMAL(19,4) NULL,
+    SlowMonths    INT           NULL,      -- 最近 3 個月（含當月）有呆滯仍下單的月數
+    AmountLocal   DECIMAL(19,4) NULL,
+    LocalCurrency NVARCHAR(5)   NULL,
+    IsFlagged     BIT           NOT NULL,
+    CONSTRAINT PK_kri_K16_Detail PRIMARY KEY (RunId, PoNumber, PoItem)
+);
+GO
+
+CREATE OR ALTER PROCEDURE kri.Run_K16
+    @RunId INT, @AsOfDate DATE, @PeriodFrom DATE, @PeriodTo DATE, @Note NVARCHAR(400) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @minm INT = kri.Param('K16', 'MinConsecMonths'),
+            @slow INT = kri.Param('K16', 'SlowDays'),
+            @fb   INT = kri.Param('K16', 'UseSapFallback');
+
+    INSERT kri.K16_Detail
+    SELECT @RunId, b.PoNumber, b.PoItem, b.PoDate, b.CompanyCode, b.PurchOrg, b.Plant, b.Vendor, b.Material,
+           s.Source, s.Status, s.SlowOn, s.LastMoveDate, st.StockQty, NULL,
+           kri.ToLocal(b.NetValue, b.Currency, b.LocalCurrency, b.ExchangeRate), b.LocalCurrency, 0
+    FROM kri.PoBase('K16', DATEADD(MONTH, -2, @PeriodFrom), @PeriodTo) b      -- 往前多抓兩個月算連續月數
+    CROSS APPLY kri.SlowStatusAt('K16', b.Material, b.Plant, DATEADD(DAY, -1, b.PoDate)) s
+    OUTER APPLY kri.StockAt(b.Material, b.Plant, DATEADD(DAY, -1, b.PoDate)) st
+    WHERE ISNULL(b.Material, '') <> ''
+      AND (s.SlowOn <= b.PoDate
+           OR s.Status IN (SELECT ListValue FROM kri.ValueList WHERE KriCode IN ('K16', '*') AND ListName = 'SlowStatus'))
+      AND (s.Source = N'呆滯報表' OR st.StockQty > 0);
+
+    UPDATE d SET SlowMonths = m.n
+    FROM kri.K16_Detail d
+    CROSS APPLY (SELECT COUNT(DISTINCT DATEFROMPARTS(YEAR(x.PoDate), MONTH(x.PoDate), 1)) AS n
+                 FROM kri.K16_Detail x
+                 WHERE x.RunId = d.RunId AND x.Material = d.Material AND x.Plant = d.Plant
+                   AND x.PoDate >= DATEADD(MONTH, -2, DATEFROMPARTS(YEAR(d.PoDate), MONTH(d.PoDate), 1))
+                   AND x.PoDate <= d.PoDate) m
+    WHERE d.RunId = @RunId;
+
+    DELETE kri.K16_Detail WHERE RunId = @RunId AND PoDate < @PeriodFrom;   -- 多抓的只用來算月數
+    UPDATE kri.K16_Detail SET IsFlagged = 1 WHERE RunId = @RunId AND SlowMonths >= @minm;
+
+    INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, CompanyCode, PurchOrg, Plant, Vendor, Material,
+                     DocNumber, DocItem, DocDate, MetricValue, ThresholdValue, EffectLocal, LocalCurrency, Reason)
+    SELECT RunId, 'K16', CONCAT(PoNumber, '-', PoItem), 'PO', CompanyCode, PurchOrg, Plant, Vendor, Material,
+           PoNumber, PoItem, PoDate, SlowMonths, @minm, AmountLocal, LocalCurrency,
+           CONCAT(N'料號 ', IIF(Source = N'SAP推估', CONCAT(N'最後異動 ', LastMoveDate, N'、推估 ', SlowOn, N' 已呆滯'),
+                                CONCAT(N'呆滯報表 ', ISNULL(SlowStatus, N''), N' ', ISNULL(CONVERT(NVARCHAR(10), SlowOn), N''))),
+                  N'，仍下單；最近 3 個月有 ', SlowMonths, N' 個月這樣下單')
+    FROM kri.K16_Detail
+    WHERE RunId = @RunId AND IsFlagged = 1;
+
+    SELECT @Note = CONCAT(N'呆滯仍下單的 PO 項目 ', COUNT(*), N'；來源 ', ISNULL(MAX(Source), N'—'))
+    FROM kri.K16_Detail WHERE RunId = @RunId;
+END;
+GO
+
+-- ======================================================================
+-- K17 重大工程未簽合約
+-- 工程類 PO（PO 類型 ConstructionPoType、物料群組 ConstructionMaterialGroup、總帳科目 ConstructionGlPattern 任一），
+-- 整張 PO 本幣金額 >= MajorAmount（本幣在 AmountCurrency 時），沒有合約（PO 參照的 SAP 合約、或 ext.Contract）
+-- 或合約簽約日晚於 PO → 標記。
+-- ======================================================================
+IF OBJECT_ID(N'kri.K17_Detail', N'U') IS NULL
+CREATE TABLE kri.K17_Detail (
+    RunId            INT           NOT NULL,
+    PoNumber         NVARCHAR(10)  NOT NULL,
+    PoDate           DATE          NULL,
+    CompanyCode      NVARCHAR(4)   NULL,
+    PurchOrg         NVARCHAR(4)   NULL,
+    Vendor           NVARCHAR(10)  NULL,
+    VendorName       NVARCHAR(80)  NULL,
+    PoAmountLocal    DECIMAL(19,4) NULL,
+    LocalCurrency    NVARCHAR(5)   NULL,
+    SapContract      NVARCHAR(10)  NULL,
+    ExtContract      NVARCHAR(30)  NULL,
+    ContractSignedOn DATE          NULL,
+    Status           NVARCHAR(10)  NOT NULL,  -- 有合約 / 合約晚於PO / 無合約
+    IsFlagged        BIT           NOT NULL,
+    CONSTRAINT PK_kri_K17_Detail PRIMARY KEY (RunId, PoNumber)
+);
+GO
+
+CREATE OR ALTER PROCEDURE kri.Run_K17
+    @RunId INT, @AsOfDate DATE, @PeriodFrom DATE, @PeriodTo DATE, @Note NVARCHAR(400) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @major DECIMAL(19,4) = kri.Param('K17', 'MajorAmount');
+
+    WITH b AS (
+        SELECT b.PoNumber, b.PoDate, b.CompanyCode, b.PurchOrg, b.Vendor, b.VendorName, b.LocalCurrency,
+               kri.ToLocal(b.NetValue, b.Currency, b.LocalCurrency, b.ExchangeRate) AS AmountLocal,
+               NULLIF(p.Contract, '') AS Contract,
+               IIF(p.PoType IN (SELECT ListValue FROM kri.ValueList WHERE KriCode IN ('K17', '*') AND ListName = 'ConstructionPoType')
+                   OR p.MaterialGroup IN (SELECT ListValue FROM kri.ValueList WHERE KriCode IN ('K17', '*') AND ListName = 'ConstructionMaterialGroup')
+                   OR EXISTS (SELECT 1 FROM kri.ValueList x WHERE x.KriCode IN ('K17', '*') AND x.ListName = 'ConstructionGlPattern'
+                                AND p.GlAccount LIKE x.ListValue), 1, 0) AS IsConstruction
+        FROM kri.PoBase('K17', @PeriodFrom, @PeriodTo) b
+        JOIN prc.PurchaseOrderDetail p ON p.PoNumber = b.PoNumber AND p.PoItem = b.PoItem
+    ), po AS (          -- 有任一工程類項目的 PO，整張金額
+        SELECT PoNumber, MIN(PoDate) AS PoDate, MAX(CompanyCode) AS CompanyCode, MAX(PurchOrg) AS PurchOrg,
+               MAX(Vendor) AS Vendor, MAX(VendorName) AS VendorName, MAX(LocalCurrency) AS LocalCurrency,
+               IIF(COUNT(*) = COUNT(AmountLocal), SUM(AmountLocal), NULL) AS Amount, MAX(Contract) AS Contract
+        FROM b GROUP BY PoNumber HAVING MAX(IsConstruction) = 1
+    ), c AS (
+        SELECT po.*, x.ContractNo, x.SignedOn
+        FROM po
+        OUTER APPLY (SELECT TOP 1 ContractNo, SignedOn FROM ext.Contract k
+                     WHERE (k.PoNumber = po.PoNumber
+                            OR (k.PoNumber IS NULL AND k.Vendor = po.Vendor
+                                AND po.PoDate BETWEEN ISNULL(k.ValidFrom, '1900-01-01') AND ISNULL(k.ValidTo, '9999-12-31')))
+                       AND ISNULL(k.SignedOn, '1900-01-01') <= @AsOfDate
+                     ORDER BY IIF(k.PoNumber IS NULL, 1, 0), k.SignedOn) x
+        WHERE po.Amount >= @major
+          AND po.LocalCurrency IN (SELECT ListValue FROM kri.ValueList WHERE KriCode IN ('K17', '*') AND ListName = 'AmountCurrency')
+    )
+    INSERT kri.K17_Detail
+    SELECT @RunId, PoNumber, PoDate, CompanyCode, PurchOrg, Vendor, VendorName, Amount, LocalCurrency, Contract,
+           ContractNo, SignedOn, s.Status, IIF(s.Status = N'有合約', 0, 1)
+    FROM c
+    CROSS APPLY (SELECT CASE WHEN Contract IS NOT NULL OR (ContractNo IS NOT NULL AND ISNULL(SignedOn, PoDate) <= PoDate) THEN N'有合約'
+                             WHEN ContractNo IS NOT NULL THEN N'合約晚於PO'
+                             ELSE N'無合約' END AS Status) s;
+
+    INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, CompanyCode, PurchOrg, Vendor, DocNumber, DocDate,
+                     MetricValue, ThresholdValue, EffectLocal, LocalCurrency, Reason)
+    SELECT RunId, 'K17', PoNumber, 'PO', CompanyCode, PurchOrg, Vendor, PoNumber, PoDate,
+           PoAmountLocal, @major, PoAmountLocal, LocalCurrency,
+           IIF(Status = N'無合約', CONCAT(N'工程 PO ', FORMAT(PoAmountLocal, 'N0'), N' 沒有合約'),
+               CONCAT(N'工程 PO ', FORMAT(PoAmountLocal, 'N0'), N'，合約 ', ExtContract, N' 在 ', ContractSignedOn,
+                      N' 才簽（PO ', PoDate, N'）'))
+    FROM kri.K17_Detail
+    WHERE RunId = @RunId AND IsFlagged = 1;
+
+    IF NOT EXISTS (SELECT 1 FROM kri.ValueList WHERE KriCode IN ('K17', '*')
+                     AND ListName IN ('ConstructionPoType', 'ConstructionMaterialGroup', 'ConstructionGlPattern'))
+        SET @Note = N'沒有設定工程類 PO 的判斷條件（ConstructionPoType／MaterialGroup／GlPattern），這題不會標記任何資料';
+    ELSE
+        SELECT @Note = CONCAT(N'重大工程 PO ', COUNT(*), N'；無合約 ', COUNT(CASE WHEN Status = N'無合約' THEN 1 END),
+                              N'、合約晚於 PO ', COUNT(CASE WHEN Status = N'合約晚於PO' THEN 1 END))
+        FROM kri.K17_Detail WHERE RunId = @RunId;
+END;
+GO
+
+-- ======================================================================
+-- K20 驗退後未及時處理
+-- 轉入待退倉（ReturnStorLoc）的異動（ReturnTransferType，借方），依先進先出配對同料號 × 工廠 × 倉 × 批號之後的出倉（貸方），
+-- 全部出清的日期 = 處理日；停留超過 MaxOpenDays 天（未處理的算到基準日）→ 標記。
+-- 待退倉在資料起始日以前的餘額當 0。
+-- ======================================================================
+IF OBJECT_ID(N'kri.K20_Detail', N'U') IS NULL
+CREATE TABLE kri.K20_Detail (
+    RunId           INT           NOT NULL,
+    MaterialDoc     NVARCHAR(10)  NOT NULL,
+    MaterialDocYear NVARCHAR(4)   NOT NULL,
+    MaterialDocItem NVARCHAR(4)   NOT NULL,
+    PostingDate     DATE          NULL,
+    Material        NVARCHAR(18)  NULL,
+    Plant           NVARCHAR(4)   NULL,
+    StorLoc         NVARCHAR(4)   NULL,
+    Batch           NVARCHAR(10)  NULL,
+    Quantity        DECIMAL(19,4) NULL,
+    BaseUom         NVARCHAR(3)   NULL,
+    ClearedOn       DATE          NULL,      -- NULL = 基準日還沒處理完
+    OpenDays        INT           NULL,
+    AmountLocal     DECIMAL(19,4) NULL,
+    IsFlagged       BIT           NOT NULL,
+    CONSTRAINT PK_kri_K20_Detail PRIMARY KEY (RunId, MaterialDoc, MaterialDocYear, MaterialDocItem)
+);
+GO
+
+CREATE OR ALTER PROCEDURE kri.Run_K20
+    @RunId INT, @AsOfDate DATE, @PeriodFrom DATE, @PeriodTo DATE, @Note NVARCHAR(400) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @days INT = kri.Param('K20', 'MaxOpenDays');
+
+    SELECT m.MaterialDoc, m.MaterialDocYear, m.MaterialDocItem, m.PostingDate, m.Material, m.Plant, m.StorLoc,
+           ISNULL(m.Batch, '') AS Batch, m.Quantity, m.BaseUom, m.LocalAmount, m.MovementType, m.DebitCreditInd
+    INTO #f
+    FROM inv.MaterialMovement m
+    WHERE m.StorLoc IN (SELECT ListValue FROM kri.ValueList WHERE KriCode IN ('K20', '*') AND ListName = 'ReturnStorLoc')
+      AND m.PostingDate <= @AsOfDate AND m.Quantity > 0;
+
+    WITH i AS (         -- 進待退倉：累計進量
+        SELECT f.*, SUM(Quantity) OVER (PARTITION BY Material, Plant, StorLoc, Batch
+                                        ORDER BY PostingDate, MaterialDoc, MaterialDocItem ROWS UNBOUNDED PRECEDING) AS CumIn
+        FROM #f f WHERE DebitCreditInd = 'S'
+    ), o AS (           -- 出待退倉：累計出量
+        SELECT f.Material, f.Plant, f.StorLoc, f.Batch, f.PostingDate,
+               SUM(Quantity) OVER (PARTITION BY Material, Plant, StorLoc, Batch
+                                   ORDER BY PostingDate, MaterialDoc, MaterialDocItem ROWS UNBOUNDED PRECEDING) AS CumOut
+        FROM #f f WHERE DebitCreditInd = 'H'
+    )
+    INSERT kri.K20_Detail
+    SELECT @RunId, i.MaterialDoc, i.MaterialDocYear, i.MaterialDocItem, i.PostingDate, i.Material, i.Plant, i.StorLoc,
+           NULLIF(i.Batch, ''), i.Quantity, i.BaseUom, c.ClearedOn,
+           DATEDIFF(DAY, i.PostingDate, ISNULL(c.ClearedOn, @AsOfDate)), i.LocalAmount,
+           IIF(DATEDIFF(DAY, i.PostingDate, ISNULL(c.ClearedOn, @AsOfDate)) > @days, 1, 0)
+    FROM i
+    OUTER APPLY (SELECT MIN(o.PostingDate) AS ClearedOn FROM o
+                 WHERE o.Material = i.Material AND o.Plant = i.Plant AND o.StorLoc = i.StorLoc AND o.Batch = i.Batch
+                   AND o.CumOut >= i.CumIn AND o.PostingDate >= i.PostingDate) c
+    WHERE i.PostingDate BETWEEN @PeriodFrom AND @PeriodTo
+      AND i.MovementType IN (SELECT ListValue FROM kri.ValueList WHERE KriCode IN ('K20', '*') AND ListName = 'ReturnTransferType');
+
+    INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, Plant, Material, DocNumber, DocItem, DocDate,
+                     MetricValue, ThresholdValue, EffectLocal, Reason)
+    SELECT RunId, 'K20', CONCAT(MaterialDoc, '-', MaterialDocYear, '-', MaterialDocItem), 'MOVEMENT', Plant, Material,
+           MaterialDoc, MaterialDocItem, PostingDate, OpenDays, @days, AmountLocal,
+           CONCAT(N'轉入待退倉 ', StorLoc, N' 後 ', OpenDays, N' 天',
+                  IIF(ClearedOn IS NULL, N'仍未處理', CONCAT(N'才處理完（', ClearedOn, N'）')))
+    FROM kri.K20_Detail
+    WHERE RunId = @RunId AND IsFlagged = 1;
+
+    IF NOT EXISTS (SELECT 1 FROM kri.ValueList WHERE KriCode IN ('K20', '*') AND ListName = 'ReturnStorLoc')
+        SET @Note = N'沒有設定待退倉（ReturnStorLoc），這題不會標記任何資料';
+    ELSE
+        SELECT @Note = CONCAT(N'轉入待退倉 ', COUNT(*), N' 筆；基準日仍未處理 ', COUNT(CASE WHEN ClearedOn IS NULL THEN 1 END))
+        FROM kri.K20_Detail WHERE RunId = @RunId;
 END;
 GO

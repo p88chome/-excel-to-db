@@ -369,7 +369,7 @@ ins("mst.PurchasingCondA017", [
 ])
 ins("prc.PurchaseOrderDetail", [
     po("4630000001", Vendor="V60", Material="M80", NetPrice=13, PoDate="2025-07-01"),   # 多付 3 × 100
-    po("4600000001", Vendor="V61", Material="M85", NetPrice=20, PoDate="2025-05-01", GrQty=40),  # 未收 60 → 標記
+    po("4600000001", Vendor="V61", Material="M85", NetPrice=20, PoDate="2025-05-01", GrQty=100),  # 基準日時未收 60 → 標記
     po("4600000002", Vendor="V61", Material="M85", NetPrice=20, PoDate="2025-05-02", DelivComplInd="X"),
     po("4600000003", Vendor="V61", Material="M85", NetPrice=15, PoDate="2025-09-01"),   # 降價後才下單
 ])
@@ -406,6 +406,108 @@ ins("mst.PurchasingCondA018", [
 ])
 
 
+# ---------------------------------------------------------------- K02
+def vend(v, **kw):
+    return dict(dict(Vendor=v, CompanyCode="1000", PurchOrg="TW01"), **kw)
+
+
+ins("mst.Vendor", [
+    vend("V80", TaxNumber="12345678", CentralPurchBlock="X"),        # 凍結
+    vend("V81", TaxNumber="12345678"),                               # 同統編、期間內有 PO → 標記
+    vend("V82", Phone="02-1234-5678"), vend("V83", Phone="0212345678"),   # 同電話、買同料號 → 標記
+    vend("V84", Address="No. 1, Test Rd."), vend("V85", Address="NO1 TEST RD"),   # 同地址、沒交易
+])
+ins("ext.VendorRelation", [dict(VendorA="V85", VendorB="V84", RelationType="同代表人")])
+ins("prc.PurchaseOrderDetail", [
+    po("4670000001", Vendor="V81", NetPrice=10, PoDate="2025-04-01"),
+    po("4670000002", Vendor="V82", Material="M100", NetPrice=10, PoDate="2025-04-01"),
+    po("4670000003", Vendor="V83", Material="M100", NetPrice=10, PoDate="2025-05-01"),
+])
+
+# ---------------------------------------------------------------- K05
+ins("mst.Vendor", [vend("V91", TaxNumber="87654321")])
+ins("ext.VendorCapital", [dict(Vendor="V90", Capital=1000000, Currency="TWD"),
+                          dict(TaxNumber="87654321", Capital=10000000, Currency="TWD")])
+ins("prc.PurchaseOrderDetail", [
+    po("4680000001", Vendor="V90", NetPrice=15000, PoDate="2025-06-01"),   # 未收 150 萬 / 資本 100 萬 → 標記
+    po("4680000002", Vendor="V91", NetPrice=15000, PoDate="2025-06-01"),   # 用統編對到資本 1000 萬
+    po("4680000003", Vendor="V92", NetPrice=15000, PoDate="2025-06-01"),   # 查不到資本額
+])
+
+# ---------------------------------------------------------------- 庫存、異動（K06、K11、K15、K16、K20）
+def mm(doc, date, mvt, mat, qty, dc, sloc="0001", item="0001"):
+    return dict(MaterialDoc=doc, MaterialDocYear=date[:4], MaterialDocItem=item, PostingDate=date, MovementType=mvt,
+                Material=mat, Plant="1100", StorLoc=sloc, Quantity=qty, DebitCreditInd=dc, BaseUom="EA")
+
+
+def ib(mat, qty, value=None):
+    return dict(Material=mat, Plant="1100", StorLoc="0001", StockQty=qty, StockValue=value, SnapshotDate="2025-12-31")
+
+
+ins("inv.InventoryBalance", [ib("M110", 1000), ib("M111", 50), ib("M112", 0), ib("M130", 20), ib("M131", 0),
+                             ib("M132", 0), ib("M140", 10, 500), ib("M142", 10, 300)])
+months = [f"{y}-{m:02d}-01" for y in (2024, 2025) for m in range(1, 13)][6:]          # 2024-07 ～ 2025-12
+ins("inv.MaterialMovement",
+    [mm(f"49100{i:05d}", d, "261", "M110", 100, "H") for i, d in enumerate(months)]           # 每月耗用 100
+    + [mm(f"49200{i:05d}", d, "261", "M112", 200, "H") for i, d in enumerate(months[:12])]    # 耗用到 2025-06
+    + [mm("4930000001", "2025-01-10", "101", "M140", 10, "S"),     # 最後異動 → 2026-01-10 呆滯
+       mm("4930000002", "2024-01-05", "101", "M142", 10, "S")])    # 2025-01-04 起呆滯
+ins("prc.PurchaseRequisition", [
+    dict(PrNumber="1000000101", PrItem="00010", PrDate="2025-06-15", Material="M110", Plant="1100", ReqQty=500, ValPrice=1, Currency="TWD"),
+    dict(PrNumber="1000000102", PrItem="00010", PrDate="2025-06-15", Material="M111", Plant="1100", ReqQty=10, ValPrice=1, Currency="TWD"),
+    dict(PrNumber="1000000103", PrItem="00010", PrDate="2025-06-20", Material="M112", Plant="1100", ReqQty=10, ValPrice=1, Currency="TWD"),
+])
+
+# ---------------------------------------------------------------- K07
+ins("prc.PurchaseRequisition",
+    [dict(PrNumber=f"10000002{m:02d}", PrItem="00010", PrDate=f"2025-{m:02d}-05", Material="M120", Plant="1100",
+          ReqQty=10 if m < 7 else 100, Uom="EA") for m in range(1, 8)]                        # 7 月暴增 10 倍
+    + [dict(PrNumber="1000000301", PrItem="00010", PrDate="2025-08-05", Material="M121", Plant="1100", ReqQty=100, Uom="EA")])
+ins("ext.ExpectedDemand", [dict(Material="M121", Plant="1100", Month="2025-08-01", Qty=1000)])
+
+# ---------------------------------------------------------------- K11
+cur.execute("INSERT kri.ValueList (KriCode, ListName, ListValue) VALUES ('K11', 'EmergencyPoType', 'ZEM')")
+ins("ext.PartUsage", [dict(Material="M131", Plant="1100", SnapshotDate="2025-01-01", Mou=5, WaitingForUse=0),
+                      dict(Material="M132", Plant="1100", SnapshotDate="2025-01-01", Mou=1, WaitingForUse=0)])
+ins("prc.PurchaseOrderDetail", [
+    po("4640000001", PoType="ZEM", Material="M130", NetPrice=10, PoDate="2025-05-01"),   # 有庫存 20 → 標記
+    po("4640000002", PoType="ZEM", Material="M131", NetPrice=10, PoDate="2025-05-01"),   # MOU 5 → 標記
+    po("4640000003", PoType="ZEM", Material="M132", NetPrice=10, PoDate="2025-05-01"),   # 真的急
+    po("4640000004", Material="M130", NetPrice=10, PoDate="2025-05-01"),                 # 不是緊急採購
+])
+
+# ---------------------------------------------------------------- K16
+ins("prc.PurchaseOrderDetail", [
+    po("4650000001", Material="M142", NetPrice=10, PoDate="2025-06-01"),   # 呆滯、有庫存仍下單 → 標記
+    po("4650000002", Material="M140", NetPrice=10, PoDate="2025-06-01"),   # 還沒呆滯
+])
+
+# ---------------------------------------------------------------- K17
+cur.execute("INSERT kri.ValueList (KriCode, ListName, ListValue) VALUES ('K17', 'ConstructionPoType', 'ZCON')")
+ins("prc.PurchaseOrderDetail", [
+    po("4660000001", PoType="ZCON", Vendor="V95", NetPrice=200000, PoDate="2025-03-01"),   # 2000 萬、沒合約 → 標記
+    po("4660000002", PoType="ZCON", Vendor="V96", NetPrice=200000, PoDate="2025-03-01"),   # 合約對 PO
+    po("4660000003", PoType="ZCON", Vendor="V97", NetPrice=200000, PoDate="2025-03-01"),   # 合約晚於 PO → 標記
+    po("4660000004", PoType="ZCON", Vendor="V95", NetPrice=10, PoDate="2025-03-01"),       # 金額小
+    po("4660000005", PoType="ZCON", Vendor="V98", NetPrice=200000, PoDate="2025-03-01", Contract="4600000099"),
+])
+ins("ext.Contract", [
+    dict(ContractNo="C-1", PoNumber="4660000002", Vendor="V96", SignedOn="2025-01-01"),
+    dict(ContractNo="C-2", Vendor="V97", SignedOn="2025-05-01", ValidFrom="2025-01-01", ValidTo="2025-12-31"),
+])
+
+# ---------------------------------------------------------------- K20
+cur.execute("INSERT kri.ValueList (KriCode, ListName, ListValue) VALUES ('K20', 'ReturnStorLoc', 'R001')")
+ins("inv.MaterialMovement", [
+    mm("4940000001", "2025-03-01", "311", "M150", 10, "S", "R001"), mm("4940000001", "2025-03-01", "311", "M150", 10, "H", item="0002"),
+    mm("4940000002", "2025-03-10", "122", "M150", 10, "H", "R001"),          # 9 天處理完
+    mm("4940000003", "2025-05-01", "311", "M151", 10, "S", "R001"),
+    mm("4940000004", "2025-05-20", "122", "M151", 4, "H", "R001"),
+    mm("4940000005", "2025-07-15", "551", "M151", 6, "H", "R001"),           # 75 天才處理完 → 標記
+    mm("4940000006", "2025-11-01", "311", "M152", 5, "S", "R001"),           # 到基準日 60 天還沒處理 → 標記
+])
+
+
 # ---------------------------------------------------------------- 驗證
 def one(sql, *a):
     return cur.execute(sql, *a).fetchall()
@@ -429,7 +531,8 @@ def run(only=None):
 res, rid = run()
 for code, r in res.items():
     print(f"  {code} {r[1]:<14} 明細 {r[4]}  標記 {r[5]}  {r[6]}  {r[7] or ''}")
-ALL = ("K01", "K03", "K04", "K08", "K09", "K10", "K12", "K13", "K14", "K18", "K19", "K21", "K22", "K23", "K24")
+ALL = ("K01", "K02", "K03", "K04", "K05", "K06", "K07", "K08", "K09", "K10", "K11", "K12", "K13", "K14", "K15",
+       "K16", "K17", "K18", "K19", "K20", "K21", "K22", "K23", "K24")
 check("每題都成功", sorted((c, r[6]) for c, r in res.items()), [(c, "OK") for c in ALL])
 
 # K14
@@ -629,11 +732,67 @@ check("K24 比別家均價高 30% → 標記", (x.DormantDays, float(x.RefUnitPr
       (639, 10.0, True, 300.0))
 check("K24 沒有別家可比：留在明細、不標記", (d["4610000004"].RefUnitPrice, d["4610000004"].IsFlagged), (None, False))
 
+# K02
+d = {(x.VendorA, x.VendorB, x.MatchType): x for x in one("SELECT * FROM kri.K02_Detail WHERE RunId = ?", rid)}
+check("K02 配對：統編、電話（去符號）、地址（去空白標點）、商工登記", sorted(d),
+      [("V80", "V81", "TaxNumber"), ("V82", "V83", "Phone"), ("V84", "V85", "Address"), ("V84", "V85", "商工:同代表人")])
+check("K02 凍結廠商的關聯廠商仍交易、關聯廠商買同料號 → 標記",
+      (d[("V80", "V81", "TaxNumber")].Scenario, d[("V82", "V83", "Phone")].Scenario, d[("V84", "V85", "Address")].IsFlagged),
+      ("凍結廠商關聯交易", "關聯廠商同料號", False))
+
+# K05
+d = {x.Vendor: x for x in one("SELECT * FROM kri.K05_Detail WHERE RunId = ?", rid)}
+check("K05 未收 150 萬 / 資本 100 萬 → 標記", (float(d["V90"].Ratio), d["V90"].IsFlagged), (1.5, True))
+check("K05 用統編對到資本額、沒超過；查不到的列無資本額",
+      (float(d["V91"].Capital), d["V91"].IsFlagged, d["V92"].Status), (10000000.0, False, "無資本額"))
+
+# K06
+d = {x.PrNumber: x for x in one("SELECT * FROM kri.K06_Detail WHERE RunId = ?", rid)}
+x = d["1000000101"]
+check("K06 回推請購當天庫存 1600、月耗用 100 → 可用 16 個月 → 標記",
+      (float(x.StockAtPr), float(x.AvgMonthlyUse), float(x.CoverageMonths), x.IsFlagged), (1600.0, 100.0, 16.0, True))
+check("K06 沒有耗用但有庫存 → 標記；庫存用完的不標", (d["1000000102"].Status, d["1000000102"].IsFlagged,
+      float(d["1000000103"].StockAtPr), d["1000000103"].IsFlagged), ("無耗用", True, 0.0, False))
+
+# K07
+d = {(x.Material, str(x.Month)): x for x in one("SELECT * FROM kri.K07_Detail WHERE RunId = ?", rid)}
+check("K07 只有 7 月暴增被標記", [k[1] for k in sorted(d) if k[0] == "M120" and d[k].IsFlagged], ["2025-07-01"])
+check("K07 有預期量表用表：100 / 1000 不標記", (d[("M121", "2025-08-01")].ExpectedSource, d[("M121", "2025-08-01")].IsFlagged),
+      ("預期量表", False))
+
+# K11
+d = {x.PoNumber: x for x in one("SELECT * FROM kri.K11_Detail WHERE RunId = ?", rid)}
+check("K11 只看緊急採購；有庫存或 MOU 高 → 標記", sorted((k, x.IsFlagged) for k, x in d.items()),
+      [("4640000001", True), ("4640000002", True), ("4640000003", False)])
+
+# K15
+d = {x.Material: x for x in one("SELECT * FROM kri.K15_Detail WHERE RunId = ?", rid)}
+check("K15 沒有呆滯報表：最後異動推估，10 天內呆滯 → 標記", (d["M140"].Source, d["M140"].DaysToSlow, d["M140"].IsFlagged),
+      ("SAP推估", 10, True))
+check("K15 已呆滯、還早的不標記", (d["M142"].IsFlagged, d["M110"].IsFlagged), (False, False))
+
+# K16
+d = {x.PoNumber: x for x in one("SELECT * FROM kri.K16_Detail WHERE RunId = ?", rid)}
+check("K16 呆滯、有庫存仍下單 → 標記", sorted((k, x.IsFlagged) for k, x in d.items()), [("4650000001", True)])
+
+# K17
+d = {x.PoNumber: x for x in one("SELECT * FROM kri.K17_Detail WHERE RunId = ?", rid)}
+check("K17 重大工程 PO 的合約狀態", sorted((k, x.Status, x.IsFlagged) for k, x in d.items()),
+      [("4660000001", "無合約", True), ("4660000002", "有合約", False), ("4660000003", "合約晚於PO", True),
+       ("4660000005", "有合約", False)])
+
+# K20
+d = {x.Material: x for x in one("SELECT * FROM kri.K20_Detail WHERE RunId = ?", rid)}
+check("K20 先進先出：9 天處理完、75 天才處理完、60 天還沒處理",
+      [(m, d[m].OpenDays, d[m].IsFlagged) for m in ("M150", "M151", "M152")],
+      [("M150", 9, False), ("M151", 75, True), ("M152", 60, True)])
+
 # Flag 與 view
 r = one("SELECT KriCode, COUNT(*) FROM kri.vFlagLatest GROUP BY KriCode ORDER BY KriCode")
 check("vFlagLatest 各題標記數", [(x[0], x[1]) for x in r],
-      [("K01", 5), ("K03", 5), ("K04", 5), ("K08", 2), ("K09", 1), ("K10", 5), ("K12", 2), ("K13", 1),
-       ("K14", 4), ("K18", 1), ("K19", 5), ("K21", 2), ("K22", 3), ("K23", 1), ("K24", 1)])
+      [("K01", 5), ("K02", 2), ("K03", 5), ("K04", 5), ("K05", 1), ("K06", 2), ("K07", 1), ("K08", 2), ("K09", 1),
+       ("K10", 5), ("K11", 2), ("K12", 2), ("K13", 1), ("K14", 4), ("K15", 1), ("K16", 1), ("K17", 2), ("K18", 1),
+       ("K19", 5), ("K20", 2), ("K21", 2), ("K22", 3), ("K23", 1), ("K24", 1)])
 
 # 參數與對照表改了，結果跟著變
 cur.execute("UPDATE kri.Parameter SET ParamValue = 1 WHERE KriCode = 'K01' AND ParamName = 'RequireSameMaterial'")
@@ -651,6 +810,12 @@ x = one("SELECT PoDays, WorseDays, IsFlagged FROM kri.K04_Detail WHERE RunId = ?
 check("K04 kri.PaymentTerm 有值時用對照表的天數", (x.PoDays, x.WorseDays, x.IsFlagged), (0, 45, True))
 x = one("SELECT DaysEstimated FROM kri.K04_Detail WHERE RunId = ? AND PoNumber = '4550000009'", rid1)[0]
 check("K04 PO 條件空白的 0 天是規則、不算推估（主檔天數查得到時）", x.DaysEstimated, False)
+
+ins("ext.SlowMoving", [dict(SnapshotDate="2025-12-31", Material="M141", Plant="1100", Status="A", SlowOn="2026-01-05",
+                           StockQty=5, StockValue=999)])
+res, rid3 = run("K15")
+check("K15 有呆滯報表就只用報表", [(x.Material, x.Source, x.IsFlagged) for x in
+      one("SELECT Material, Source, IsFlagged FROM kri.K15_Detail WHERE RunId = ?", rid3)], [("M141", "呆滯報表", True)])
 
 # ---------------------------------------------------------------- 框架行為
 cur.execute("UPDATE kri.Parameter SET ParamValue = 0.25 WHERE KriCode = 'K14' AND ParamName = 'PriceTolerance'")

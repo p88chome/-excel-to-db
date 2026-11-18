@@ -427,3 +427,91 @@ BEGIN
     ORDER BY s.KriCode;
 END;
 GO
+
+-- ======================================================================
+-- 外部資料（第四批 KRI）：各環境把原系統匯出整理進來；原始表到 ext 的對應不放在 repo。
+-- ======================================================================
+IF OBJECT_ID(N'ext.VendorRelation', N'U') IS NULL
+CREATE TABLE ext.VendorRelation (          -- 商工登記：關聯企業（同代表人、董監事、地址…），K02
+    VendorA      NVARCHAR(10)  NOT NULL,
+    VendorB      NVARCHAR(10)  NOT NULL,
+    RelationType NVARCHAR(30)  NOT NULL,
+    Note         NVARCHAR(200) NULL,
+    CONSTRAINT PK_ext_VendorRelation PRIMARY KEY (VendorA, VendorB, RelationType)
+);
+IF OBJECT_ID(N'ext.VendorCapital', N'U') IS NULL
+CREATE TABLE ext.VendorCapital (           -- 商工登記：實收資本額，K05。Vendor 或 TaxNumber 擇一對應
+    Id         INT IDENTITY  NOT NULL CONSTRAINT PK_ext_VendorCapital PRIMARY KEY,
+    Vendor     NVARCHAR(10)  NULL,
+    TaxNumber  NVARCHAR(20)  NULL,
+    Capital    DECIMAL(19,2) NOT NULL,
+    Currency   NVARCHAR(5)   NOT NULL,
+    DataDate   DATE          NULL          -- 查詢日；同一家有多筆取基準日前最新的
+);
+IF OBJECT_ID(N'ext.PartUsage', N'U') IS NULL
+CREATE TABLE ext.PartUsage (               -- 零件系統：MOU、waiting for use，K11
+    Material      NVARCHAR(18)  NOT NULL,
+    Plant         NVARCHAR(4)   NOT NULL,
+    SnapshotDate  DATE          NOT NULL,
+    Mou           DECIMAL(19,4) NULL,
+    WaitingForUse DECIMAL(19,4) NULL,
+    CONSTRAINT PK_ext_PartUsage PRIMARY KEY (Material, Plant, SnapshotDate)
+);
+IF OBJECT_ID(N'ext.SlowMoving', N'U') IS NULL
+CREATE TABLE ext.SlowMoving (              -- 呆滯報表每月快照，K15、K16
+    SnapshotDate DATE          NOT NULL,
+    Material     NVARCHAR(18)  NOT NULL,
+    Plant        NVARCHAR(4)   NOT NULL,
+    Status       NVARCHAR(20)  NULL,
+    AgeDays      INT           NULL,
+    SlowOn       DATE          NULL,       -- 認列呆滯的日期（已呆滯 = 過去、還沒 = 未來）
+    StockQty     DECIMAL(19,4) NULL,
+    StockValue   DECIMAL(19,4) NULL,
+    Currency     NVARCHAR(5)   NULL,
+    CONSTRAINT PK_ext_SlowMoving PRIMARY KEY (SnapshotDate, Material, Plant)
+);
+IF OBJECT_ID(N'ext.Contract', N'U') IS NULL
+CREATE TABLE ext.Contract (                -- 合約系統，K17
+    ContractNo NVARCHAR(30)  NOT NULL CONSTRAINT PK_ext_Contract PRIMARY KEY,
+    Vendor     NVARCHAR(10)  NULL,
+    PoNumber   NVARCHAR(10)  NULL,         -- 有填就直接對 PO，沒填用供應商 + 有效期間對
+    SignedOn   DATE          NULL,
+    ValidFrom  DATE          NULL,
+    ValidTo    DATE          NULL,
+    Amount     DECIMAL(19,2) NULL,
+    Currency   NVARCHAR(5)   NULL
+);
+IF OBJECT_ID(N'ext.ExpectedDemand', N'U') IS NULL
+CREATE TABLE ext.ExpectedDemand (          -- 預期請購量（月），K07
+    Material NVARCHAR(18)  NOT NULL,
+    Plant    NVARCHAR(4)   NOT NULL,
+    Month    DATE          NOT NULL,       -- 當月 1 日
+    Qty      DECIMAL(19,4) NOT NULL,
+    CONSTRAINT PK_ext_ExpectedDemand PRIMARY KEY (Material, Plant, Month)
+);
+GO
+
+-- 某天的工廠庫存（K06、K11、K16）：庫存快照 − 快照日之前、指定日之後的異動（貸方減、借方加）。
+-- 快照只有一份，回推的準度取決於異動資料是否完整（期間外、非 PO 的異動有沒有下載）。
+CREATE OR ALTER FUNCTION kri.StockAt (@Material NVARCHAR(18), @Plant NVARCHAR(4), @OnDate DATE)
+RETURNS TABLE
+AS RETURN
+SELECT s.Qty - ISNULL(m.Net, 0) AS StockQty, s.SnapshotDate
+FROM (SELECT SUM(ISNULL(StockQty, 0) + ISNULL(QualityStock, 0) + ISNULL(BlockedStock, 0)) AS Qty,
+             MAX(SnapshotDate) AS SnapshotDate
+      FROM inv.InventoryBalance WHERE Material = @Material AND Plant = @Plant) s
+OUTER APPLY (SELECT SUM(IIF(DebitCreditInd = 'H', -Quantity, Quantity)) AS Net
+             FROM inv.MaterialMovement
+             WHERE Material = @Material AND Plant = @Plant
+               AND PostingDate > @OnDate AND PostingDate <= s.SnapshotDate) m
+WHERE s.Qty IS NOT NULL;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_kri_MM_Mat' AND object_id = OBJECT_ID('inv.MaterialMovement'))
+    CREATE INDEX IX_kri_MM_Mat ON inv.MaterialMovement (Material, Plant, PostingDate)
+    INCLUDE (Quantity, DebitCreditInd, MovementType, StorLoc, Batch);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_kri_PR_Mat' AND object_id = OBJECT_ID('prc.PurchaseRequisition'))
+    CREATE INDEX IX_kri_PR_Mat ON prc.PurchaseRequisition (Material, Plant, PrDate) INCLUDE (ReqQty, DeletionInd);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_kri_PO_Mat' AND object_id = OBJECT_ID('prc.PurchaseOrderDetail'))
+    CREATE INDEX IX_kri_PO_Mat ON prc.PurchaseOrderDetail (Material, Plant, PoDate) INCLUDE (OrderQty, DeletionInd);
+GO

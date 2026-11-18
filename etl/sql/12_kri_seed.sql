@@ -34,7 +34,25 @@ USING (VALUES
  ('K23', N'便宜主檔價已生效，舊 Open PO 仍用高價', N'Open PO 下單後生效的主檔價比 PO 單價低 {PriceTolerance} 以上，未收數量仍照舊價。', N'採購', 'PO', 'kri.Run_K23', 24, 1, 2, 0, 0, 1, 1,
          N'新增題目（不在原清單）。主檔是現在的資料。'),
  ('K24', N'休眠供應商重新啟用、價格偏高', N'供應商停了 {DormantDays} 天以上又下單，啟用後 {FollowDays} 天內的 PO 單價比其他供應商均價高 {PriceTolerance} 以上。', N'採購', 'PO', 'kri.Run_K24', 12, 1, 2, 0, 1, 0, 1,
-         N'新增題目（不在原清單）。休眠用 PO 資料判斷，資料期間開始前的交易看不到。')
+         N'新增題目（不在原清單）。休眠用 PO 資料判斷，資料期間開始前的交易看不到。'),
+ ('K02', N'工商登記關聯供應商', N'統編、電話、地址相同或商工登記有關聯的不同供應商：一家凍結另一家仍交易，或兩家買同料號。', N'供應商管理', 'VENDOR', 'kri.Run_K02', 12, 1, 4, 1, 1, 0, 0,
+         N'先做 SAP 內部版；商工登記的關聯放 ext.VendorRelation。銀行帳號（LFBK）進來後加。'),
+ ('K05', N'Open PO 超過供應商資本額', N'Open PO 未收金額超過實收資本額的 {CapitalRatio} 倍。', N'供應商管理', 'VENDOR', 'kri.Run_K05', 36, 1, 4, 0, 1, 1, 0,
+         N'資本額放 ext.VendorCapital（商工登記）；查不到的列「無資本額」。'),
+ ('K06', N'用量 vs 請購量 vs 庫存', N'請購當天庫存 + 在途可用超過 {MaxCoverageMonths} 個月（或沒有耗用）仍請購。', N'請購', 'PR', 'kri.Run_K06', 12, 1, 3, 0, 0, 1, 1,
+         N'庫存用目前快照回推；回推準度看異動資料是否完整。'),
+ ('K07', N'本期 vs 預期請購量', N'料號當月請購量是預期量（或過去月平均）的 {Multiplier} 倍以上。', N'請購', 'MATERIAL', 'kri.Run_K07', 12, 1, 3, 0, 0, 1, 0,
+         N'預期量放 ext.ExpectedDemand；沒有時用過去 12 個月平均。'),
+ ('K11', N'非緊急之緊急採購', N'緊急採購的 PO，下單前已有庫存、或 MOU／待用量顯示不急。', N'採購', 'PO', 'kri.Run_K11', 12, 1, 4, 1, 0, 1, 0,
+         N'緊急採購的判斷放 ValueList EmergencyPoType／EmergencyTextPattern；MOU、待用放 ext.PartUsage。'),
+ ('K15', N'已屆呆滯之警示', N'{WarnDays} 天內就會認列呆滯的料號。', N'庫存', 'MATERIAL', 'kri.Run_K15', 12, 1, 3, 0, 0, 1, 1,
+         N'優先用呆滯報表（ext.SlowMoving）；沒有時用最後異動日推估。'),
+ ('K16', N'呆滯料仍進行採購', N'料號已呆滯、有庫存仍下 PO，最近 3 個月有 {MinConsecMonths} 個月以上。', N'採購', 'PO', 'kri.Run_K16', 12, 1, 3, 0, 0, 1, 1,
+         N'同 K15 的呆滯判斷。'),
+ ('K17', N'重大工程未簽合約', N'工程類 PO 金額 {MajorAmount} 以上，沒有合約或合約晚於 PO。', N'採購', 'PO', 'kri.Run_K17', 12, 1, 4, 1, 0, 0, 0,
+         N'工程類的判斷放 ValueList（ConstructionPoType／MaterialGroup／GlPattern）；合約放 ext.Contract。'),
+ ('K20', N'驗退後未及時處理', N'轉入待退倉後超過 {MaxOpenDays} 天才處理完（或還沒處理）。', N'驗收', 'MOVEMENT', 'kri.Run_K20', 12, 1, 3, 0, 0, 1, 1,
+         N'待退倉放 ValueList ReturnStorLoc；先進先出配對出倉。')
 ) AS s (KriCode, Name, Description, Stage, EntityType, ProcName, WindowMonths, Enabled, Phase,
         IsCompliance, IsFraud, IsOperation, IsFinancial, Notes)
 ON t.KriCode = s.KriCode
@@ -81,7 +99,25 @@ FROM (VALUES
  ('K24', 'FollowDays',          90,     'days',   N'重新啟用後看幾天內的 PO'),
  ('K24', 'PriceTolerance',      0.10,   'ratio',  N'比其他供應商均價高出多少以上'),
  ('K24', 'MaxRefSpread',        5,      'ratio',  N'參考 PO 最高價 ÷ 最低價超過這個倍數就不比（通用料號）'),
- ('K24', 'MinRefPos',           2,      'count',  N'其他供應商的參考 PO 至少幾筆才比')
+ ('K24', 'MinRefPos',           2,      'count',  N'其他供應商的參考 PO 至少幾筆才比'),
+ ('K02', 'MaxGroupSize',        5,      'count',  N'同一個統編／電話／地址超過幾家共用就不配對（代理商、總機）'),
+ ('K05', 'CapitalRatio',        1,      'ratio',  N'Open PO 未收金額 ÷ 實收資本額超過多少'),
+ ('K06', 'MaxCoverageMonths',   6,      'months', N'庫存 + 在途可用超過幾個月仍請購'),
+ ('K06', 'UsageMonths',         12,     'months', N'平均月耗用看過去幾個月'),
+ ('K06', 'FlagNoUsage',         1,      'code',   N'1 = 沒有耗用但有庫存或在途仍請購也標記'),
+ ('K07', 'Multiplier',          3,      'ratio',  N'當月請購量是預期量的幾倍以上'),
+ ('K07', 'MinHistoryMonths',    3,      'months', N'沒有預期量表時，歷史至少幾個月才判斷'),
+ ('K11', 'MinStockQty',         0,      'qty',    N'下單前庫存超過多少算不急'),
+ ('K11', 'MaxMou',              3,      'ratio',  N'MOU 超過多少算不急'),
+ ('K11', 'MinWaitingForUse',    2,      'qty',    N'待用量達多少算不急'),
+ ('K15', 'WarnDays',            14,     'days',   N'幾天內會認列呆滯就警示'),
+ ('K15', 'SlowDays',            365,    'days',   N'沒有呆滯報表時：最後異動後幾天算呆滯'),
+ ('K15', 'UseSapFallback',      1,      'code',   N'1 = 沒有呆滯報表時用最後異動日推估'),
+ ('K16', 'MinConsecMonths',     1,      'months', N'最近 3 個月有幾個月呆滯仍下單才標記'),
+ ('K16', 'SlowDays',            365,    'days',   N'沒有呆滯報表時：最後異動後幾天算呆滯'),
+ ('K16', 'UseSapFallback',      1,      'code',   N'1 = 沒有呆滯報表時用最後異動日推估'),
+ ('K17', 'MajorAmount',         10000000, 'amount', N'整張 PO 本幣金額達多少算重大工程（本幣在 AmountCurrency 時）'),
+ ('K20', 'MaxOpenDays',         30,     'days',   N'轉入待退倉後幾天內要處理完')
 ) AS s (KriCode, ParamName, ParamValue, Unit, Description)
 WHERE NOT EXISTS (SELECT 1 FROM kri.Parameter p WHERE p.KriCode = s.KriCode AND p.ParamName = s.ParamName);
 
@@ -96,7 +132,20 @@ FROM (VALUES
  ('K10', 'AmountCurrency',     'TWD',  N'金額上限 MaxPoAmount 的幣別；本幣不是這個的公司別不判斷金額'),
  ('K09', 'ExcludeDocType',     'KZ',   N'付款傳票（SAP 標準類型）'),
  ('K09', 'ExcludeDocType',     'ZP',   N'付款傳票（SAP 標準類型）'),
- ('K09', 'ExcludeDocType',     'AB',   N'清帳／一般傳票（SAP 標準類型）')
+ ('K09', 'ExcludeDocType',     'AB',   N'清帳／一般傳票（SAP 標準類型）'),
+ ('K02', 'MatchAttribute',     'TaxNumber', N'統編相同'),
+ ('K02', 'MatchAttribute',     'Phone',     N'電話相同'),
+ ('K02', 'MatchAttribute',     'Address',   N'地址相同'),
+ ('K06', 'ConsumptionMovementType', '201', N'領用至成本中心'),
+ ('K06', 'ConsumptionMovementType', '202', N'201 沖回'),
+ ('K06', 'ConsumptionMovementType', '221', N'領用至專案'),
+ ('K06', 'ConsumptionMovementType', '222', N'221 沖回'),
+ ('K06', 'ConsumptionMovementType', '261', N'領用至工單'),
+ ('K06', 'ConsumptionMovementType', '262', N'261 沖回'),
+ ('K06', 'ConsumptionMovementType', '281', N'領用至網路'),
+ ('K06', 'ConsumptionMovementType', '282', N'281 沖回'),
+ ('K17', 'AmountCurrency',     'TWD',  N'重大工程金額門檻的幣別'),
+ ('K20', 'ReturnTransferType', '311',  N'倉間轉撥')
 ) AS s (KriCode, ListName, ListValue, Note)
 WHERE NOT EXISTS (SELECT 1 FROM kri.ValueList v
                   WHERE v.KriCode = s.KriCode AND v.ListName = s.ListName AND v.ListValue = s.ListValue);

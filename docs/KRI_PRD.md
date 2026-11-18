@@ -234,23 +234,23 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | KRI | 名稱 | 期別 | 卡在哪裡 |
 |---|---|---|---|
 | **K01** | **品質異常期間仍下單** | ✅ 第二批 | 讀 `ext.QualityIssue`；已結案的單要有結案日才算得到期間 |
-| K02 | 工商登記關聯供應商 | 🔌 第四期 | 商工登記；`LFA1` 統編欄位待確認 |
+| **K02** | **工商登記關聯供應商** | ✅ 第四批（SAP 內部版） | 商工登記放 `ext.VendorRelation`；銀行帳號 LFBK 待補 |
 | **K03** | **已停用供應商短暫啟用交易** | ✅ 第二批 | PO 日暫用 BEDAT（待 `EKKO.AEDAT`） |
 | **K04** | **付款條件比主檔差** | ✅ 第二批 | **客戶是否執行待確認**；天數先從代碼推估，T052 到了填 `kri.PaymentTerm` |
-| K05 | Open PO 超過供應商資本額 | 🔌 第四期 | 商工登記 |
-| K06 | 用量 vs 請購量 vs 庫存 | 📥 第三期 | 歷史庫存 MBEWH |
-| K07 | 本期 vs 預期請購量 | 📥 第三期 | 預期請購量報表；資料期間只有 3 年 |
+| **K05** | **Open PO 超過供應商資本額** | ✅ 第四批 | 資本額放 `ext.VendorCapital`（商工登記） |
+| **K06** | **用量 vs 請購量 vs 庫存** | ✅ 第四批 | 庫存用快照回推；異動資料要完整 |
+| **K07** | **本期 vs 預期請購量** | ✅ 第四批 | 預期量放 `ext.ExpectedDemand`；沒有時用歷史 |
 | **K08** | **疑似拆單（PR）** | ✅ 第一期 | 程式先做；**核決權限表由客戶提供後才有結果** |
 | **K09** | **疑似拆單（direct AP）** | ✅ 第三批 | 核決權限表（AP）由客戶提供；成本中心目前只看供應商行 |
 | **K10 / K19** | **先入庫才補單／GR 貼近 PR、PO** | ✅ 第二批 | 排除關鍵字先比對收貨的項目說明；`EKPO.TXZ01`、`EKKO.AEDAT` 進來後再補 |
-| K11 | 非緊急之緊急採購 | 🔌 第四期 | 零件生命週期系統 |
+| **K11** | **非緊急之緊急採購** | ✅ 第四批 | 緊急採購的判斷條件要在本地設定；MOU 放 `ext.PartUsage` |
 | **K12** | **集中且買貴** | ✅ 第三批 | 獨家先用 PO 資料判斷；客戶的獨家料號清單／製造商料號進來後改 |
 | **K13** | **跨據點同料號單價差異** | ✅ 第一期 | — |
 | **K14** | **PO 單價高於主檔價** | ✅ 第一期 | — |
-| K15 / K16 | 呆滯警示／呆滯仍採購 | 📥 第三期 | 呆滯報表 |
-| K17 | 重大工程未簽合約 | 🔌 第四期 | 合約系統 |
+| **K15 / K16** | **呆滯警示／呆滯仍採購** | ✅ 第四批 | 呆滯報表放 `ext.SlowMoving`；沒有時用最後異動推估 |
+| **K17** | **重大工程未簽合約** | ✅ 第四批 | 工程類 PO 的判斷要在本地設定；合約放 `ext.Contract` |
 | **K18** | **Open PO 收貨進度異常** | ✅ 第一期 | — |
-| K20 | 驗退後未及時處理 | 📥 第三期 | MSEG.UMLGO |
+| **K20** | **驗退後未及時處理** | ✅ 第四批 | 待退倉要在本地設定 |
 | **K21** | **主檔價倒填**（新增） | ✅ 第一期 | — |
 | **K22** | **主檔價大漲**（新增） | ✅ 第三批 | — |
 | **K23** | **便宜主檔價已生效，舊 Open PO 仍用高價**（新增） | ✅ 第三批 | — |
@@ -259,6 +259,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 **第一期**：框架 + K08、K13、K14、K18、K21。
 **第二批（已完成）**：K01、K03、K04、K10、K19。
 **第三批（已完成）**：K09、K12、K22、K23、K24。
+**第四批（已完成）**：K02、K05、K06、K07、K11、K15、K16、K17、K20（外部資料走 `ext`，沒資料時照跑、備註說明）。
 **第二期**：評分、BI view。
 **第三期**：補資料後的 K04、K06、K07、K15/16、K20；文字分群。
 **第四期**：外部系統 K02、K05、K11、K17。
@@ -393,6 +394,62 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 - **影響金額**：（單價 − 參考均價）× 數量，換本幣。
 - **參數**：`DormantDays` = 365、`FollowDays` = 90、`PriceTolerance` = 0.10、`MaxRefSpread` = 5、`MinRefPos` = 2。
 - **已知限制**：休眠只看 PO，資料期間開始前的交易看不到；抽樣資料會讓很多供應商看起來像休眠。
+
+## 9d. 第四批 KRI 規格
+
+共通：外部資料都放 `ext` schema，由各環境把原系統匯出整理進來（對應不放 repo）；沒有資料時程式照跑，備註會說明。
+`kri.StockAt(料號, 工廠, 日期)`：目前庫存快照（含品檢、凍結庫存）減掉指定日之後的異動，回推當天庫存；準度取決於異動資料是否完整。
+
+| 外部表 | 用途 | 欄位 |
+|---|---|---|
+| `ext.VendorRelation` | K02 商工登記關聯 | VendorA、VendorB、RelationType |
+| `ext.VendorCapital` | K05 實收資本額 | Vendor 或 TaxNumber、Capital、Currency、DataDate |
+| `ext.ExpectedDemand` | K07 預期請購量 | Material、Plant、Month、Qty |
+| `ext.PartUsage` | K11 MOU、待用量 | Material、Plant、SnapshotDate、Mou、WaitingForUse |
+| `ext.SlowMoving` | K15、K16 呆滯報表快照 | SnapshotDate、Material、Plant、Status、SlowOn、StockQty、StockValue |
+| `ext.Contract` | K17 合約 | ContractNo、Vendor、PoNumber、SignedOn、ValidFrom、ValidTo |
+
+### K02 工商登記關聯供應商（SAP 內部版）
+- **邏輯**：不同供應商代碼但統編、電話（去符號）、地址（去空白標點）相同（`MatchAttribute`），或 `ext.VendorRelation` 列為關聯；同一個值超過 `MaxGroupSize` 家共用的不配對。標記：①其中一家凍結（中央凍結，或每個組織都凍結；`ExcludeAccountGroup` 除外）、另一家期間內有 PO；②兩家期間內買過同料號。
+- **參數**：`MaxGroupSize` = 5。
+- **已知限制**：銀行帳號（LFBK）還沒有業務表；「前 50% 家數」的重大性篩選還沒做，目前全部供應商都看。
+
+### K05 Open PO 超過供應商資本額
+- **邏輯**：觀察期間（36 個月）內下單、未交貨完成的 PO 未收金額（本幣）合計 ÷ 實收資本額 > `CapitalRatio` → 標記。資本額用供應商代碼對，沒有再用統編對；查不到的（國外廠商）列「無資本額」；幣別不同列「未判斷」。
+- **參數**：`CapitalRatio` = 1。
+- **已知限制**：未收數量用目前的收貨數；關聯企業合併計算等 K02 的關聯確定後再做。
+
+### K06 用量 vs 請購量 vs 庫存
+- **邏輯**：請購當天（庫存 + 在途 PO）÷ 過去 `UsageMonths` 個月平均月耗用 = 覆蓋月數，> `MaxCoverageMonths` 仍請購 → 標記；沒有耗用、但有庫存或在途的（`FlagNoUsage` = 1）也標記。在途 = 請購當天以前下單、扣掉當天以前收貨的數量。耗用 = `ConsumptionMovementType`（201、221、261、281 和沖回）。
+- **參數**：`MaxCoverageMonths` = 6、`UsageMonths` = 12、`FlagNoUsage` = 1。
+- **已知限制**：PR、收貨、異動的單位假設都是基本單位；原物料和零件的請購邏輯不同，門檻之後可以分開。
+
+### K07 本期 vs 預期請購量
+- **邏輯**：料號 × 工廠 × 月的請購量，和預期量比：有 `ext.ExpectedDemand` 用它；沒有用過去 12 個月「有請購的月份」的平均（零星採購不會被 0 稀釋），有請購的月份少於 `MinHistoryMonths` 不判斷。比例 > `Multiplier` → 標記。
+- **參數**：`Multiplier` = 3、`MinHistoryMonths` = 3。
+- **已知限制**：客戶原本設計是 5 年回歸；資料只有 3 年，先用倍數。
+
+### K11 非緊急之緊急採購
+- **邏輯**：緊急採購 = PO 類型在 `EmergencyPoType`，或收貨說明符合 `EmergencyTextPattern`（兩個都只在本地設定）。下單前一天工廠庫存 > `MinStockQty`、或 MOU > `MaxMou`、或待用量 ≥ `MinWaitingForUse` → 標記。
+- **參數**：`MinStockQty` = 0、`MaxMou` = 3、`MinWaitingForUse` = 2。
+- **已知限制**：PO 項目說明（TXZ01）還沒有，先比對收貨說明。
+
+### K15 已屆呆滯之警示 ／ K16 呆滯料仍進行採購
+- **共用**：`kri.SlowStatusAt`：優先用呆滯報表（指定日以前最新一份快照的認列日 SlowOn）；沒有報表而且 `UseSapFallback` = 1 時，用最後一次異動日 + `SlowDays` 推估。
+- **K15**：基準日有庫存、還沒認列、`WarnDays` 天內會認列 → 標記。影響金額 = 庫存金額。
+- **K16**：下單前一天已呆滯（認列日 ≤ 下單日，或狀態在 `SlowStatus`）、而且有庫存（推估時）仍下 PO；同料號 × 工廠最近 3 個月有 `MinConsecMonths` 個月以上這樣下單 → 標記。
+- **參數**：K15 `WarnDays` = 14、`SlowDays` = 365、`UseSapFallback` = 1；K16 `MinConsecMonths` = 1、`SlowDays` = 365、`UseSapFallback` = 1。
+- **已知限制**：建議直接用會計認列的呆滯報表，推估版只是先看得到東西；推估時「最後異動」包含所有異動類型。
+
+### K17 重大工程未簽合約
+- **邏輯**：工程類 PO（`ConstructionPoType`、`ConstructionMaterialGroup`、`ConstructionGlPattern` 任一，只在本地設定），整張 PO 本幣金額 ≥ `MajorAmount`（本幣在 `AmountCurrency`），PO 沒有參照 SAP 合約、`ext.Contract` 也對不到 → 「無合約」；合約簽約日晚於 PO → 「合約晚於PO」，都標記。合約先用 PO 號碼對，沒有再用供應商 + 有效期間對。
+- **參數**：`MajorAmount` = 10,000,000、`AmountCurrency` = TWD。
+- **已知限制**：PO 的科目指派類別（KNTTP）不在規格內，工程類先用 PO 類型、物料群組、科目判斷。
+
+### K20 驗退後未及時處理
+- **邏輯**：轉入待退倉（`ReturnStorLoc`，本地設定）的異動（`ReturnTransferType` = 311，借方），依先進先出配對同料號 × 工廠 × 倉 × 批號之後的出倉（貸方，任何異動類型），全部出清的日期 = 處理日；停留 > `MaxOpenDays` 天（未處理的算到基準日）→ 標記。
+- **參數**：`MaxOpenDays` = 30。
+- **已知限制**：待退倉在資料起始日以前的餘額當 0；「單一站點超過一週」要等外部的驗退流程狀態；沒有批號管理的料號配對會不準。
 
 ---
 
