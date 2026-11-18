@@ -420,7 +420,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 - **已知限制**：未收數量用目前的收貨數；關聯企業合併計算等 K02 的關聯確定後再做。
 
 ### K06 用量 vs 請購量 vs 庫存
-- **邏輯**：請購當天（庫存 + 在途 PO）÷ 過去 `UsageMonths` 個月平均月耗用 = 覆蓋月數，> `MaxCoverageMonths` 仍請購 → 標記；沒有耗用、但有庫存或在途的（`FlagNoUsage` = 1）也標記。在途 = 請購當天以前下單、扣掉當天以前收貨的數量（收貨用比例換成 PO 單位）；不含這張 PR 自己轉的 PO、已結案（交貨完成且最後收貨在請購日以前）的 PO。耗用 = `ConsumptionMovementType`（201、221、261、281 和沖回）。
+- **邏輯**：請購當天（庫存 + 在途 PO）÷ 過去 `UsageMonths` 個月平均月耗用 = 覆蓋月數，> `MaxCoverageMonths` 仍請購 → 標記；沒有耗用、但有庫存或在途的（`FlagNoUsage` = 1）也標記。在途 = 請購當天以前下單、扣掉當天以前收貨的數量（收貨用比例換成 PO 單位，再用收貨量 ÷ PO 已收數量換回基本單位；沒收過貨當單位相同）；不含這張 PR 自己轉的 PO、已結案（交貨完成且最後收貨在請購日以前）的 PO。耗用 = `ConsumptionMovementType`（201、221、261、281 和沖回）。
 - **參數**：`MaxCoverageMonths` = 6、`UsageMonths` = 12、`FlagNoUsage` = 1。
 - **已知限制**：PR、收貨、異動的單位假設都是基本單位；原物料和零件的請購邏輯不同，門檻之後可以分開。
 

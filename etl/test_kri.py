@@ -770,8 +770,8 @@ check("K06 回推請購當天庫存 1600、月耗用 100 → 可用 16 個月 �
       (float(x.StockAtPr), float(x.AvgMonthlyUse), float(x.CoverageMonths), x.IsFlagged), (1600.0, 100.0, 16.0, True))
 check("K06 沒有耗用但有庫存 → 標記；庫存用完的不標", (d["1000000102"].Status, d["1000000102"].IsFlagged,
       float(d["1000000103"].StockAtPr), d["1000000103"].IsFlagged), ("無耗用", True, 0.0, False))
-check("K06 在途不含 PR 自己轉的 PO、已結案的 PO；收貨換成 PO 單位",
-      (float(d["1000000101"].OpenPoQty), float(d["1000000103"].OpenPoQty)), (0.0, 6.0))
+check("K06 在途不含 PR 自己轉的 PO、已結案的 PO；6 BOX 換成 72 EA",
+      (float(d["1000000101"].OpenPoQty), float(d["1000000103"].OpenPoQty)), (0.0, 72.0))
 
 # K07
 d = {(x.Material, str(x.Month)): x for x in one("SELECT * FROM kri.K07_Detail WHERE RunId = ?", rid)}

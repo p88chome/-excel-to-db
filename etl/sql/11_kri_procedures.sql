@@ -1557,7 +1557,7 @@ BEGIN
     FROM g x JOIN g y ON y.MatchType = x.MatchType AND y.MatchValue = x.MatchValue AND x.Vendor < y.Vendor
     WHERE x.n <= @maxg
     UNION ALL
-    SELECT VendorA, VendorB, N'商工登記', LEFT(STRING_AGG(CAST(Rel AS NVARCHAR(MAX)), N'；'), 200)
+    SELECT VendorA, VendorB, N'商工登記', LEFT(STRING_AGG(CAST(Rel AS NVARCHAR(MAX)), N'；') WITHIN GROUP (ORDER BY Rel), 200)
     FROM (SELECT DISTINCT VendorA, VendorB, Rel FROM r) r
     GROUP BY VendorA, VendorB;
 
@@ -1728,7 +1728,7 @@ BEGIN
         FROM r
         OUTER APPLY kri.StockAt(r.Material, r.Plant, r.PrDate) st
         OUTER APPLY (       -- 請購當天的在途：當天以前下單、扣掉當天以前收貨的數量（PO 訂購單位）
-            SELECT SUM(IIF(q.OpenQty > 0, q.OpenQty, 0)) AS Qty
+            SELECT SUM(IIF(q.OpenQty > 0, q.OpenQty * q.BasePerUnit, 0)) AS Qty   -- 換成基本單位（和庫存、耗用一致）
             FROM prc.PurchaseOrderDetail p
             OUTER APPLY (SELECT SUM(gr.Qty) AS Tot, SUM(gr.AsOfQty) AS AsOf, MAX(gr.PostingDate) AS LastGr
                          FROM (SELECT gr.PostingDate, IIF(gr.DebitCreditInd = 'H', -gr.Quantity, gr.Quantity) AS Qty,
@@ -1737,7 +1737,9 @@ BEGIN
                                FROM prc.GoodsReceipt gr
                                WHERE gr.PoNumber = p.PoNumber AND gr.PoItem = p.PoItem) gr) g
             -- 收貨的單位可能是基本單位：用「當天以前收貨 ÷ 全部收貨」的比例換成 PO 上的已收數量
-            CROSS APPLY (SELECT p.OrderQty - IIF(g.Tot > 0, ISNULL(p.GrQty, 0) * g.AsOf / g.Tot, ISNULL(p.GrQty, 0)) AS OpenQty) q
+            -- 每個訂購單位 = 幾個基本單位：用收貨量 ÷ PO 已收數量推估，沒收過貨當 1
+            CROSS APPLY (SELECT p.OrderQty - IIF(g.Tot > 0, ISNULL(p.GrQty, 0) * g.AsOf / g.Tot, ISNULL(p.GrQty, 0)) AS OpenQty,
+                                IIF(g.Tot > 0 AND p.GrQty > 0, g.Tot / p.GrQty, 1) AS BasePerUnit) q
             WHERE p.Material = r.Material AND p.Plant = r.Plant AND p.PoDate <= r.PrDate
               AND p.PoDate > DATEADD(YEAR, -2, r.PrDate) AND ISNULL(p.DeletionInd, '') = '' AND p.OrderQty > 0
               AND NOT (ISNULL(p.PrNumber, '') = r.PrNumber AND ISNULL(p.PrItem, '') = r.PrItem)    -- 這張 PR 自己轉的 PO 不算
@@ -2010,7 +2012,7 @@ BEGIN
         CROSS APPLY kri.SlowStatusAt(k.Material, k.Plant, @AsOfDate, @slow, @fb) s
         OUTER APPLY (SELECT StockQty FROM kri.StockAt(k.Material, k.Plant, @AsOfDate) WHERE s.Source = N'SAP推估') st
         OUTER APPLY (SELECT SUM(ISNULL(StockQty, 0) + ISNULL(QualityStock, 0) + ISNULL(BlockedStock, 0)) AS Qty,
-                            SUM(StockValue) AS Value
+                            MAX(StockValue) AS Value          -- 庫存金額是工廠層級，每個倉都重複，不能加總
                      FROM inv.InventoryBalance i
                      WHERE i.Material = k.Material AND i.Plant = k.Plant AND s.Source = N'SAP推估') ib
         OUTER APPLY (SELECT TOP 1 c.LocalCurrency FROM inv.MaterialMovement m      -- 工廠的本幣：從異動的公司別帶
@@ -2021,7 +2023,8 @@ BEGIN
     INSERT kri.K15_Detail (RunId, Material, Plant, Source, SnapshotDate, Status, LastMoveDate, SlowOn, DaysToSlow,
                            StockQty, StockValue, IsFlagged, Currency)
     SELECT @RunId, Material, Plant, Source, SnapshotDate, Status, LastMoveDate, SlowOn, DATEDIFF(DAY, @AsOfDate, SlowOn),
-           Qty, Value, IIF(DATEDIFF(DAY, @AsOfDate, SlowOn) BETWEEN 0 AND @warn AND Qty > 0, 1, 0), Currency
+           Qty, Value, IIF(DATEDIFF(DAY, @AsOfDate, SlowOn) BETWEEN 0 AND @warn
+                           AND (Qty > 0 OR (Source = N'呆滯報表' AND Qty IS NULL)), 1, 0), Currency   -- 報表沒填數量當有庫存
     FROM d
     WHERE Source = N'呆滯報表' OR Qty > 0;           -- 推估時只留基準日有庫存的
 
