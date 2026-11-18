@@ -333,6 +333,9 @@ ins("fin.AccountsPayable", [
     ap("5200000006", "V42", "2025-05-10", 6000),
     ap("5200000007", "V43", "2025-05-01", 6000, cc="CC1"),
     ap("5200000008", "V43", "2025-05-10", 6000, cc="CC2"),       # 不同成本中心
+    dict(ap("5200000009", "V44", "2025-05-01", 6000), DocumentType="KZ"),            # 付款傳票類型
+    dict(ap("5200000010", "V44", "2025-05-10", 6000), ClearingDoc="5200000010"),     # 自己清自己 = 付款
+    ap("5200000011", "V44", "2025-05-12", 6000),
 ])
 
 # ---------------------------------------------------------------- K12
@@ -370,6 +373,10 @@ ins("prc.PurchaseOrderDetail", [
     po("4600000002", Vendor="V61", Material="M85", NetPrice=20, PoDate="2025-05-02", DelivComplInd="X"),
     po("4600000003", Vendor="V61", Material="M85", NetPrice=15, PoDate="2025-09-01"),   # 降價後才下單
 ])
+ins("prc.GoodsReceipt", [
+    dict(gr("5000000020", "4600000001", "2025-06-01"), Quantity=40),
+    dict(gr("5000000021", "4600000001", "2026-01-05"), Quantity=60),   # 基準日之後才收，不算
+])
 
 # ---------------------------------------------------------------- K24
 ins("prc.PurchaseOrderDetail", [
@@ -378,6 +385,9 @@ ins("prc.PurchaseOrderDetail", [
     po("4610000003", Vendor="V71", Material="M90", NetPrice=10, PoDate="2024-09-01"),
     po("4610000004", Vendor="V70", Material="M91", NetPrice=10, PoDate="2025-04-01"),   # 沒有別家可比
     po("4610000005", Vendor="V70", Material="M90", NetPrice=13, PoDate="2025-08-01"),   # 超過 90 天
+    po("4610000009", Vendor="V72", Material="M90", NetPrice=10, PoDate="2024-10-01"),
+    po("4610000010", Vendor="V70", Material="M94", NetPrice=20, PoDate="2025-03-20"),   # 參考 PO 只有 1 筆
+    po("4610000011", Vendor="V76", Material="M94", NetPrice=10, PoDate="2024-10-01"),
     po("4610000006", Vendor="V70", Material="M93", NetPrice=50, PoDate="2025-03-15"),   # 參考價 10～60 太分散
     po("4610000007", Vendor="V74", Material="M93", NetPrice=10, PoDate="2024-10-01"),
     po("4610000008", Vendor="V75", Material="M93", NetPrice=60, PoDate="2024-10-01"),
@@ -547,7 +557,7 @@ check("K04 PO 空白、發票比主檔早 15 天 → 標記", (d["4550000012"].A
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K10_Detail WHERE RunId = ?", rid)}
 check("K10 明細：有收貨（101 借方）、基準日當時已存在的 PO", sorted(d),
       ["4560000001", "4560000002", "4560000003", "4560000004", "4560000005", "4560000006", "4560000008",
-       "4560000010", "4560000011"])
+       "4560000010", "4560000011", "4600000001"])
 check("K10 送貨單日早於 PO：照樣標記", (d["4560000011"].GapDays, d["4560000011"].DocGapDays, d["4560000011"].IsFlagged),
       (10, -5, True))
 x = one("SELECT MetricValue, ThresholdValue, Reason FROM kri.Flag WHERE RunId = ? AND KriCode = 'K10' "
@@ -578,7 +588,7 @@ check("K19 備註列出 PR 找不到的筆數", "PR 找不到 1" in res["K19"][7
 
 # K09
 d = {x.AccountingDoc: x for x in one("SELECT * FROM kri.K09_Detail WHERE RunId = ?", rid)}
-check("K09 候選：同供應商、同成本中心、視窗內兩張以上（借方不算）", sorted(d), ["5200000002"])
+check("K09 候選：同供應商、同成本中心、視窗內兩張以上（借方、付款傳票不算）", sorted(d), ["5200000002"])
 x = d["5200000002"]
 check("K09 合計 12000 第 2 層 > 單張第 1 層 → 標記", (float(x.WindowAmount), x.WindowLevel, x.OwnLevel, x.IsFlagged),
       (12000.0, 2, 1, True))
@@ -611,7 +621,8 @@ check("K23 主檔 15、PO 20 → 標記，未收 60 多付 300", (float(x.InfoUn
 # K24
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K24_Detail WHERE RunId = ?", rid)}
 check("K24 明細：休眠後重新下單 90 天內的 PO", sorted(k for k in d if k.startswith("461")),
-      ["4610000002", "4610000004", "4610000006"])
+      ["4610000002", "4610000004", "4610000006", "4610000010"])
+check("K24 參考 PO 只有 1 筆：不標記", (d["4610000010"].RefPoCount, d["4610000010"].IsFlagged), (1, False))
 check("K24 參考價太分散：不標記", (float(d["4610000006"].RefSpread), d["4610000006"].IsFlagged), (6.0, False))
 x = d["4610000002"]
 check("K24 比別家均價高 30% → 標記", (x.DormantDays, float(x.RefUnitPrice), x.IsFlagged, float(x.EffectLocal)),

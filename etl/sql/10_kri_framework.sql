@@ -214,7 +214,9 @@ WHERE p.PoDate BETWEEN @From AND @To
                OR (x.ListName = 'ExcludePlant'         AND p.Plant = x.ListValue)
                OR (x.ListName = 'ExcludePoType'        AND p.PoType = x.ListValue)
                OR (x.ListName = 'ExcludeMaterialGroup' AND p.MaterialGroup = x.ListValue)
-               OR (x.ListName = 'ExcludeMaterial'      AND p.Material = x.ListValue)));   -- 通用、雜項料號
+               OR (x.ListName = 'ExcludeMaterial'      AND (p.Material = x.ListValue      -- 通用、雜項料號；數字料號可以不補零
+                                                           OR (x.ListValue NOT LIKE '%[^0-9]%'
+                                                               AND p.Material = RIGHT(REPLICATE('0', 18) + x.ListValue, 18))))));
 GO
 
 -- 下單日有效的主檔價：A017（分工廠）優先，沒有再用 A018。條件類型、資訊記錄類別依白名單。

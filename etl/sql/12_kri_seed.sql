@@ -28,7 +28,7 @@ USING (VALUES
  ('K09', N'疑似拆單（direct AP）', N'同公司別、同供應商（同成本中心）在 {WindowDays} 天內多張沒有 PO 的應付傳票，單張低於核決門檻、合計需要更高層級。', N'請款', 'AP', 'kri.Run_K09', 12, 1, 2, 1, 1, 0, 0,
          N'需要 kri.ApprovalMatrix 的 AP 核決權限。成本中心目前只看供應商行；費用行進來後改從同傳票帶。沖銷傳票要等 BKPF.STBLG。'),
  ('K12', N'集中且買貴', N'兩年內只跟一家買的料號，一年單價漲幅比同物料群組其他料號平均多 {PriceTolerance} 以上。', N'採購', 'MATERIAL', 'kri.Run_K12', 12, 1, 2, 0, 1, 0, 1,
-         N'獨家先用 PO 資料判斷（ZISK／製造商料號進來後改用）；合理獨家放 ValueList AllowedSingleSource。'),
+         N'獨家先用 PO 資料判斷（客戶的獨家料號清單、製造商料號進來後改用）；合理獨家放 ValueList AllowedSingleSource。'),
  ('K22', N'主檔價大漲', N'新建的價格條件比同組合前一筆漲 {IncreaseRatio} 以上，列出生效後受影響的 PO。', N'採購', 'CONDITION', 'kri.Run_K22', 12, 1, 2, 0, 1, 0, 1,
          N'新增題目（不在原清單）。'),
  ('K23', N'便宜主檔價已生效，舊 Open PO 仍用高價', N'Open PO 下單後生效的主檔價比 PO 單價低 {PriceTolerance} 以上，未收數量仍照舊價。', N'採購', 'PO', 'kri.Run_K23', 24, 1, 2, 0, 0, 1, 1,
@@ -80,7 +80,8 @@ FROM (VALUES
  ('K24', 'DormantDays',         365,    'days',   N'兩張 PO 間隔幾天以上算休眠'),
  ('K24', 'FollowDays',          90,     'days',   N'重新啟用後看幾天內的 PO'),
  ('K24', 'PriceTolerance',      0.10,   'ratio',  N'比其他供應商均價高出多少以上'),
- ('K24', 'MaxRefSpread',        5,      'ratio',  N'參考 PO 最高價 ÷ 最低價超過這個倍數就不比（通用料號）')
+ ('K24', 'MaxRefSpread',        5,      'ratio',  N'參考 PO 最高價 ÷ 最低價超過這個倍數就不比（通用料號）'),
+ ('K24', 'MinRefPos',           2,      'count',  N'其他供應商的參考 PO 至少幾筆才比')
 ) AS s (KriCode, ParamName, ParamValue, Unit, Description)
 WHERE NOT EXISTS (SELECT 1 FROM kri.Parameter p WHERE p.KriCode = s.KriCode AND p.ParamName = s.ParamName);
 
@@ -92,7 +93,10 @@ FROM (VALUES
  ('*', 'GrMovementType',       '101',  N'PO 收貨（K10、K19）'),
  ('K03', 'BlockField',         'SPERM', N'採購凍結'),
  ('K03', 'BlockField',         'SPERR', N'過帳凍結'),
- ('K10', 'AmountCurrency',     'TWD',  N'金額上限 MaxPoAmount 的幣別；本幣不是這個的公司別不判斷金額')
+ ('K10', 'AmountCurrency',     'TWD',  N'金額上限 MaxPoAmount 的幣別；本幣不是這個的公司別不判斷金額'),
+ ('K09', 'ExcludeDocType',     'KZ',   N'付款傳票（SAP 標準類型）'),
+ ('K09', 'ExcludeDocType',     'ZP',   N'付款傳票（SAP 標準類型）'),
+ ('K09', 'ExcludeDocType',     'AB',   N'清帳／一般傳票（SAP 標準類型）')
 ) AS s (KriCode, ListName, ListValue, Note)
 WHERE NOT EXISTS (SELECT 1 FROM kri.ValueList v
                   WHERE v.KriCode = s.KriCode AND v.ListName = s.ListName AND v.ListValue = s.ListValue);
