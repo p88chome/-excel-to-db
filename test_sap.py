@@ -304,7 +304,7 @@ def test_sniff_marks_suspect_and_spares_quantities(tmp_path):
 
 # --- 欄位涵蓋率 ---------------------------------------------------------
 #
-# 實際要匯入的 34 張表（ZTM80／ZTM105 是自訂表，欄位未知所以不列）。
+# 實際要匯入的 34 張表（另有兩張 Z 開頭的自訂表，欄位未知所以不列）。
 # 只列常被萃取的欄位，不是完整的 DDIC 定義。
 # 這組測試鎖住兩個方向：代碼欄位不能漏，日期／金額／數量／文字說明
 # 不能被誤抓成代碼。改 SAP_CODE_FIELDS 時這裡會擋下退步。
@@ -511,9 +511,9 @@ def test_excel_code_columns_become_text(tmp_path):
         "MANDANT": [800, 800],
         "WRBTR": [1234.56, -1000.0],
         "MENGE": [12, 34],
-    }).to_excel(tmp_path / "ZTM80.xlsx", index=False)
+    }).to_excel(tmp_path / "ZTAB01.xlsx", index=False)
 
-    df = core.read(tmp_path / "ZTM80.xlsx")
+    df = core.read(tmp_path / "ZTAB01.xlsx")
     assert df["BELNR"].tolist() == ["1900000001", "1900000003"]
     assert df["BUKRS"].tolist() == ["1000", "2000"]
     assert df["MANDANT"].tolist() == ["800", "800"]
@@ -524,8 +524,8 @@ def test_excel_code_columns_become_text(tmp_path):
 def test_excel_code_column_with_blanks_has_no_float_tail(tmp_path):
     # 有空值時整數欄會變 float64，直接轉字串會變成 "1900000001.0"
     pd.DataFrame({"BELNR": [1900000001, None], "SGTXT": ["A", "B"]}).to_excel(
-        tmp_path / "ZTM80.xlsx", index=False)
-    df = core.read(tmp_path / "ZTM80.xlsx")
+        tmp_path / "ZTAB01.xlsx", index=False)
+    df = core.read(tmp_path / "ZTAB01.xlsx")
     assert df["BELNR"].iloc[0] == "1900000001"      # 不是 "1900000001.0"
     assert pd.isna(df["BELNR"].iloc[1])
 
@@ -673,9 +673,9 @@ def test_dtypes_override_turns_it_back_into_a_number(tmp_path):
 
 def test_excel_unknown_integer_columns_become_text(tmp_path):
     pd.DataFrame({"AIMMO": [1, 2], "NETWR": [1234.56, 99.0],
-                  "MENGE": [12, 34]}).to_excel(tmp_path / "ZTM80.xlsx",
+                  "MENGE": [12, 34]}).to_excel(tmp_path / "ZTAB01.xlsx",
                                                index=False)
-    df = core.read(tmp_path / "ZTM80.xlsx")
+    df = core.read(tmp_path / "ZTAB01.xlsx")
     assert df["AIMMO"].tolist() == ["1", "2"]
     assert df["NETWR"].tolist() == [1234.56, 99.0]
     assert df["MENGE"].tolist() == [12, 34]
@@ -727,7 +727,7 @@ def test_choosing_bit_on_a_text_column_no_longer_crashes(tmp_path):
     # 「Need to pass bool-like values」
     txt = ("Dynamic List Display\n\nMATNR\tLOEKZ\n"
            "000000001000\tX\n000000001001\t\n")
-    t = core.scan(write(tmp_path, "ZTM105.txt", txt).parent)[0]
+    t = core.scan(write(tmp_path, "ZTAB02.txt", txt).parent)[0]
     df = core.coerce(core.load(t.files), {**t.dtypes, "LOEKZ": "BIT"})
     assert df["LOEKZ"].tolist()[0] is True
 
@@ -749,7 +749,7 @@ def long_text_table(tmp_path, tail):
     """前 200 列都是短字串，之後才出現長的——掃描抽樣看不到。"""
     rows = "".join(f"A{i}\t短\n" for i in range(250))
     txt = "Dynamic List Display\n\nMATNR\tSGTXT\n" + rows + f"A999\t{tail}\n"
-    return write(tmp_path, "ZTM105.txt", txt).parent
+    return write(tmp_path, "ZTAB02.txt", txt).parent
 
 
 def test_the_255_floor_absorbs_moderate_growth(tmp_path):
@@ -785,14 +785,14 @@ def test_import_no_longer_fails_with_right_truncation(tmp_path):
     assert core.import_table(core.connect(f"sqlite:///{db}"), t) == 251
     import sqlite3
     with sqlite3.connect(db) as c:
-        longest = c.execute("SELECT MAX(LENGTH(SGTXT)) FROM ZTM105").fetchone()
+        longest = c.execute("SELECT MAX(LENGTH(SGTXT)) FROM ZTAB02").fetchone()
     assert longest[0] == 60
 
 
 def test_a_pinned_length_is_reported_not_silently_widened(tmp_path):
     root = long_text_table(tmp_path, "很" * 60)
     t = core.apply_overrides(core.scan(root),
-                             {"dtypes": {"ZTM105": {"SGTXT": "NVARCHAR(10)"}}})[0]
+                             {"dtypes": {"ZTAB02": {"SGTXT": "NVARCHAR(10)"}}})[0]
     with pytest.raises(ValueError,
                        match=r"SGTXT 指定 NVARCHAR\(10\)，但實際資料需要"):
         core.import_table(core.connect(f"sqlite:///{tmp_path / 'out.db'}"), t)

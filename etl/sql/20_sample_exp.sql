@@ -21,10 +21,10 @@
 --      一對多的（EKKN、EKET、EKBE、EBKN、BSEG、MAKT、MBEW、KONP）照實際帶，可能超過；
 --      @CapRaw = 1 時也砍到 @Rows 筆，但明細會不完整（例如一個 PO 項目只剩部分收貨紀錄）。
 --   3. 沒有組進業務表的表各 @Rows 筆：LFBK 先帶 exp.LFA1 的供應商、MBEWH 先帶 exp.MARA 的物料、
---      ANLA 先帶 EKKN / BSEG 用到的資產，再調到 @Rows 筆；ZTM105、ZTM80、ADT_* 直接隨機。
+--      ANLA 先帶 EKKN / BSEG 用到的資產，再調到 @Rows 筆；exp.ExtraTable 列的表（自訂表、外部系統表）直接隨機。
 --      設定表（T001、T001K、T001W、T024D、T024E）整張複製。
 --
--- 業務表補進來的列、ZTM / ADT 這些沒有關聯的表，跟其他表不一定串得起來。
+-- 業務表補進來的列、exp.ExtraTable 這些沒有關聯的表，跟其他表不一定串得起來。
 --
 -- 挑資料的順序：重要欄位（exp.ImportantColumn，預設是原表裡 ETL 用到的欄位）空值少的
 -- → 交易類日期新的（exp.DateColumn，@RecentFirst = 1 預設）→ 全部欄位空值少的 → seed 隨機。
@@ -43,7 +43,7 @@ GO
 -- 預設 = ETL 會用到的欄位（00_check_staging.sql 的清單）。業務表預設不列：業務表是日期新的優先、
 -- 再看全部欄位的空值；要某幾欄有值優先於日期，就把它們加進來。
 -- 可以自己增刪，重跑這支只補沒有的、不會蓋掉：
---   INSERT exp.ImportantColumn VALUES ('ZTM80', 'EBELN');
+--   INSERT exp.ImportantColumn VALUES ('ZTAB01', 'EBELN');
 --   DELETE exp.ImportantColumn WHERE TableName = 'LFA1' AND ColumnName = 'TELFX';
 IF OBJECT_ID(N'exp.ImportantColumn', N'U') IS NULL
 CREATE TABLE exp.ImportantColumn (
@@ -138,7 +138,7 @@ GO
 
 -- 交易類的表用哪個日期欄位判斷「最近」。依表名（不分 schema）對應；沒列的表不看日期。
 -- 可以自己增改，重跑這支只補沒有的：
---   INSERT exp.DateColumn VALUES ('ADT_ECAR', 'CreateDate');
+--   INSERT exp.DateColumn VALUES ('ZTAB01', 'CreatedOn');
 IF OBJECT_ID(N'exp.DateColumn', N'U') IS NULL
 CREATE TABLE exp.DateColumn (
     TableName  SYSNAME NOT NULL PRIMARY KEY,
@@ -153,6 +153,15 @@ SELECT s.t, s.c FROM (VALUES
 ('EKBE','BUDAT'),('EKET','EINDT')
 ) AS s (t, c)
 WHERE NOT EXISTS (SELECT 1 FROM exp.DateColumn x WHERE x.TableName = s.t);
+GO
+
+-- 沒有組進業務表、也沒有關聯可以回推的表（自訂表、外部系統匯入的表），各隨機抽 @Rows 筆。
+-- 表名是各環境自己的，只在本地設定，不放進版控。表在 dbo，不存在的會跳過並在結果註明：
+--   INSERT exp.ExtraTable VALUES ('ZTAB01'), ('ZTAB02');
+IF OBJECT_ID(N'exp.ExtraTable', N'U') IS NULL
+CREATE TABLE exp.ExtraTable (
+    TableName SYSNAME NOT NULL PRIMARY KEY
+);
 GO
 
 DROP FUNCTION IF EXISTS exp.FilledOrder;
@@ -457,12 +466,19 @@ BEGIN
     END;
     ELSE EXEC exp.CopyRandom N'dbo.ANLA', @Rows, @Seed, @pf, @Recent = @rf;
 
-    EXEC exp.CopyRandom N'dbo.ZTM105',       @Rows, @Seed, @pf, @Recent = @rf;
-    EXEC exp.CopyRandom N'dbo.ZTM80',        @Rows, @Seed, @pf, @Recent = @rf;
-    EXEC exp.CopyRandom N'dbo.ADT_CONTRACT', @Rows, @Seed, @pf, @Recent = @rf;
-    EXEC exp.CopyRandom N'dbo.ADT_ECAR',     @Rows, @Seed, @pf, @Recent = @rf;
-    EXEC exp.CopyRandom N'dbo.ADT_OSWEB',    @Rows, @Seed, @pf, @Recent = @rf;
-    EXEC exp.CopyRandom N'dbo.ADT_POAS',     @Rows, @Seed, @pf, @Recent = @rf;
+    -- 本地設定的其他表（exp.ExtraTable）
+    DECLARE @extra NVARCHAR(256);
+    DECLARE xt CURSOR LOCAL FAST_FORWARD FOR SELECT N'dbo.' + IIF(TableName LIKE N'%[.]%', QUOTENAME(TableName), TableName)
+                                FROM exp.ExtraTable ORDER BY TableName;
+    OPEN xt;
+    FETCH NEXT FROM xt INTO @extra;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        EXEC exp.CopyRandom @extra, @Rows, @Seed, @pf, @Recent = @rf;
+        FETCH NEXT FROM xt INTO @extra;
+    END;
+    CLOSE xt;
+    DEALLOCATE xt;
 
     SELECT Src AS [來源], N'exp.' + PARSENAME(Src, 1) AS [抽樣表], Rows AS [筆數], Note AS [說明],
            @Seed AS [Seed]

@@ -195,7 +195,7 @@ UI 版的同一份訊息顯示在狀態列。
 `sniff.py` 只看得懂 txt：
 
 ```
-ZTM80（1 個檔案，2 列）
+ZTAB01（1 個檔案，2 列）
   MANDT                NVARCHAR(20)
   EKORG                NVARCHAR(20)
   EBELN                NVARCHAR(20)
@@ -240,7 +240,7 @@ JOIN 不到；還有同一欄位這個月的檔案沒有前導零、下個月有
 不然同一個 `BELNR` 在 txt 是文字、在 Excel 被 pandas 讀成 int64，
 兩張表就 JOIN 不起來。
 
-因為只看欄名，自訂表（ZTM 開頭那種）只要欄名是標準的
+因為只看欄名，自訂表（Z 開頭那種）只要欄名是標準的
 （`MANDT` `EKORG` `IHREZ` `EBELN`…）一樣認得出來，不必另外設定。
 
 Excel 有個救不回來的情況：儲存格本來就存成數字時，前導零在 SAP
@@ -550,7 +550,7 @@ SQL Server 沒有 `BOOLEAN`，`BIT` 就是它的布林型別，存 `0` / `1` / `
 來源怎麼變都不影響：
 
 ```sql
-SELECT IIF(HAS_TDDP = 1, 'TRUE', 'FALSE') AS HAS_TDDP FROM ZTM105;
+SELECT IIF(IS_ACTIVE = 1, 'TRUE', 'FALSE') AS IS_ACTIVE FROM ZTAB02;
 ```
 
 宣告 `BIT` 時，`X`／空白（SAP 旗標）、`TRUE`／`FALSE`、`Y`／`N`、`1`／`0`

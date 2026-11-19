@@ -125,7 +125,7 @@ for v in V + ["V9999"]:
         ins("KONP", [{"KNUMH": f"K{k:09d}", "KOPOS": "01", "KBETR": 5, "KONWA": "TWD", "KPEIN": 1}])
         ins("KONH", [{"KNUMH": f"K{k:09d}", "ERDAT": "2025-01-01"}])
 
-# 其他表：LFBK 有 LIFNR、MBEWH 沒有 MATNR（測退回隨機）、ADT_ECAR 欄位隨便、ZTM80 不存在
+# 其他表：LFBK 有 LIFNR、MBEWH 沒有 MATNR（測退回隨機）、EXT_SAMPLE 欄位隨便、ZTAB_MISSING 不存在（兩張都列在 exp.ExtraTable）
 cur.execute("CREATE TABLE dbo.LFBK (LIFNR NVARCHAR(100), BANKN NVARCHAR(100))")
 for v in V + ["V9999"]:
     ins("LFBK", [{"LIFNR": v, "BANKN": "123"}])
@@ -140,14 +140,14 @@ cur.execute("UPDATE dbo.EKKN SET ANLN1 = '3' + RIGHT('00000000000' + CAST(CAST(R
             " ANLN2 = '0000' WHERE EBELP = '00010'")
 cur.execute("CREATE TABLE dbo.T001W (WERKS NVARCHAR(100), NAME1 NVARCHAR(100))")
 ins("T001W", [{"WERKS": "1100", "NAME1": "一廠"}, {"WERKS": "1200", "NAME1": "二廠"}])
-cur.execute("CREATE TABLE dbo.ADT_ECAR (Id INT, Amount DECIMAL(18,2), Memo NVARCHAR(MAX), Dt DATETIME2, Extra NVARCHAR(10))")
+cur.execute("CREATE TABLE dbo.EXT_SAMPLE (Id INT, Amount DECIMAL(18,2), Memo NVARCHAR(MAX), Dt DATETIME2, Extra NVARCHAR(10))")
 for i in range(50):
     # 只有 10 筆是完整的，其他缺 Memo：測空欄位少的優先
-    ins("ADT_ECAR", [{"Id": i, "Amount": i * 1.5, "Memo": f"備註{i}" if i % 5 == 0 else None, "Dt": "2025-01-01"}])
+    ins("EXT_SAMPLE", [{"Id": i, "Amount": i * 1.5, "Memo": f"備註{i}" if i % 5 == 0 else None, "Dt": "2025-01-01"}])
 # 這 10 筆 Memo、Dt 都有，只缺 Amount：沒設重要欄位時最完整，設了 Amount 重要就排後面
 for i in range(100, 110):
-    ins("ADT_ECAR", [{"Id": i, "Amount": None, "Memo": f"完整{i}", "Dt": "2025-01-01", "Extra": "x"}])
-cur.execute("UPDATE dbo.ADT_ECAR SET Dt = NULL WHERE Id < 100")
+    ins("EXT_SAMPLE", [{"Id": i, "Amount": None, "Memo": f"完整{i}", "Dt": "2025-01-01", "Extra": "x"}])
+cur.execute("UPDATE dbo.EXT_SAMPLE SET Dt = NULL WHERE Id < 100")
 for i in range(50):
     ins("MBEWH", [{"MATERIAL": f"X{i}", "LFGJA": "2024"}])
 
@@ -159,6 +159,7 @@ for i in range(40):           # A018 都跟抽到的單據無關，測補到 @Ro
 for f in ("01_create_tables.sql", "02_load_procedures.sql", "20_sample_exp.sql"):
     sqlcmd("-i", str(SQL / f), db=DB)
 cur.execute("EXEC etl.LoadAll").fetchall()
+cur.execute("INSERT exp.ExtraTable VALUES ('EXT_SAMPLE'), ('ZTAB_MISSING')")   # 本地設定
 # 後 20 張 PO 缺匯率：測業務表空欄位少的優先
 cur.execute("UPDATE prc.PurchaseOrderDetail SET ExchangeRate = NULL WHERE PoNumber > '4500000009'")
 
@@ -282,34 +283,34 @@ used_a = keys("SELECT DISTINCT ANLN1 + '-' + ANLN2 FROM exp.EKKN WHERE ANLN1 IS 
 got_a = keys("SELECT ANLN1 + '-' + ANLN2 FROM exp.ANLA")
 check("ANLA 剛好 5 筆、不重複、EKKN 用到的都在",
       (len(got_a), len(set(got_a)), set(used_a) <= set(got_a)), (5, 5, True))
-check("ADT_ECAR 隨機 5 筆、欄位全帶",
-      (cnt("SELECT COUNT(*) FROM exp.ADT_ECAR"),
-       cnt("SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('exp.ADT_ECAR')")), (5, 5))
-check("不存在的 ZTM80 跳過", res["dbo.ZTM80"][:2], (None, "來源表不存在，跳過"))
+check("EXT_SAMPLE 隨機 5 筆、欄位全帶",
+      (cnt("SELECT COUNT(*) FROM exp.EXT_SAMPLE"),
+       cnt("SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('exp.EXT_SAMPLE')")), (5, 5))
+check("不存在的 ZTAB_MISSING 跳過", res["dbo.ZTAB_MISSING"][:2], (None, "來源表不存在，跳過"))
 
 # ---- 重要欄位 ----
-ecar = keys("SELECT Id FROM exp.ADT_ECAR")
-check("沒設重要欄位時只看全部欄位：挑到只缺 Amount 的", all(i >= 100 for i in ecar), True)
-cur.execute("INSERT exp.ImportantColumn VALUES ('ADT_ECAR', 'Amount')")
+picked = keys("SELECT Id FROM exp.EXT_SAMPLE")
+check("沒設重要欄位時只看全部欄位：挑到只缺 Amount 的", all(i >= 100 for i in picked), True)
+cur.execute("INSERT exp.ImportantColumn VALUES ('EXT_SAMPLE', 'Amount')")
 sample(5, 42)
-ecar = keys("SELECT Id FROM exp.ADT_ECAR")
-check("設了重要欄位：重要欄位有值的優先，再看全部欄位", all(i < 100 and i % 5 == 0 for i in ecar), True)
+picked = keys("SELECT Id FROM exp.EXT_SAMPLE")
+check("設了重要欄位：重要欄位有值的優先，再看全部欄位", all(i < 100 and i % 5 == 0 for i in picked), True)
 check("重要欄位預設帶入 ETL 用到的欄位",
       cnt("SELECT COUNT(*) FROM exp.ImportantColumn WHERE TableName = 'EKKO' AND ColumnName = 'WKURS'"), 1)
 sqlcmd("-i", str(SQL / "20_sample_exp.sql"), db=DB)
 check("重跑 20 不會蓋掉自己加的重要欄位",
-      cnt("SELECT COUNT(*) FROM exp.ImportantColumn WHERE TableName = 'ADT_ECAR'"), 1)
+      cnt("SELECT COUNT(*) FROM exp.ImportantColumn WHERE TableName = 'EXT_SAMPLE'"), 1)
 
 # ---- seed ----
 po_before = pairs("SELECT PoNumber, PoItem FROM exp.PurchaseOrderDetail")
 sample(5, 42)
-check("同一個 seed 抽同一批（PO、ADT）",
-      (pairs("SELECT PoNumber, PoItem FROM exp.PurchaseOrderDetail"), keys("SELECT Id FROM exp.ADT_ECAR")),
-      (po_before, ecar))
+check("同一個 seed 抽同一批（PO、其他表）",
+      (pairs("SELECT PoNumber, PoItem FROM exp.PurchaseOrderDetail"), keys("SELECT Id FROM exp.EXT_SAMPLE")),
+      (po_before, picked))
 sample(5, 7)
 check("最近的優先時換 seed，交易類還是同一批（日期決定）；沒有日期的表換一批",
       (pairs("SELECT PoNumber, PoItem FROM exp.PurchaseOrderDetail") == po_before,
-       keys("SELECT Id FROM exp.ADT_ECAR") != ecar), (True, True))
+       keys("SELECT Id FROM exp.EXT_SAMPLE") != picked), (True, True))
 one("EXEC exp.SampleAll @Rows = 5, @Seed = 42, @RecentFirst = 0")
 po42 = pairs("SELECT PoNumber, PoItem FROM exp.PurchaseOrderDetail")
 one("EXEC exp.SampleAll @Rows = 5, @Seed = 7, @RecentFirst = 0")
@@ -329,8 +330,8 @@ check("@CapRaw = 1 不足的不補（EKBE）", cnt("SELECT COUNT(*) FROM exp.EKB
 # ---- @PreferFilled = 0 ----
 res = {r[0]: r for r in one("EXEC exp.SampleAll @Rows = 5, @Seed = 42, @PreferFilled = 0")}
 check("@PreferFilled = 0 不挑，抽得到缺 Memo 的",
-      any(i % 5 and i < 100 for i in keys("SELECT Id FROM exp.ADT_ECAR")), True)
-check("@PreferFilled = 0 說明只寫隨機", res["dbo.ADT_ECAR"][3], "隨機")
+      any(i % 5 and i < 100 for i in keys("SELECT Id FROM exp.EXT_SAMPLE")), True)
+check("@PreferFilled = 0 說明只寫隨機", res["dbo.EXT_SAMPLE"][3], "隨機")
 one("EXEC exp.SampleAll @Rows = 5, @Seed = 42, @RecentFirst = 0")
 check("@RecentFirst = 0 不看日期：空欄位少的優先（5 筆都有匯率）",
       cnt("SELECT COUNT(*) FROM exp.PurchaseOrderDetail WHERE ExchangeRate IS NOT NULL"), 5)

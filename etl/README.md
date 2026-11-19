@@ -71,7 +71,7 @@ EXEC exp.SampleAll @RecentFirst = 0;         -- 交易類不挑最近的
 1. **業務表各 `@Rows` 筆**：PO 明細隨機抽，其他業務表先帶跟這批 PO 有關的，再調到 `@Rows` 筆（超過隨機留、不足隨機補）。
 2. **SAP 原表從業務表回推**：一對一的（EKPO、EBAN、MSEG、LFA1、MARA、A017…）不會超過 `@Rows` 筆；
    一對多的（EKKN、EKET、EKBE、EBKN、BSEG、MAKT、MBEW、KONP）照實際帶，`@CapRaw = 1` 才砍。
-3. **沒組進業務表的表各 `@Rows` 筆**：LFBK、MBEWH、ANLA 先帶有關聯的再調；ZTM、ADT 直接隨機；T 開頭的設定表整張。
+3. **沒組進業務表的表各 `@Rows` 筆**：LFBK、MBEWH、ANLA 先帶有關聯的再調；`exp.ExtraTable` 列的表直接隨機（表名只在本地設定）；T 開頭的設定表整張。
 
 挑資料的順序：**重要欄位**空值少的（`exp.ImportantColumn`，預設是原表裡 ETL 用到的欄位）→ 交易類**日期新的**
 （`exp.DateColumn`，`@RecentFirst = 0` 關掉）→ 全部欄位空值少的 → seed 隨機。業務表預設沒有重要欄位，所以是日期新的優先。

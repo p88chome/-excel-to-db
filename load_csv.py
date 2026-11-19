@@ -14,7 +14,7 @@
 
 * 檔名是業務表（PurchaseOrderDetail、Vendor…）的，先跑 etl/sql/01_create_tables.sql 建好
   prc / mst / inv / fin 的表（型別、主鍵照規格），再把 CSV 轉成那個型別寫進去。
-* 其他檔案（EKKO、ZTM105…）建在 dbo，表名 = 檔名，型別照 excel-to-db 的規則判斷：
+* 其他檔案（EKKO、Z 開頭的自訂表…）建在 dbo，表名 = 檔名，型別照 excel-to-db 的規則判斷：
   代碼欄位一律文字（前導零保留）、日期 DATE、有小數點或已知的金額數量欄位 DECIMAL、其餘 NVARCHAR。
 * 空值存成 NULL；業務表的主鍵欄位（NOT NULL）存成空字串，跟 ETL 一樣。
 * 每次執行都整張重建，原本的資料會不見。
