@@ -41,7 +41,8 @@ cur.execute("INSERT dbo.T001 VALUES ('1000','TWD'), ('2000','TWD'), ('3000','JPY
 # 銀行帳號（K02）：kri.vVendorBank 一樣依 dbo.LFBK 存不存在決定
 cur.execute("CREATE TABLE dbo.LFBK (LIFNR NVARCHAR(10), BANKS NVARCHAR(3), BANKL NVARCHAR(15), BANKN NVARCHAR(18))")
 cur.execute("INSERT dbo.LFBK VALUES ('VB1','TW','0040000','123-456 789'), ('VB2','TW','0040000','123456789'),"
-            " ('VB3','TW','0040000','0000000000'), ('VB4','TW','0040000','0000000000')")
+            " ('VB3','TW','0040000','0000000000'), ('VB4','TW','0040000','0000000000'),"
+            " ('VB1','TW','0050000','555666777'), ('VB2','TW','0050000','555666777')")
 for f in ("01_create_tables.sql", "10_kri_framework.sql", "11_kri_procedures.sql", "12_kri_seed.sql"):
     run_file(f)
 
@@ -474,6 +475,18 @@ ins("prc.PurchaseOrderDetail", [po("4550000020", Vendor="V33", PaymentTerm="T030
 ins("ext.VendorCapital", [dict(Vendor="V93", Capital=500, Currency="TWD")])
 ins("prc.PurchaseOrderDetail", [po("4680000004", Vendor="V93", NetPrice=10, GrQty=100, PoDate="2025-06-01")])
 ins("prc.GoodsReceipt", [dict(gr("5099000001", "4680000004", "2026-02-01"), Quantity=100)])
+# K14：SAP 建新條件時會縮短舊條件的迄日；舊條件 A 的迄日被基準日之後才建的 B 縮短，回補時仍用 A
+ins("mst.PurchasingCondA017", [
+    cond(Material="M8", Plant="1100", ConditionRecord="0000500008", ValidFrom="2025-01-01", ValidTo="2025-01-14",
+         ConditionPrice=100),
+    cond(Material="M8", Plant="1100", ConditionRecord="0000500009", ValidFrom="2025-01-15", CreatedOn="2026-02-01",
+         ConditionPrice=200),
+])
+ins("prc.PurchaseOrderDetail", [po("4500000010", Material="M8", NetPrice=120)])
+# K18：最後一筆收貨過帳日在基準日前、但基準日之後才輸入 → 基準日當時還沒收、還沒結案
+ins("prc.PurchaseOrderDetail", [po("4520000006", Material="M40", NetPrice=5, GrQty=100, DelivDate="2025-10-01",
+                                   DelivComplInd="X")])
+ins("prc.GoodsReceipt", [dict(gr("5099000002", "4520000006", "2025-12-30", entry="2026-01-03"), Quantity=100)])
 # K08：PR 沒指定供應商、轉出的 PO 在基準日之後才開 → 不能用那張 PO 的供應商分群
 ins("prc.PurchaseOrderDetail", [po("4590000001", Vendor="V9", NetPrice=10, PoDate="2026-02-01")])
 ins("prc.PurchaseRequisition", [
@@ -538,7 +551,9 @@ check("K13 影響金額 (14-10)×100", float(d["4510000003"].EffectLocal), 400.0
 
 # K18
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K18_Detail WHERE RunId = ?", rid)}
-check("K18 只有未結案、已過交貨日的進明細", sorted(d), ["4520000001", "4520000002", "4520000003"])
+check("K18 只有未結案、已過交貨日的進明細", sorted(d), ["4520000001", "4520000002", "4520000003", "4520000006"])
+check("K18 基準日之後才輸入的收貨不算已收、不算結案", (float(d["4520000006"].GrQty), d["4520000006"].IsFlagged),
+      (0.0, True))
 check("K18 逾期 91 天收 20% 標記、影響 80×5", (d["4520000001"].IsFlagged, d["4520000001"].OverdueDays,
                                               float(d["4520000001"].EffectLocal)), (True, 91, 400.0))
 check("K18 收 60%、逾期 16 天都不標記", (d["4520000002"].IsFlagged, d["4520000003"].IsFlagged), (False, False))
@@ -744,11 +759,15 @@ check("K20 先進先出：9 天處理完、75 天才處理完、60 天還沒處�
 x = one("SELECT * FROM kri.K14_Detail WHERE RunId = ? AND PoNumber = '4500000001' AND PoItem = '00010'", rid)[0]
 check("K14 基準日之後才建、倒填生效日的主檔價不用", (x.ConditionRecord, float(x.InfoUnitPrice), x.IsFlagged),
       ("0000500001", 100.0, True))
+x = one("SELECT * FROM kri.K14_Detail WHERE RunId = ? AND PoNumber = '4500000010'", rid)[0]
+check("K14 舊條件迄日被之後才建的條件縮短：回補時仍有效", (x.ConditionRecord, x.IsFlagged), ("0000500008", True))
+check("kri.DigitCount 結尾空白不多算", [one(f"SELECT kri.DigitCount(N'{v}')")[0][0] for v in ("12 3", "(02) 2345 6789")],
+      [3, 10])
 x = {(r.VendorA, r.VendorB, r.MatchType): r for r in one("SELECT * FROM kri.K02_Detail WHERE RunId = ?", rid)}
 check("K02 銀行帳號相同（去符號）、凍結廠商的關聯廠商有 PO → 標記",
       (("VB1", "VB2", "BankAccount") in x and x[("VB1", "VB2", "BankAccount")].Scenario,
        x.get(("VB1", "VB2", "BankAccount")) and x[("VB1", "VB2", "BankAccount")].MatchValue),
-      ("凍結廠商關聯交易", "TW-0040000-123456789"))
+      ("凍結廠商關聯交易", "TW-0040000-123456789；TW-0050000-555666777"))
 check("K02 銀行帳號 0000000000 不配對", [k for k in x if "VB3" in k], [])
 x = one("SELECT MasterTerm, WorseDays, IsFlagged FROM kri.K04_Detail WHERE RunId = ? AND PoNumber = '4550000020'", rid)[0]
 check("K04 用下單當時的主檔條件（異動紀錄還原）", (x.MasterTerm, x.WorseDays, x.IsFlagged), ("T060", 30, True))
@@ -763,7 +782,7 @@ check("11_kri_procedures.sql 跟 kri_procs 一致", subprocess.run(
 r = one("SELECT KriCode, COUNT(*) FROM kri.vFlagLatest GROUP BY KriCode ORDER BY KriCode")
 check("vFlagLatest 各題標記數", [(x[0], x[1]) for x in r],
       [("K01", 5), ("K02", 3), ("K03", 5), ("K04", 6), ("K05", 2), ("K06", 2), ("K07", 1), ("K08", 2), ("K09", 1),
-       ("K10", 5), ("K11", 2), ("K12", 2), ("K13", 1), ("K14", 4), ("K15", 1), ("K16", 1), ("K17", 2), ("K18", 1),
+       ("K10", 5), ("K11", 2), ("K12", 2), ("K13", 1), ("K14", 5), ("K15", 1), ("K16", 1), ("K17", 2), ("K18", 2),
        ("K19", 5), ("K20", 2)])
 
 # 參數與對照表改了，結果跟著變
@@ -825,8 +844,11 @@ cur.execute("DELETE kri.ApprovalMatrix")
 cur.execute("UPDATE kri.Definition SET Enabled = 0 WHERE KriCode = 'K13'")
 cur.execute("UPDATE kri.Parameter SET ParamValue = 0.99 WHERE KriCode = 'K13' AND ParamName = 'PriceTolerance'")
 cur.execute("INSERT kri.ApprovalMatrix (DocType, Currency, MinAmount, MaxAmount, ApprovalLevel) VALUES ('PR','TWD',0,1,1)")
+cur.execute("INSERT kri.Definition (KriCode, Name, EntityType, ProcName, WindowMonths, Phase) "
+            "VALUES ('K99', N'舊版留下的題目', 'PO', 'kri.Run_K99', 12, 1)")
 run_file("10_kri_framework.sql")
 run_file("12_kri_seed.sql")
+check("重跑 12：清單已拿掉的題目從 Definition 移除", one("SELECT COUNT(*) FROM kri.Definition WHERE KriCode = 'K99'")[0][0], 0)
 check("重跑 10、12 不動已調的門檻、啟用狀態、核決權限", (
     float(one("SELECT ParamValue FROM kri.Parameter WHERE KriCode='K13' AND ParamName='PriceTolerance'")[0][0]),
     one("SELECT Enabled FROM kri.Definition WHERE KriCode='K13'")[0][0],

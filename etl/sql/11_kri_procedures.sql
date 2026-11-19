@@ -197,6 +197,8 @@ GO
 -- 【限制】
 --   供應商名稱在資料裡被遮罩成 -，不能拿來比對。
 --   銀行帳號直接讀 SAP 原表 LFBK（kri.vVendorBank），環境裡沒有這張表時不比帳號。
+--   銀行帳號是現在的資料：回補過去的基準日時，之後才新增、刪除的帳號沒有還原（異動紀錄目前沒有 LFBK）。
+--   兩家共用好幾個帳號時併成一對，MatchValue 用「；」列出全部共用的帳號。
 -- ======================================================================
 IF OBJECT_ID(N'kri.K02_Detail', N'U') IS NULL
 CREATE TABLE kri.K02_Detail (
@@ -295,11 +297,14 @@ BEGIN
     FROM #Attr a
     WHERE a.MatchType IN (SELECT Value FROM kri.List('K02', 'MatchAttribute'));
 
-    SELECT x.Vendor AS VendorA, y.Vendor AS VendorB, x.MatchType, x.MatchValue
+    --   兩家共用好幾個銀行帳號時併成一對，帳號用「；」串起來
+    SELECT x.Vendor AS VendorA, y.Vendor AS VendorB, x.MatchType,
+           LEFT(STRING_AGG(CAST(x.MatchValue AS NVARCHAR(MAX)), N'；') WITHIN GROUP (ORDER BY x.MatchValue), 200) AS MatchValue
     INTO #Pair
     FROM #AttrShared x
     JOIN #AttrShared y ON y.MatchType = x.MatchType AND y.MatchValue = x.MatchValue AND x.Vendor < y.Vendor
-    WHERE x.SharedBy <= @maxGroupSize;
+    WHERE x.SharedBy <= @maxGroupSize
+    GROUP BY x.Vendor, y.Vendor, x.MatchType;
 
     --   (2) 商工登記的關聯：A、B 正反兩筆、多種關係都併成一對
     INSERT #Pair (VendorA, VendorB, MatchType, MatchValue)

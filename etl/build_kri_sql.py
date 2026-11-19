@@ -38,6 +38,7 @@ def build():
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # 英文系統的主控台也不會因為中文訊息當掉
     text = build()
     if "--check" in sys.argv:
         same = OUT.exists() and OUT.read_text("utf-8") == text

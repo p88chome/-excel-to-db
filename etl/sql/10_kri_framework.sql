@@ -186,8 +186,9 @@ CREATE OR ALTER FUNCTION kri.DigitCount (@s NVARCHAR(400))
 RETURNS INT
 AS
 BEGIN
-    -- 把 0～9 都換成 #，再數 # 有幾個
-    RETURN LEN(@s) - LEN(REPLACE(TRANSLATE(@s, N'0123456789', N'##########'), N'#', N''));
+    -- 把 0～9 都換成 #，拿掉 # 之後少了幾個字 = 數字個數。
+    -- 用 DATALENGTH 不用 LEN：LEN 不算結尾的空白，'12 3' 會被算成 4 個數字。
+    RETURN (DATALENGTH(@s) - DATALENGTH(REPLACE(TRANSLATE(@s, N'0123456789', N'##########'), N'#', N''))) / 2;
 END;
 GO
 
@@ -296,6 +297,8 @@ GO
 -- 同一天有多筆有效（不同條件類型或期間重疊）時取生效日最近的一筆。
 -- @KnownBy：只看這天以前已經建立的條件（通常給基準日）。回補過去的基準日時，
 --            不能用到基準日之後才建、再把生效日倒填回去的主檔價。建立日空白的視為生效日就建了。
+--            SAP 建新條件時會把重疊的舊條件的有效迄日縮短；舊條件的迄日如果是被 @KnownBy 之後才建的
+--            條件縮短的（新條件的生效日 = 舊條件迄日 + 1），那天的舊條件當作還有效。
 CREATE OR ALTER FUNCTION kri.InfoPriceAt (@KriCode NVARCHAR(10), @Vendor NVARCHAR(20),
         @Material NVARCHAR(40), @PurchOrg NVARCHAR(10), @Plant NVARCHAR(10), @OnDate DATE, @KnownBy DATE)
 RETURNS TABLE
@@ -304,17 +307,29 @@ SELECT TOP 1 c.Source, c.ConditionRecord, c.ConditionType, c.ValidFrom, c.ValidT
        c.Currency, c.OrderUom,
        CAST(c.ConditionPrice / NULLIF(c.PriceUnit, 0) AS DECIMAL(19,6)) AS UnitPrice
 FROM (
-    SELECT 1 AS Pref, 'A017' AS Source, ConditionRecord, ConditionType, ValidFrom, ValidTo,
-           Currency, OrderUom, ConditionPrice, PriceUnit, InfoCategory, DeletionInd, CreatedOn
-    FROM mst.PurchasingCondA017
-    WHERE Vendor = @Vendor AND Material = @Material AND PurchOrg = @PurchOrg AND Plant = @Plant
-      AND @OnDate BETWEEN ValidFrom AND ValidTo
+    SELECT 1 AS Pref, 'A017' AS Source, a.ConditionRecord, a.ConditionType, a.ValidFrom, a.ValidTo,
+           a.Currency, a.OrderUom, a.ConditionPrice, a.PriceUnit, a.InfoCategory, a.DeletionInd, a.CreatedOn
+    FROM mst.PurchasingCondA017 a
+    WHERE a.Vendor = @Vendor AND a.Material = @Material AND a.PurchOrg = @PurchOrg AND a.Plant = @Plant
+      AND a.ValidFrom <= @OnDate
+      AND (   @OnDate <= a.ValidTo
+           OR EXISTS (SELECT 1 FROM mst.PurchasingCondA017 n          -- 迄日是之後才建的條件縮短的
+                      WHERE n.Vendor = a.Vendor AND n.Material = a.Material AND n.PurchOrg = a.PurchOrg
+                        AND n.Plant = a.Plant AND n.InfoCategory = a.InfoCategory AND n.ConditionType = a.ConditionType
+                        AND n.ValidFrom = DATEADD(DAY, 1, a.ValidTo)
+                        AND ISNULL(n.CreatedOn, n.ValidFrom) > @KnownBy))
     UNION ALL
-    SELECT 2, 'A018', ConditionRecord, ConditionType, ValidFrom, ValidTo,
-           Currency, OrderUom, ConditionPrice, PriceUnit, InfoCategory, DeletionInd, CreatedOn
-    FROM mst.PurchasingCondA018
-    WHERE Vendor = @Vendor AND Material = @Material AND PurchOrg = @PurchOrg
-      AND @OnDate BETWEEN ValidFrom AND ValidTo
+    SELECT 2, 'A018', a.ConditionRecord, a.ConditionType, a.ValidFrom, a.ValidTo,
+           a.Currency, a.OrderUom, a.ConditionPrice, a.PriceUnit, a.InfoCategory, a.DeletionInd, a.CreatedOn
+    FROM mst.PurchasingCondA018 a
+    WHERE a.Vendor = @Vendor AND a.Material = @Material AND a.PurchOrg = @PurchOrg
+      AND a.ValidFrom <= @OnDate
+      AND (   @OnDate <= a.ValidTo
+           OR EXISTS (SELECT 1 FROM mst.PurchasingCondA018 n
+                      WHERE n.Vendor = a.Vendor AND n.Material = a.Material AND n.PurchOrg = a.PurchOrg
+                        AND n.InfoCategory = a.InfoCategory AND n.ConditionType = a.ConditionType
+                        AND n.ValidFrom = DATEADD(DAY, 1, a.ValidTo)
+                        AND ISNULL(n.CreatedOn, n.ValidFrom) > @KnownBy))
 ) c
 WHERE ISNULL(c.DeletionInd, '') = ''
   AND ISNULL(c.CreatedOn, c.ValidFrom) <= @KnownBy
@@ -385,9 +400,16 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_kri_PO_Vendor' AND obj
     CREATE INDEX IX_kri_PO_Vendor ON prc.PurchaseOrderDetail (Vendor, PoDate)
     INCLUDE (PurchOrg, CompanyCode, Plant, Material, MaterialGroup, PoType, NetValue, Currency,
              ExchangeRate, OrderQty, DeletionInd);
+-- kri.PoReceivedAt 要讀 Quantity：舊版索引沒有包含的話先拿掉重建
+IF EXISTS (SELECT 1 FROM sys.indexes i WHERE i.name = 'IX_kri_GR_Po' AND i.object_id = OBJECT_ID('prc.GoodsReceipt'))
+   AND NOT EXISTS (SELECT 1 FROM sys.indexes i
+                   JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+                   WHERE i.name = 'IX_kri_GR_Po' AND i.object_id = OBJECT_ID('prc.GoodsReceipt')
+                     AND COL_NAME(ic.object_id, ic.column_id) = 'Quantity')
+    DROP INDEX IX_kri_GR_Po ON prc.GoodsReceipt;
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_kri_GR_Po' AND object_id = OBJECT_ID('prc.GoodsReceipt'))
     CREATE INDEX IX_kri_GR_Po ON prc.GoodsReceipt (PoNumber, PoItem)
-    INCLUDE (PostingDate, EntryDate, DocumentDate, MovementType, DebitCreditInd, ItemText);
+    INCLUDE (PostingDate, EntryDate, DocumentDate, MovementType, DebitCreditInd, ItemText, Quantity);
 GO
 
 -- ======================================================================
@@ -626,7 +648,10 @@ GO
 --   所以用「那天以前的收貨 ÷ 全部收貨」的比例，乘上 PO 現在的已收數量，換回那天的已收數量。
 --   ReceivedQty = 那天已收（PO 單位）。沒有收貨資料時就用 PO 上的已收數量。
 --   BasePerUnit = 每個 PO 單位等於幾個基本單位（收貨量 ÷ PO 已收數量），沒收過貨當 1。
---   IsClosed    = 交貨完成碼有勾，而且最後一次收貨在那天以前（沒收過貨的看下單日）。
+--   IsClosed    = 交貨完成碼有勾，而且所有收貨在那天以前都已經存在（過帳日、輸入日都 <= 那天）。
+--                 那天之後才過帳或才輸入的收貨，代表那天還沒收完、還沒結案。
+-- 限制：交貨完成碼是那天之後才手動勾、之後又沒有收貨的，分辨不出來，會當作那天已結案。
+--       收貨資料的下載期間如果比 PO 短（前面的收貨沒下載到），比例只用下載到的收貨算。
 CREATE OR ALTER FUNCTION kri.PoReceivedAt (@PoNumber NVARCHAR(10), @PoItem NVARCHAR(5), @GrQty DECIMAL(19,4),
                                            @DelivComplInd NVARCHAR(1), @PoDate DATE, @OnDate DATE)
 RETURNS TABLE
@@ -636,12 +661,13 @@ SELECT CAST(CASE WHEN g.TotalQty > 0 THEN ISNULL(@GrQty, 0) * g.QtyByDate / g.To
        CAST(CASE WHEN g.TotalQty > 0 AND @GrQty > 0 THEN g.TotalQty / @GrQty
                  ELSE 1 END AS DECIMAL(19,6))                                       AS BasePerUnit,
        CAST(CASE WHEN ISNULL(@DelivComplInd, '') <> ''
-                  AND ISNULL(g.LastGrDate, @PoDate) <= @OnDate THEN 1
+                  AND ISNULL(g.LaterCount, 0) = 0
+                  AND @PoDate <= @OnDate THEN 1
                  ELSE 0 END AS BIT)                                                 AS IsClosed
 FROM (
     SELECT SUM(r.SignedQty)                                 AS TotalQty,    -- 全部收貨（扣掉退貨、沖銷）
            SUM(IIF(r.KnownByDate = 1, r.SignedQty, 0))     AS QtyByDate,   -- 那天以前的收貨
-           MAX(r.PostingDate)                               AS LastGrDate
+           SUM(1 - r.KnownByDate)                           AS LaterCount   -- 那天之後才過帳或才輸入的收貨筆數
     FROM (
         SELECT g.PostingDate,
                IIF(g.DebitCreditInd = 'H', -g.Quantity, g.Quantity) AS SignedQty,     -- 貸方（H）= 退貨或沖銷，算負的

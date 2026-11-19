@@ -56,7 +56,10 @@ WHEN MATCHED THEN UPDATE SET
 WHEN NOT MATCHED THEN INSERT (KriCode, Name, Description, Stage, EntityType, ProcName, WindowMonths,
                               Enabled, Phase, IsCompliance, IsFraud, IsOperation, IsFinancial, Notes)
     VALUES (s.KriCode, s.Name, s.Description, s.Stage, s.EntityType, s.ProcName, s.WindowMonths,
-            s.Enabled, s.Phase, s.IsCompliance, s.IsFraud, s.IsOperation, s.IsFinancial, s.Notes);
+            s.Enabled, s.Phase, s.IsCompliance, s.IsFraud, s.IsOperation, s.IsFinancial, s.Notes)
+-- 這份清單已經拿掉的題目（舊版部署留下來的）：從 Definition 移除，kri.RunAll 就不會再跑。
+-- 只動 Kxx 編號的題目；程序、明細表和 kri.Flag 裡的舊結果都留著，只是 vFlagLatest 不再顯示。
+WHEN NOT MATCHED BY SOURCE AND t.KriCode LIKE 'K[0-9][0-9]' THEN DELETE;
 
 INSERT kri.Parameter (KriCode, ParamName, ParamValue, Unit, Description)
 SELECT s.KriCode, s.ParamName, s.ParamValue, s.Unit, s.Description
