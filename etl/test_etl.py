@@ -74,9 +74,9 @@ ins("LFA1", [dict(LIFNR="0000100001", NAME1="台灣測試股份有限公司", LA
              dict(LIFNR="0000100002", NAME1="日本テスト株式会社", LAND1="JP")])
 ins("LFB1", [dict(LIFNR="0000100001", BUKRS=b, ZTERM="NT30", ZAHLS="A" if b == "1000" else None)
              for b in ("1000", "2000", "3000")])
-ins("LFM1", [dict(LIFNR="0000100001", EKORG=e, ZTERM="NT60", VERKF="王小明") for e in ("TW01", "TW02")])
-# TW01 屬於公司別 1000；TW02 是跨公司的採購組織，沒有公司別
-ins("T024E", [dict(EKORG="TW01", BUKRS="1000"), dict(EKORG="TW02", BUKRS=None)])
+ins("LFM1", [dict(LIFNR="0000100001", EKORG=e, ZTERM="NT60", VERKF="王小明") for e in ("P001", "TW02")])
+# P001 屬於公司別 1000；TW02 是跨公司的採購組織，沒有公司別
+ins("T024E", [dict(EKORG="P001", BUKRS="1000"), dict(EKORG="TW02", BUKRS=None)])
 ins("MAKT", [dict(MATNR="000000000000012345", SPRAS="ZF", MAKTX="晶圓載具"),
              dict(MATNR="000000000000012345", SPRAS="E", MAKTX="Wafer carrier")])
 ins("MARA", [dict(MATNR="000000000000012345", MTART="ROH", MATKL="A01", MEINS="EA")])
@@ -115,14 +115,14 @@ ins("CDPOS", [dict(OBJECTCLAS="KRED", OBJECTID="0000100001", CHANGENR="000001234
              + [dict(OBJECTCLAS="KRED", OBJECTID="0000100001", CHANGENR="0000012345", TABNAME="LFA1",
                      TABKEY="8000000100001", FNAME="NAME1", CHNGIND="U")])
 ins("EINA", [dict(INFNR="5300000001", LIFNR="0000100001", MATNR="000000000000012345")])
-ins("EINE", [dict(INFNR="5300000001", EKORG="TW01", ESOKZ="0", WERKS=None),
-             dict(INFNR="5300000001", EKORG="TW01", ESOKZ="0", WERKS="1100")])
+ins("EINE", [dict(INFNR="5300000001", EKORG="P001", ESOKZ="0", WERKS=None),
+             dict(INFNR="5300000001", EKORG="P001", ESOKZ="0", WERKS="1100")])
 ins("KONP", [dict(KNUMH="0000500001", KOPOS=k, KBETR=p, KPEIN=1, LOEVM_KO=None)
              for k, p in (("02", 999), ("01", 120))])
 ins("KONH", [dict(KNUMH="0000500001", ERDAT="2023-01-01", ERNAM="BUYER")])
-ins("A017", [dict(LIFNR="0000100001", MATNR="000000000000012345", EKORG="TW01", WERKS="1100",
+ins("A017", [dict(LIFNR="0000100001", MATNR="000000000000012345", EKORG="P001", WERKS="1100",
                   ESOKZ="0", KSCHL="PB00", DATAB="2023-01-01", DATBI="9999-12-31", KNUMH="0000500001")])
-ins("A018", [dict(LIFNR="0000100001", MATNR="000000000000012345", EKORG="TW01",
+ins("A018", [dict(LIFNR="0000100001", MATNR="000000000000012345", EKORG="P001",
                   ESOKZ="0", KSCHL="PB00", DATAB="2023-01-01", DATBI="9999-12-31", KNUMH="0000500001")])
 ins("MARD", [dict(MATNR="000000000000012345", WERKS=w, LGORT=l, LABST=10)
              for w, l in (("1100", "0001"), ("1100", "0002"), ("1200", "0001"))])
@@ -197,9 +197,9 @@ r = one("SELECT Vendor, PurchOrg, CompanyCode, PaymentTerms, PurchOrgPaymentTerm
         "VendorRowNo, VendorName, SalesPerson, CentralPostingBlock FROM mst.Vendor ORDER BY Vendor, VendorRowNo")
 check("Vendor 只留真實組合（不是 3×2 笛卡兒積）",
       [(x.Vendor[-1], x.PurchOrg, x.CompanyCode) for x in r],
-      [("1", "", "2000"), ("1", "", "3000"), ("1", "TW01", "1000"), ("1", "TW02", ""), ("2", "", "")])
-tw01 = next(x for x in r if x.PurchOrg == "TW01")
-check("TW01 帶到公司別 1000 的 LFB1 付款條件與 ZAHLS",
+      [("1", "", "2000"), ("1", "", "3000"), ("1", "P001", "1000"), ("1", "TW02", ""), ("2", "", "")])
+tw01 = next(x for x in r if x.PurchOrg == "P001")
+check("P001 帶到公司別 1000 的 LFB1 付款條件與 ZAHLS",
       (tw01.PaymentTerms, tw01.PaymentBlock), ("NT30", "A"))
 check("PurchOrgPaymentTerms 來自 LFM1", tw01.PurchOrgPaymentTerms, "NT60")
 check("跨公司採購組織沒有 LFB1 資料", next(x for x in r if x.PurchOrg == "TW02").PaymentTerms, None)
@@ -251,13 +251,13 @@ check("失敗的表沒有被清空成半套（交易回滾）",
 
 # ---- 沒有 T024E：從 EKKO 推採購組織的公司別 ----
 cur.execute("DROP TABLE dbo.T024E")
-ins("EKKO", [dict(EBELN="4500000002", BSTYP="F", BUKRS="1000", EKORG="TW01"),
+ins("EKKO", [dict(EBELN="4500000002", BSTYP="F", BUKRS="1000", EKORG="P001"),
              dict(EBELN="4500000003", BSTYP="F", BUKRS="1000", EKORG="TW02"),
              dict(EBELN="4500000004", BSTYP="F", BUKRS="2000", EKORG="TW02")])
 cur.execute("EXEC etl.Load_Vendor")
 r = one("SELECT PurchOrg, CompanyCode, PaymentTerms FROM mst.Vendor WHERE Vendor='0000100001' AND PurchOrg<>'' ORDER BY 1")
-check("沒有 T024E：TW01 只跟 1000 出現過 → 1000；TW02 跟兩個公司別出現過 → 跨公司",
-      [(x.PurchOrg, x.CompanyCode, x.PaymentTerms) for x in r], [("TW01", "1000", "NT30"), ("TW02", "", None)])
+check("沒有 T024E：P001 只跟 1000 出現過 → 1000；TW02 跟兩個公司別出現過 → 跨公司",
+      [(x.PurchOrg, x.CompanyCode, x.PaymentTerms) for x in r], [("P001", "1000", "NT30"), ("TW02", "", None)])
 
 # ---- 欄位沒下載齊：BSEG 沒有 KOART/SHKZG、EBAN 少一堆，用 @fill = 1 補空欄先組起來 ----
 cur.execute("EXEC sp_rename 'dbo.BSEG_x', 'BSEG'")

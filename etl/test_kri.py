@@ -48,7 +48,7 @@ def ins(table, rows):
 
 
 def po(number, item="00010", **kw):
-    base = dict(PoNumber=number, PoItem=item, CompanyCode="1000", PurchOrg="TW01", Plant="1100",
+    base = dict(PoNumber=number, PoItem=item, CompanyCode="1000", PurchOrg="P001", Plant="1100",
                 Vendor="V1", OrderUom="EA", Currency="TWD", ExchangeRate=1, PriceUnit=1,
                 PoDate="2025-03-01", OrderQty=100)
     base.update(kw)
@@ -58,7 +58,7 @@ def po(number, item="00010", **kw):
 
 
 def cond(**kw):
-    base = dict(Vendor="V1", PurchOrg="TW01", InfoCategory="0", ConditionType="PB00",
+    base = dict(Vendor="V1", PurchOrg="P001", InfoCategory="0", ConditionType="PB00",
                 ValidFrom="2025-01-01", ValidTo="9999-12-31", Currency="TWD", PriceUnit=1,
                 OrderUom="EA", CreatedOn="2024-12-01")
     base.update(kw)
@@ -121,7 +121,7 @@ ins("kri.ApprovalMatrix", [
 
 def pr(number, date, cc, vendor, amount, **kw):
     base = dict(PrNumber=number, PrItem="00010", PrDate=date, CostCenter=cc, Vendor=vendor,
-                ReqQty=1, ValPrice=amount, Currency="TWD", Plant="1100", PurchOrg="TW01", Material="M50")
+                ReqQty=1, ValPrice=amount, Currency="TWD", Plant="1100", PurchOrg="P001", Material="M50")
     base.update(kw)
     return base
 
@@ -190,8 +190,8 @@ def chg(vendor, no, date, table, key, field, old, new, by="U1"):
 ins("mst.VendorChangeHistory", [
     chg("0000000020", "C001", "2025-04-01", "LFA1", "1000000000020", "SPERM", "X", ""),
     chg("0000000020", "C002", "2025-04-10", "LFA1", "1000000000020", "SPERM", "", "X"),       # 9 天、有 PO → 標記
-    chg("0000000021", "C003", "2025-05-01", "LFM1", "1000000000021TW01", "SPERM", "X", ""),
-    chg("0000000021", "C004", "2025-05-20", "LFM1", "1000000000021TW01", "SPERM", "", "X"),   # PO 在別的採購組織
+    chg("0000000021", "C003", "2025-05-01", "LFM1", "1000000000021P001", "SPERM", "X", ""),
+    chg("0000000021", "C004", "2025-05-20", "LFM1", "1000000000021P001", "SPERM", "", "X"),   # PO 在別的採購組織
     chg("0000000022", "C005", "2025-06-01", "LFA1", "1000000000022", "SPERR", "X", ""),
     chg("0000000022", "C006", "2025-08-15", "LFA1", "1000000000022", "SPERR", "", "X"),       # 75 天，太久
     chg("0000000023", "C007", "2025-09-01", "LFA1", "1000000000023", "SPERM", "X", ""),       # 沒再凍結
@@ -200,10 +200,10 @@ ins("mst.VendorChangeHistory", [
     chg("0000000025", "C010", "2025-04-01", "LFA1", "1000000000025", "NAME1", "A", ""),       # 不是凍結欄位
     chg("0000000026", "C011", "2025-12-01", "LFA1", "1000000000026", "SPERM", "X", ""),
     chg("0000000026", "C012", "2026-01-05", "LFA1", "1000000000026", "SPERM", "", "X"),       # 基準日之後才再凍結
-    # 同一張異動單解凍兩個採購組織，只有 TW01 有 PO
-    chg("0000000027", "C013", "2025-03-01", "LFM1", "1000000000027TW01", "SPERM", "X", ""),
+    # 同一張異動單解凍兩個採購組織，只有 P001 有 PO
+    chg("0000000027", "C013", "2025-03-01", "LFM1", "1000000000027P001", "SPERM", "X", ""),
     chg("0000000027", "C013", "2025-03-01", "LFM1", "1000000000027TW02", "SPERM", "X", ""),
-    chg("0000000027", "C014", "2025-03-10", "LFM1", "1000000000027TW01", "SPERM", "", "X"),
+    chg("0000000027", "C014", "2025-03-10", "LFM1", "1000000000027P001", "SPERM", "", "X"),
     chg("0000000027", "C014", "2025-03-10", "LFM1", "1000000000027TW02", "SPERM", "", "X"),
     chg("0000000028", "C015", "2025-03-01", "LFA1", "1000000000028", "SPERM", "X", ""),
     chg("0000000028", "C016", "2025-03-05", "LFA1", "1000000000028", "SPERM", "", "X"),       # 採購凍結只有傳票
@@ -238,8 +238,8 @@ ins("fin.AccountsPayable", [
 
 # ---------------------------------------------------------------- K04
 ins("mst.Vendor", [
-    dict(Vendor="V30", CompanyCode="1000", PurchOrg="TW01", PurchOrgPaymentTerms="T045", PaymentTerms="T060"),
-    dict(Vendor="V32", CompanyCode="1000", PurchOrg="TW01", PurchOrgPaymentTerms="T045"),   # 公司別層空白
+    dict(Vendor="V30", CompanyCode="1000", PurchOrg="P001", PurchOrgPaymentTerms="T045", PaymentTerms="T060"),
+    dict(Vendor="V32", CompanyCode="1000", PurchOrg="P001", PurchOrgPaymentTerms="T045"),   # 公司別層空白
 ])
 ins("prc.PurchaseOrderDetail", [
     po("4550000001", Vendor="V30", PaymentTerm="T030", NetPrice=3650),   # 提早 15 天 → 標記
@@ -408,7 +408,7 @@ ins("mst.PurchasingCondA018", [
 
 # ---------------------------------------------------------------- K02
 def vend(v, **kw):
-    return dict(dict(Vendor=v, CompanyCode="1000", PurchOrg="TW01"), **kw)
+    return dict(dict(Vendor=v, CompanyCode="1000", PurchOrg="P001"), **kw)
 
 
 ins("mst.Vendor", [
@@ -622,14 +622,14 @@ check("K03 基準日之後的再凍結看不到", (d["0000000026"].ReblockDate, 
 check("K03 解凍 9 天、期間有 PO → 標記", (d["0000000020"].OpenDays, d["0000000020"].PoCount, d["0000000020"].IsFlagged),
       (9, 1, True))
 check("K03 LFM1 只算該採購組織的 PO", (d["0000000021"].Scope, d["0000000021"].PoCount, d["0000000021"].IsFlagged),
-      ("TW01", 0, False))
+      ("P001", 0, False))
 check("K03 解凍太久、沒再凍結都不標記", (d["0000000022"].IsFlagged, d["0000000023"].ReblockDate, d["0000000023"].IsFlagged),
       (False, None, False))
 check("K03 LFB1 期間內有應付傳票 → 標記", (d["0000000024"].Scope, d["0000000024"].ApCount, d["0000000024"].IsFlagged),
       ("1000", 1, True))
 x = one("SELECT Scope, IsFlagged FROM kri.K03_Detail WHERE RunId = ? AND Vendor = '0000000027' ORDER BY Scope", rid)
 check("K03 同一張異動單解凍兩個採購組織：各一筆、只標有 PO 的", [(r.Scope, r.IsFlagged) for r in x],
-      [("TW01", True), ("TW02", False)])
+      [("P001", True), ("TW02", False)])
 check("K03 採購凍結只算 PO、過帳凍結只算傳票", (d["0000000028"].ApCount, d["0000000028"].IsFlagged,
       d["0000000022"].PoCount), (0, False, 0))
 check("K03 同一天、沒有時間：用異動單號排先後", (d["0000000029"].ReblockDate is not None, d["0000000029"].OpenDays,

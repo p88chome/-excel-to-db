@@ -83,7 +83,7 @@ EXEC exp.SampleAll @RecentFirst = 0;         -- 交易類不挑最近的
 SSMS 匯出的 CSV（`|` 分隔、每格雙引號，例如 exp 的抽樣結果）放在 `Data/`，在專案根目錄跑：
 
 ```
-python load_csv.py                                   # Data/ → 本機 LocalDB 的 umc_test（沒有就建）
+python load_csv.py                                   # Data/ → 本機 LocalDB 的 kri_sample（沒有就建）
 python load_csv.py --folder D:\sample --conn "Driver={ODBC Driver 17 for SQL Server};Server=...;Database=...;Uid=...;Pwd=..."
 ```
 

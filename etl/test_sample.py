@@ -63,7 +63,7 @@ ins("T001", [{"BUKRS": "1000", "WAERS": "TWD"}])
 for i in range(N):
     v, m = V[i % 6], M[i % 8]
     # PO 日期一天一張，測最近的優先
-    ins("EKKO", [{"EBELN": po(i), "BSTYP": "F", "BSART": "NB", "BUKRS": "1000", "EKORG": "TW01",
+    ins("EKKO", [{"EBELN": po(i), "BSTYP": "F", "BSART": "NB", "BUKRS": "1000", "EKORG": "P001",
                   "BEDAT": f"2025-03-{i + 1:02d}", "LIFNR": v, "WAERS": "TWD", "WKURS": 1}])
     for item in ("00010", "00020"):
         # 前一半的 PO 由 PR 轉來
@@ -101,7 +101,7 @@ for i in range(N + 10):         # PR 比 PO 多：後 10 張沒有轉 PO
 for v in V + ["V9999"]:         # V9999 沒有任何單據用到
     ins("LFA1", [{"LIFNR": v, "NAME1": f"供應商{v}"}])
     ins("LFB1", [{"LIFNR": v, "BUKRS": "1000"}])
-    ins("LFM1", [{"LIFNR": v, "EKORG": "TW01"}])
+    ins("LFM1", [{"LIFNR": v, "EKORG": "P001"}])
     ins("CDHDR", [{"OBJECTCLAS": "KRED", "OBJECTID": v, "CHANGENR": f"C{v}", "UDATE": "2025-01-01"},
                   {"OBJECTCLAS": "MATERIAL", "OBJECTID": v, "CHANGENR": f"X{v}", "UDATE": "2025-01-01"}])
     ins("CDPOS", [{"OBJECTCLAS": "KRED", "OBJECTID": v, "CHANGENR": f"C{v}", "TABNAME": "LFA1",
@@ -119,8 +119,8 @@ for v in V + ["V9999"]:
     for m in M + ["M99999"]:
         k += 1
         ins("EINA", [{"INFNR": f"53{k:08d}", "LIFNR": v, "MATNR": m}])
-        ins("EINE", [{"INFNR": f"53{k:08d}", "EKORG": "TW01", "ESOKZ": "0", "WERKS": ""}])
-        ins("A017", [{"LIFNR": v, "MATNR": m, "EKORG": "TW01", "WERKS": "1100", "ESOKZ": "0",
+        ins("EINE", [{"INFNR": f"53{k:08d}", "EKORG": "P001", "ESOKZ": "0", "WERKS": ""}])
+        ins("A017", [{"LIFNR": v, "MATNR": m, "EKORG": "P001", "WERKS": "1100", "ESOKZ": "0",
                       "KSCHL": "PB00", "DATAB": "2025-01-01", "DATBI": "9999-12-31", "KNUMH": f"K{k:09d}"}])
         ins("KONP", [{"KNUMH": f"K{k:09d}", "KOPOS": "01", "KBETR": 5, "KONWA": "TWD", "KPEIN": 1}])
         ins("KONH", [{"KNUMH": f"K{k:09d}", "ERDAT": "2025-01-01"}])
@@ -152,7 +152,7 @@ for i in range(50):
     ins("MBEWH", [{"MATERIAL": f"X{i}", "LFGJA": "2024"}])
 
 for i in range(40):           # A018 都跟抽到的單據無關，測補到 @Rows
-    ins("A018", [{"LIFNR": "V9999", "MATNR": "M99999", "EKORG": "TW01", "ESOKZ": "0", "KSCHL": "PB00",
+    ins("A018", [{"LIFNR": "V9999", "MATNR": "M99999", "EKORG": "P001", "ESOKZ": "0", "KSCHL": "PB00",
                   "DATAB": f"20{i:02d}-01-01", "DATBI": f"20{i:02d}-12-31", "KNUMH": f"Q{i:09d}"}])
     ins("KONP", [{"KNUMH": f"Q{i:09d}", "KOPOS": "01", "KBETR": 5, "KONWA": "TWD", "KPEIN": 1}])
 

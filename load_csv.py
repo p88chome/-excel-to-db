@@ -3,9 +3,9 @@
 給 SSMS「匯出成 CSV」的檔案用：UTF-8、| 分隔、每格有雙引號、空值是 ""、
 日期像 2023/09/06 上午 12:00:00。
 
-    python load_csv.py                                  # Data 資料夾 → 本機 LocalDB 的 umc_test
+    python load_csv.py                                  # Data 資料夾 → 本機 LocalDB 的 kri_sample
     python load_csv.py --folder D:\\sample              # 指定資料夾
-    python load_csv.py --conn "Driver={ODBC Driver 17 for SQL Server};Server=xxx.database.windows.net;Database=umc_test;Uid=...;Pwd=..."
+    python load_csv.py --conn "Driver={ODBC Driver 17 for SQL Server};Server=xxx.database.windows.net;Database=kri_sample;Uid=...;Pwd=..."
     python load_csv.py --create-db                      # 資料庫不存在就先建（雲端通常要先在入口網站建好）
     python load_csv.py --collation Chinese_Taiwan_Stroke_CI_AS_WS   # 建資料庫時用的定序
 
@@ -36,7 +36,7 @@ import core
 HERE = Path(__file__).parent
 DDL = HERE / "etl" / "sql" / "01_create_tables.sql"
 DEFAULT_CONN = ("Driver={ODBC Driver 17 for SQL Server};Server=(localdb)\\MSSQLLocalDB;"
-                "Database=umc_test;Trusted_Connection=yes")
+                "Database=kri_sample;Trusted_Connection=yes")
 
 DATE_RE = re.compile(r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})"
                      r"(?:\s+(上午|下午|AM|PM)?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(上午|下午|AM|PM)?)?$", re.I)
@@ -173,7 +173,7 @@ def load(cur, path, biz):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="把資料夾裡的 CSV 匯進 SQL Server（一個檔案一張表）")
     ap.add_argument("--folder", default=str(HERE / "Data"), help="CSV 資料夾（預設 Data）")
-    ap.add_argument("--conn", default=DEFAULT_CONN, help="ODBC 連線字串（預設本機 LocalDB 的 umc_test）")
+    ap.add_argument("--conn", default=DEFAULT_CONN, help="ODBC 連線字串（預設本機 LocalDB 的 kri_sample）")
     ap.add_argument("--create-db", action="store_true",
                     help="資料庫不存在就先建（用預設連線時自動開啟）")
     ap.add_argument("--collation", default="Chinese_Taiwan_Stroke_CI_AS_WS",
