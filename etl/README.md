@@ -80,12 +80,28 @@ EXEC exp.SampleAll @RecentFirst = 0;         -- 交易類不挑最近的
 
 ## 把 CSV 匯進資料庫
 
-SSMS 匯出的 CSV（`|` 分隔、每格雙引號，例如 exp 的抽樣結果）放在 `Data/`，在專案根目錄跑：
+SSMS 匯出的 CSV（`|` 分隔、每格雙引號，例如 exp 的抽樣結果）放在 `Data/`。有兩種用法：
+
+- **exe（不用裝 Python）**：`build_load_csv.bat` 打包出 `dist\load_csv\`（約 9 MB），整個資料夾帶到要用的機器。
+  目標機器只要有 ODBC Driver for SQL Server（17 或 18；雲端用 Entra 登入建議 18）。
+- **Python**：在專案根目錄 `python load_csv.py`，參數完全一樣。
+
+連線設定的優先順序：`--conn` 完整連線字串 > `--server`、`--database`… 參數 > 程式旁邊的 `.env` > 一步一步問。
+換環境（例如搬到雲端）時只要改 `.env`，或刪掉 `.env` 再點兩下重新回答。範本是 `load_csv.env.example`。
 
 ```
-python load_csv.py                                   # Data/ → 本機 LocalDB 的 kri_sample（沒有就建）
-python load_csv.py --folder D:\sample --conn "Driver={ODBC Driver 17 for SQL Server};Server=...;Database=...;Uid=...;Pwd=..."
+load_csv.exe                                         # 點兩下：問伺服器、資料庫、驗證方式，最後可以存成 .env（不存密碼）
+load_csv.exe --test                                  # 只測連線，印出連到哪台、哪個資料庫、用誰登入
+load_csv.exe --server (localdb)\MSSQLLocalDB --database kri_sample          # 本機 LocalDB（沒有就建）
+load_csv.exe --server xxx.database.windows.net --database kri --auth entra-interactive --user me@corp.com
+load_csv.exe --server SQL01,1433 --database kri --auth sql --user loader --save-env   # 密碼另外問；設定存成 .env
+load_csv.exe --folder D:\sample --yes                # 排程：不問不確認（密碼只能用環境變數 SQL_PASSWORD）
 ```
+
+驗證方式（`--auth` 或 `.env` 的 `SQL_AUTH`）：`windows`、`sql`、`entra-interactive`（跳登入視窗、支援 MFA）、
+`entra-password`、`entra-integrated`、`entra-msi`（Azure 上的受控識別）。雲端的伺服器會自動加 `Encrypt=yes`。
+密碼不要打在命令列（會留在歷史紀錄）：執行時會問、打字不顯示，也不會寫進 `.env`。
+互動執行時，匯入前會列出要重建的表再確認一次；`--yes` 跳過。雲端連不上時，先確認防火牆有開這台電腦的 IP。
 
 業務表（檔名 = 規格上的表名）先跑 `01_create_tables.sql` 建好再寫入；其他檔案建在 `dbo`，型別照 excel-to-db 的規則判斷。
 每次整張重建。建資料庫的定序預設 `Chinese_Taiwan_Stroke_CI_AS_WS`（分全形半形），要跟來源資料庫一樣，
