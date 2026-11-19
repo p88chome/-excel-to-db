@@ -41,8 +41,11 @@ EXEC etl.Load_PurchaseOrderDetail; -- 只跑一張
 | 檔案 | 做什麼 | 什麼時候跑 |
 |---|---|---|
 | `sql/10_kri_framework.sql` | 建 `kri` schema：設定表、執行紀錄、`kri.Flag`、`kri.RunAll` | 第一次，或框架改了之後（不會清掉已調的設定） |
-| `sql/11_kri_procedures.sql` | 建各題 KRI 的明細表與程序 | 第一次，或 KRI 改了之後 |
+| `sql/11_kri_procedures.sql` | 建各題 KRI 的明細表與程序（全部題目合在一個檔） | 第一次，或 KRI 改了之後 |
 | `sql/12_kri_seed.sql` | 補上預設定義、暫定門檻、白名單（只補沒有的） | 第一次，或新增 KRI 之後 |
+
+每一題的程序在 `sql/kri_procs/Kxx_題目.sql`，檔案開頭用白話寫了這題抓什麼、怎麼判斷、門檻和明細欄位的意思，要了解某一題直接看那個檔。
+只改一題：在 SSMS 開那一題的檔按 F5 就會更新。改完記得跑 `python etl/build_kri_sql.py`，把各題重新合併成 `11_kri_procedures.sql`（測試會檢查兩邊一致）。
 
 ```sql
 EXEC kri.RunAll;                            -- 跑全部啟用的 KRI，基準日今天
@@ -54,6 +57,7 @@ SELECT * FROM kri.vFlagLatest;              -- 每題最新一次成功的標記
 - **調門檻：** `UPDATE kri.Parameter SET ParamValue = 0.1, IsTentative = 0 WHERE KriCode = 'K14' AND ParamName = 'PriceTolerance';`
 - **加排除名單：** `INSERT kri.ValueList (KriCode, ListName, ListValue, Note) VALUES ('*', 'ExcludeVendorPrefix', 'X', N'一次性供應商');`
 - **K08 要先填核決權限：** `kri.ApprovalMatrix`，沒有資料時 K08 不會標記，`RunAll` 的說明欄會提示。
+- **K02 的銀行帳號要有 SAP 原表 `dbo.LFBK`**：跑 `10_kri_framework.sql` 時偵測到才會接上，所以要先匯入再跑 10。
 
 ## 抽樣到 exp
 

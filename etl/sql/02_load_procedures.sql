@@ -155,7 +155,7 @@ END;
 GO
 
 -- ======================================================================
--- mst.VendorChangeHistory：供應商的凍結/解凍異動
+-- mst.VendorChangeHistory：供應商的凍結/解凍、付款條件、銀行帳號異動
 -- ======================================================================
 CREATE OR ALTER PROCEDURE etl.Load_VendorChangeHistory AS
 BEGIN
@@ -180,8 +180,9 @@ BEGIN
                     AND d.OBJECTID   = h.OBJECTID
                     AND d.CHANGENR   = h.CHANGENR
     WHERE h.OBJECTCLAS = 'KRED'
-      AND d.TABNAME IN ('LFA1', 'LFB1', 'LFM1')
-      AND d.FNAME   IN ('SPERR', 'SPERM', 'ZAHLS');
+      AND (   (d.TABNAME IN ('LFA1', 'LFB1', 'LFM1')
+               AND d.FNAME IN ('SPERR', 'SPERM', 'ZAHLS', 'ZTERM'))   -- 凍結、付款凍結、付款條件
+           OR d.TABNAME = 'LFBK');                                    -- 銀行帳號（新增、刪除、修改）
 
     COMMIT;
 END;

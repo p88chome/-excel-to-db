@@ -171,6 +171,40 @@ BEGIN
 END;
 GO
 
+-- 讀白名單、排除名單（kri.ValueList）。KriCode = '*' 的設定每一題都適用。
+--   用法：WHERE p.PoType IN (SELECT Value FROM kri.List('K11', 'EmergencyPoType'))
+CREATE OR ALTER FUNCTION kri.List (@KriCode NVARCHAR(10), @ListName NVARCHAR(50))
+RETURNS TABLE
+AS RETURN
+SELECT ListValue AS Value
+FROM kri.ValueList
+WHERE KriCode IN (@KriCode, '*') AND ListName = @ListName;
+GO
+
+-- 字串裡有幾個數字。例：'(02)2345-6789' → 10。
+CREATE OR ALTER FUNCTION kri.DigitCount (@s NVARCHAR(400))
+RETURNS INT
+AS
+BEGIN
+    -- 把 0～9 都換成 #，再數 # 有幾個
+    RETURN LEN(@s) - LEN(REPLACE(TRANSLATE(@s, N'0123456789', N'##########'), N'#', N''));
+END;
+GO
+
+-- 看起來是不是「填充值」而不是真的資料：空白、整串同一個字（0000000000、XXXXXXXXXX、----）、
+-- 只有 NA 重複（NA、NANANA）。比對統編、電話、地址、銀行帳號時，填充值不能拿來配對。
+CREATE OR ALTER FUNCTION kri.IsPlaceholder (@s NVARCHAR(400))
+RETURNS BIT
+AS
+BEGIN
+    SET @s = LTRIM(RTRIM(@s));
+    IF ISNULL(@s, N'') = N''                   RETURN 1;
+    IF REPLACE(@s, LEFT(@s, 1), N'') = N''     RETURN 1;   -- 拿掉第一個字之後什麼都不剩 = 整串同一個字
+    IF REPLACE(@s, N'NA', N'') = N''           RETURN 1;
+    RETURN 0;
+END;
+GO
+
 -- 文件幣別 → 本幣。SAP 的 WKURS 為負代表間接報價（本幣 = 金額 ÷ |匯率|）。
 CREATE OR ALTER FUNCTION kri.ToLocal (@Amount DECIMAL(19,4), @DocCurrency NVARCHAR(5),
                                       @LocalCurrency NVARCHAR(5), @Rate DECIMAL(19,5))
@@ -192,7 +226,7 @@ GROUP BY BUKRS;
 GO
 
 -- 通用、雜項料號（ValueList GenericMaterial，只在本地設定）：一個料號底下其實是很多種不同的東西，
--- 單價、數量沒有可比性。比價、比量的 KRI（K06、K07、K12、K13、K14、K22、K23、K24）排除；
+-- 單價、數量沒有可比性。比價、比量的 KRI（K06、K07、K12、K13、K14）排除；
 -- 流程類（拆單、付款條件、先收後補…）照常看。數字料號可以不補零。候選清單用 kri.SuggestGenericMaterial 找。
 CREATE OR ALTER FUNCTION kri.IsGeneric (@KriCode NVARCHAR(10), @Material NVARCHAR(40))
 RETURNS TABLE
@@ -258,10 +292,12 @@ BEGIN
 END;
 GO
 
--- 下單日有效的主檔價：A017（分工廠）優先，沒有再用 A018。條件類型、資訊記錄類別依白名單。
+-- 某一天有效的主檔價：A017（分工廠）優先，沒有再用 A018。條件類型、資訊記錄類別依白名單。
 -- 同一天有多筆有效（不同條件類型或期間重疊）時取生效日最近的一筆。
+-- @KnownBy：只看這天以前已經建立的條件（通常給基準日）。回補過去的基準日時，
+--            不能用到基準日之後才建、再把生效日倒填回去的主檔價。建立日空白的視為生效日就建了。
 CREATE OR ALTER FUNCTION kri.InfoPriceAt (@KriCode NVARCHAR(10), @Vendor NVARCHAR(20),
-        @Material NVARCHAR(40), @PurchOrg NVARCHAR(10), @Plant NVARCHAR(10), @OnDate DATE)
+        @Material NVARCHAR(40), @PurchOrg NVARCHAR(10), @Plant NVARCHAR(10), @OnDate DATE, @KnownBy DATE)
 RETURNS TABLE
 AS RETURN
 SELECT TOP 1 c.Source, c.ConditionRecord, c.ConditionType, c.ValidFrom, c.ValidTo,
@@ -269,18 +305,19 @@ SELECT TOP 1 c.Source, c.ConditionRecord, c.ConditionType, c.ValidFrom, c.ValidT
        CAST(c.ConditionPrice / NULLIF(c.PriceUnit, 0) AS DECIMAL(19,6)) AS UnitPrice
 FROM (
     SELECT 1 AS Pref, 'A017' AS Source, ConditionRecord, ConditionType, ValidFrom, ValidTo,
-           Currency, OrderUom, ConditionPrice, PriceUnit, InfoCategory, DeletionInd
+           Currency, OrderUom, ConditionPrice, PriceUnit, InfoCategory, DeletionInd, CreatedOn
     FROM mst.PurchasingCondA017
     WHERE Vendor = @Vendor AND Material = @Material AND PurchOrg = @PurchOrg AND Plant = @Plant
       AND @OnDate BETWEEN ValidFrom AND ValidTo
     UNION ALL
     SELECT 2, 'A018', ConditionRecord, ConditionType, ValidFrom, ValidTo,
-           Currency, OrderUom, ConditionPrice, PriceUnit, InfoCategory, DeletionInd
+           Currency, OrderUom, ConditionPrice, PriceUnit, InfoCategory, DeletionInd, CreatedOn
     FROM mst.PurchasingCondA018
     WHERE Vendor = @Vendor AND Material = @Material AND PurchOrg = @PurchOrg
       AND @OnDate BETWEEN ValidFrom AND ValidTo
 ) c
 WHERE ISNULL(c.DeletionInd, '') = ''
+  AND ISNULL(c.CreatedOn, c.ValidFrom) <= @KnownBy
   AND c.ConditionType IN (SELECT ListValue FROM kri.ValueList
                           WHERE KriCode IN (@KriCode, '*') AND ListName = 'AllowedConditionType')
   AND c.InfoCategory  IN (SELECT ListValue FROM kri.ValueList
@@ -553,4 +590,97 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_kri_PR_Mat' AND object
     CREATE INDEX IX_kri_PR_Mat ON prc.PurchaseRequisition (Material, Plant, PrDate) INCLUDE (ReqQty, DeletionInd);
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_kri_PO_Mat' AND object_id = OBJECT_ID('prc.PurchaseOrderDetail'))
     CREATE INDEX IX_kri_PO_Mat ON prc.PurchaseOrderDetail (Material, Plant, PoDate) INCLUDE (OrderQty, DeletionInd);
+GO
+
+-- ======================================================================
+-- 呆滯判斷（K15、K16 共用）：優先用呆滯報表快照（ext.SlowMoving，取指定日以前最新一份）；
+-- 沒有快照而且 UseSapFallback = 1 時，用最後一次異動日 + SlowDays 推估認列呆滯的日期。
+-- ======================================================================
+CREATE OR ALTER FUNCTION kri.SlowStatusAt (@Material NVARCHAR(18), @Plant NVARCHAR(4), @OnDate DATE,
+                                            @SlowDays INT, @UseSapFallback INT)
+RETURNS TABLE
+AS RETURN
+SELECT TOP 1 *
+FROM (
+    SELECT 1 AS Pref, N'呆滯報表' AS Source, s.SnapshotDate, s.Status, s.SlowOn, CAST(NULL AS DATE) AS LastMoveDate,
+           s.StockQty, s.StockValue, s.Currency
+    FROM ext.SlowMoving s
+    WHERE s.Material = @Material AND s.Plant = @Plant AND s.SnapshotDate <= @OnDate
+      AND s.SnapshotDate = (SELECT MAX(SnapshotDate) FROM ext.SlowMoving WHERE SnapshotDate <= @OnDate)
+    UNION ALL
+    SELECT 2, N'SAP推估', NULL, NULL, DATEADD(DAY, @SlowDays, m.LastMove), m.LastMove, NULL, NULL, NULL
+    FROM (SELECT MAX(PostingDate) AS LastMove FROM inv.MaterialMovement
+          WHERE Material = @Material AND Plant = @Plant AND PostingDate <= @OnDate) m
+    WHERE @UseSapFallback = 1 AND m.LastMove IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM ext.SlowMoving WHERE SnapshotDate <= @OnDate)
+) x
+ORDER BY Pref;
+GO
+
+-- ======================================================================
+-- 「基準日當時」的狀態：回補過去的基準日時，不能用到基準日之後才發生的事
+-- ======================================================================
+
+-- PO 項目在某一天已經收了多少（PO 訂購單位），以及當時算不算已結案。
+--   PO 上的已收數量（GrQty）和交貨完成碼是「現在」的值；收貨資料是基本單位，跟 PO 單位不一定一樣。
+--   所以用「那天以前的收貨 ÷ 全部收貨」的比例，乘上 PO 現在的已收數量，換回那天的已收數量。
+--   ReceivedQty = 那天已收（PO 單位）。沒有收貨資料時就用 PO 上的已收數量。
+--   BasePerUnit = 每個 PO 單位等於幾個基本單位（收貨量 ÷ PO 已收數量），沒收過貨當 1。
+--   IsClosed    = 交貨完成碼有勾，而且最後一次收貨在那天以前（沒收過貨的看下單日）。
+CREATE OR ALTER FUNCTION kri.PoReceivedAt (@PoNumber NVARCHAR(10), @PoItem NVARCHAR(5), @GrQty DECIMAL(19,4),
+                                           @DelivComplInd NVARCHAR(1), @PoDate DATE, @OnDate DATE)
+RETURNS TABLE
+AS RETURN
+SELECT CAST(CASE WHEN g.TotalQty > 0 THEN ISNULL(@GrQty, 0) * g.QtyByDate / g.TotalQty
+                 ELSE ISNULL(@GrQty, 0) END AS DECIMAL(19,4))                       AS ReceivedQty,
+       CAST(CASE WHEN g.TotalQty > 0 AND @GrQty > 0 THEN g.TotalQty / @GrQty
+                 ELSE 1 END AS DECIMAL(19,6))                                       AS BasePerUnit,
+       CAST(CASE WHEN ISNULL(@DelivComplInd, '') <> ''
+                  AND ISNULL(g.LastGrDate, @PoDate) <= @OnDate THEN 1
+                 ELSE 0 END AS BIT)                                                 AS IsClosed
+FROM (
+    SELECT SUM(r.SignedQty)                                 AS TotalQty,    -- 全部收貨（扣掉退貨、沖銷）
+           SUM(IIF(r.KnownByDate = 1, r.SignedQty, 0))     AS QtyByDate,   -- 那天以前的收貨
+           MAX(r.PostingDate)                               AS LastGrDate
+    FROM (
+        SELECT g.PostingDate,
+               IIF(g.DebitCreditInd = 'H', -g.Quantity, g.Quantity) AS SignedQty,     -- 貸方（H）= 退貨或沖銷，算負的
+               IIF(g.PostingDate <= @OnDate AND ISNULL(g.EntryDate, g.PostingDate) <= @OnDate, 1, 0) AS KnownByDate
+        FROM prc.GoodsReceipt g
+        WHERE g.PoNumber = @PoNumber AND g.PoItem = @PoItem
+    ) r
+) g;
+GO
+
+-- 供應商主檔某個欄位在某一天的值。主檔表是「現在」的值，那天之後改過的話，
+-- 那天的值 = 那天之後第一筆異動的「舊值」。沒改過就回傳空的結果，呼叫的地方用現在的值。
+--   @TableName：LFA1（全部）、LFM1（某採購組織）、LFB1（某公司別）；@Scope 給採購組織或公司別，LFA1 給 ''
+--   用法：OUTER APPLY kri.VendorValueAt(v.Vendor, 'LFM1', 'ZTERM', v.PurchOrg, @day) h
+--         ... COALESCE(h.ValueThen, v.PurchOrgPaymentTerms)
+CREATE OR ALTER FUNCTION kri.VendorValueAt (@Vendor NVARCHAR(10), @TableName NVARCHAR(30), @FieldName NVARCHAR(30),
+                                            @Scope NVARCHAR(4), @OnDate DATE)
+RETURNS TABLE
+AS RETURN
+SELECT TOP 1 ISNULL(h.OldValue, '') AS ValueThen
+FROM mst.VendorChangeHistory h
+WHERE h.Vendor = @Vendor AND h.TableName = @TableName AND h.FieldName = @FieldName
+  AND (@Scope = '' OR SUBSTRING(h.TableKey, 14, 4) = @Scope)    -- TableKey = 用戶端(3) + 供應商(10) + 採購組織或公司別(4)
+  AND h.ChangeDate > @OnDate
+ORDER BY h.ChangeDate, h.ChangeTime, h.ChangeNumber;
+GO
+
+-- ======================================================================
+-- 規格表沒有、直接讀 SAP 原表的欄位（跟 kri.vCompanyCurrency 一樣是例外）。
+-- 原表不存在的環境建成空的 view，用到的 KRI 照跑、備註說明。
+-- ======================================================================
+
+-- 供應商銀行帳號（LFBK），K02 用。一家供應商可以有好幾個帳號。
+IF OBJECT_ID(N'dbo.LFBK', N'U') IS NOT NULL
+    EXEC (N'CREATE OR ALTER VIEW kri.vVendorBank AS
+            SELECT DISTINCT LIFNR AS Vendor, BANKS AS BankCountry, BANKL AS BankKey, BANKN AS BankAccount
+            FROM dbo.LFBK WHERE ISNULL(BANKN, '''') <> ''''');
+ELSE
+    EXEC (N'CREATE OR ALTER VIEW kri.vVendorBank AS
+            SELECT CAST(NULL AS NVARCHAR(10)) AS Vendor, CAST(NULL AS NVARCHAR(3)) AS BankCountry,
+                   CAST(NULL AS NVARCHAR(15)) AS BankKey, CAST(NULL AS NVARCHAR(18)) AS BankAccount WHERE 1 = 0');
 GO
