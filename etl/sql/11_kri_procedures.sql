@@ -59,7 +59,7 @@ BEGIN
            e.EffectDoc,
            kri.ToLocal(e.EffectDoc, b.Currency, b.LocalCurrency, b.ExchangeRate),
            b.LocalCurrency
-    FROM kri.PoBase('K14', @PeriodFrom, @PeriodTo) b
+    FROM (SELECT * FROM kri.PoBase('K14', @PeriodFrom, @PeriodTo) WHERE IsGeneric = 0) b    -- 通用料號沒有可比的主檔價
     OUTER APPLY kri.InfoPriceAt('K14', b.Vendor, b.Material, b.PurchOrg, b.Plant, b.PoDate) i
     CROSS APPLY (SELECT CASE
         WHEN b.UnitPrice IS NULL                               THEN N'缺PO單價'
@@ -139,7 +139,7 @@ BEGIN
                DATEFROMPARTS(YEAR(p.PoDate), (DATEPART(QUARTER, p.PoDate) - 1) * 3 + 1, 1) AS PeriodQuarter,
                CAST(FLOOR(LOG(CAST(p.OrderQty AS FLOAT)) / LOG(@band)) AS INT) AS QtyBand
         FROM kri.PoBase('K13', @PeriodFrom, @PeriodTo) p
-        WHERE ISNULL(p.Material, '') <> '' AND p.UnitPrice > 0
+        WHERE ISNULL(p.Material, '') <> '' AND p.UnitPrice > 0 AND p.IsGeneric = 0
     ), em AS (          -- 每個據點在群組裡的最低單價
         SELECT Material, Currency, OrderUom, PeriodQuarter, QtyBand, Entity, MIN(UnitPrice) AS MinPrice
         FROM b WHERE ISNULL(Entity, '') <> ''
@@ -1104,7 +1104,7 @@ BEGIN
                kri.ToLocal(b.NetValue, b.Currency, b.LocalCurrency, b.ExchangeRate) AS AmountLocal, b.LocalCurrency,
                IIF(b.PoDate >= @PeriodFrom, 1, 0) AS IsCur
         FROM kri.PoBase('K12', @prevFrom, @PeriodTo) b
-        WHERE ISNULL(b.Material, '') <> '' AND ISNULL(b.Vendor, '') <> '' AND b.NetValue IS NOT NULL
+        WHERE ISNULL(b.Material, '') <> '' AND b.IsGeneric = 0 AND ISNULL(b.Vendor, '') <> '' AND b.NetValue IS NOT NULL
     ), vc AS (          -- 供應商家數不套工廠、採購組織等排除條件，免得被排掉的供應商讓料號看起來像獨家
         SELECT Material, COUNT(DISTINCT Vendor) AS VendorCount FROM prc.PurchaseOrderDetail d
         WHERE PoDate BETWEEN @prevFrom AND @PeriodTo AND ISNULL(DeletionInd, '') = '' AND ISNULL(Vendor, '') <> ''
@@ -1265,7 +1265,7 @@ BEGIN
                SUM(kri.ToLocal(b.UnitPrice * b.OrderQty, b.Currency, b.LocalCurrency, b.ExchangeRate)) AS ValLocal,
                SUM(kri.ToLocal(b.OrderQty, b.Currency, b.LocalCurrency, b.ExchangeRate)) AS QtyLocal
         FROM kri.PoBase('K22', r.ValidFrom, r.PoTo) b
-        WHERE r.IncreaseRatio > @inc
+        WHERE r.IncreaseRatio > @inc AND b.IsGeneric = 0
           AND b.Vendor = r.Vendor AND b.Material = r.Material AND b.PurchOrg = r.PurchOrg
           AND (r.Plant IS NULL OR b.Plant = r.Plant)
           AND b.Currency = r.Currency AND b.OrderUom = r.OrderUom
@@ -1332,7 +1332,7 @@ BEGIN
            IIF(d.Ratio > @tol, kri.ToLocal((b.UnitPrice - i.UnitPrice) * q.OpenQty, b.Currency, b.LocalCurrency,
                                            b.ExchangeRate), NULL),
            b.LocalCurrency, IIF(d.Ratio > @tol, 1, 0)
-    FROM kri.PoBase('K23', @PeriodFrom, @PeriodTo) b
+    FROM (SELECT * FROM kri.PoBase('K23', @PeriodFrom, @PeriodTo) WHERE IsGeneric = 0) b
     CROSS APPLY kri.InfoPriceAt('K23', b.Vendor, b.Material, b.PurchOrg, b.Plant, @AsOfDate) i
     -- 基準日當時已收：收貨資料是基本單位、PO 是訂購單位，所以用「基準日前已收 ÷ 全部已收」的比例乘 PO 的已收量
     OUTER APPLY (SELECT SUM(IIF(g.DebitCreditInd = 'H', -g.Quantity, g.Quantity)) AS Tot,
@@ -1426,7 +1426,7 @@ BEGIN
     SELECT Material, Vendor, Currency, OrderUom, PoDate, UnitPrice, OrderQty
     INTO #ref
     FROM kri.PoBase('K24', DATEADD(YEAR, -1, @PeriodFrom), @PeriodTo)
-    WHERE ISNULL(Material, '') <> '' AND UnitPrice > 0 AND OrderQty > 0;
+    WHERE ISNULL(Material, '') <> '' AND UnitPrice > 0 AND OrderQty > 0 AND IsGeneric = 0;
     CREATE CLUSTERED INDEX cx ON #ref (Material, Currency, OrderUom, PoDate);
 
     INSERT kri.K24_Detail
@@ -1436,7 +1436,7 @@ BEGIN
            IIF(f.Flag = 1, kri.ToLocal((b.UnitPrice - ref.Price) * b.OrderQty, b.Currency, b.LocalCurrency,
                                        b.ExchangeRate), NULL),
            b.LocalCurrency, f.Flag
-    FROM kri.PoBase('K24', @PeriodFrom, @PeriodTo) b
+    FROM (SELECT * FROM kri.PoBase('K24', @PeriodFrom, @PeriodTo) WHERE IsGeneric = 0) b
     CROSS APPLY (SELECT TOP 1 * FROM #e x
                  WHERE x.Vendor = b.Vendor AND b.PoDate BETWEEN x.ReactivatedOn AND DATEADD(DAY, @follow, x.ReactivatedOn)
                  ORDER BY x.ReactivatedOn DESC) e
@@ -1540,10 +1540,16 @@ BEGIN
                          AND Scope = v.CompanyCode) f4) v
     GROUP BY Vendor;
 
-    WITH a AS (
-        SELECT Vendor, 'TaxNumber' AS MatchType, Tax AS MatchValue FROM #v WHERE Tax IS NOT NULL
-        UNION ALL SELECT Vendor, 'Phone', Phone FROM #v WHERE Phone IS NOT NULL AND LEN(Phone) >= 6
-        UNION ALL SELECT Vendor, 'Address', Addr FROM #v WHERE Addr IS NOT NULL AND LEN(Addr) >= 6
+    -- 填充值不算相同（NA、NANANA、0000000000、-）：統編、電話要有足夠的數字，而且不能整串同一個字
+    WITH a0 AS (
+        SELECT Vendor, 'TaxNumber' AS MatchType, Tax AS MatchValue, 4 AS MinDigits FROM #v WHERE Tax IS NOT NULL
+        UNION ALL SELECT Vendor, 'Phone', Phone, 6 FROM #v WHERE Phone IS NOT NULL
+        UNION ALL SELECT Vendor, 'Address', Addr, 0 FROM #v WHERE Addr IS NOT NULL AND LEN(Addr) >= 6
+    ), a AS (
+        SELECT Vendor, MatchType, MatchValue FROM a0
+        WHERE LEN(MatchValue) - LEN(REPLACE(TRANSLATE(MatchValue, '0123456789', '##########'), '#', '')) >= MinDigits
+          AND REPLACE(MatchValue, LEFT(MatchValue, 1), '') <> ''
+          AND REPLACE(MatchValue, 'NA', '') <> ''
     ), g AS (
         SELECT a.*, COUNT(*) OVER (PARTITION BY MatchType, MatchValue) AS n FROM a
         WHERE MatchType IN (SELECT ListValue FROM kri.ValueList WHERE KriCode IN ('K02', '*') AND ListName = 'MatchAttribute')
@@ -1723,6 +1729,7 @@ BEGIN
         WHERE r.PrDate BETWEEN @PeriodFrom AND @PeriodTo
           AND ISNULL(r.DeletionInd, '') = '' AND r.ReqQty > 0
           AND ISNULL(r.Material, '') <> '' AND ISNULL(r.Plant, '') <> ''
+          AND NOT EXISTS (SELECT 1 FROM kri.IsGeneric('K06', r.Material))     -- 通用料號的庫存、耗用不能比
     ), x AS (
         SELECT r.*, st.StockQty AS StockAtPr, ISNULL(op.Qty, 0) AS OpenPoQty, ISNULL(u.Qty, 0) / @months AS AvgMonthlyUse
         FROM r
@@ -1819,6 +1826,7 @@ BEGIN
         WHERE PrDate BETWEEN DATEADD(MONTH, -12, DATEFROMPARTS(YEAR(@PeriodFrom), MONTH(@PeriodFrom), 1)) AND @PeriodTo
           AND ISNULL(DeletionInd, '') = '' AND ReqQty > 0
           AND ISNULL(Material, '') <> '' AND ISNULL(Plant, '') <> ''
+          AND NOT EXISTS (SELECT 1 FROM kri.IsGeneric('K07', Material))       -- 通用料號的數量是不同東西加總
         GROUP BY Material, Plant, ISNULL(Uom, ''), DATEFROMPARTS(YEAR(PrDate), MONTH(PrDate), 1)
     ), c AS (
         SELECT m.*, h.Qty AS HistQty, h.Months AS HistMonths, e.Qty AS ExtQty

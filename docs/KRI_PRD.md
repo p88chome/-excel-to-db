@@ -410,7 +410,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | `ext.Contract` | K17 合約 | ContractNo、Vendor、PoNumber、SignedOn、ValidFrom、ValidTo |
 
 ### K02 工商登記關聯供應商（SAP 內部版）
-- **邏輯**：不同供應商代碼但統編、電話（去符號）、地址（去空白標點）相同（`MatchAttribute`），或 `ext.VendorRelation` 列為關聯；同一個值超過 `MaxGroupSize` 家共用的不配對。商工登記同一對的多種關係併成一筆（MatchType = 商工登記）。標記：①其中一家基準日當時凍結（中央凍結，或每個組織都凍結；`ExcludeAccountGroup` 除外；基準日之後才改的凍結用異動紀錄還原）、另一家期間內有 PO；②兩家期間內買過同料號。
+- **邏輯**：不同供應商代碼但統編、電話（去符號）、地址（去空白標點）相同（`MatchAttribute`），或 `ext.VendorRelation` 列為關聯；同一個值超過 `MaxGroupSize` 家共用的不配對。商工登記同一對的多種關係併成一筆（MatchType = 商工登記）。填充值不算相同：統編至少 4 個數字、電話至少 6 個數字，整串同一個字（0000000000）或 NANANA 這種不配對。標記：①其中一家基準日當時凍結（中央凍結，或每個組織都凍結；`ExcludeAccountGroup` 除外；基準日之後才改的凍結用異動紀錄還原）、另一家期間內有 PO；②兩家期間內買過同料號。
 - **參數**：`MaxGroupSize` = 5。
 - **已知限制**：銀行帳號（LFBK）還沒有業務表；「前 50% 家數」的重大性篩選還沒做，目前全部供應商都看。
 
@@ -450,6 +450,19 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 - **邏輯**：轉入待退倉（`ReturnStorLoc`，本地設定）的異動（`ReturnTransferType` = 311，借方），依先進先出配對同料號 × 工廠 × 倉 × 批號之後的出倉（貸方，任何異動類型），全部出清的日期 = 處理日；停留 > `MaxOpenDays` 天（未處理的算到基準日）→ 標記。
 - **參數**：`MaxOpenDays` = 30。
 - **已知限制**：待退倉在資料起始日以前的餘額當 0；「單一站點超過一週」要等外部的驗退流程狀態；沒有批號管理的料號配對會不準。
+
+## 9e. 通用料號（GenericMaterial）
+
+有些料號底下其實是很多種不同的東西（雜項、費用類料號，PO 說明才看得出買什麼）：同一個料號單價可以差上千倍，
+數量也是不同東西加總。拿它們比價、比量，標出來的幾乎都是誤報。
+
+- **設定**：`kri.ValueList`（`KriCode` = `*`、`ListName` = `GenericMaterial`），料號只在本地設定、不放 repo；數字料號可以不補零。
+- **找候選**：`EXEC kri.SuggestGenericMaterial @From, @To` 列出期間內同幣別、同單位下供應商 ≥ `@MinVendors`（5）
+  而且最高價 ÷ 最低價 ≥ `@MinSpread`（20）的料號，確認後自己加進清單。
+- **排除的題目**：比價、比量的 K06、K07、K12、K13、K14、K22、K23、K24（`kri.PoBase` 多一欄 `IsGeneric`；PR 類用 `kri.IsGeneric`）。
+- **不排除的題目**：流程類照常看，例如拆單（K08、K09）、付款條件（K04）、先收後補（K10、K19）——
+  雜項採購反而最容易出現這些問題。
+- 要讓某一題也看通用料號，把清單的 `KriCode` 改成個別題目即可（`*` 是全部比價、比量題）。
 
 ---
 

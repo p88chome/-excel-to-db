@@ -417,6 +417,8 @@ ins("mst.Vendor", [
     vend("V82", Phone="02-1234-5678"), vend("V83", Phone="0212345678"),   # 同電話、買同料號 → 標記
     vend("V84", Address="No. 1, Test Rd."), vend("V85", Address="NO1 TEST RD"),   # 同地址、沒交易
     vend("V86", TaxNumber="11112222", CentralPurchBlock="X"),        # 基準日之後才凍結 → 基準日當時沒凍結
+    vend("V88", TaxNumber="NANANANANA", Phone="0000000000"),         # 填充值：不配對
+    vend("V89", TaxNumber="NANANANANA", Phone="0000000000"),
     vend("V87", TaxNumber="11112222"),
 ])
 ins("mst.VendorChangeHistory", [chg("V86", "C086", "2026-02-01", "LFA1", "100V86", "SPERM", "", "X")])
@@ -477,6 +479,15 @@ ins("prc.PurchaseRequisition",
           ReqQty=10 if m < 7 else 100, Uom="EA") for m in range(1, 8)]                        # 7 月暴增 10 倍
     + [dict(PrNumber="1000000301", PrItem="00010", PrDate="2025-08-05", Material="M121", Plant="1100", ReqQty=100, Uom="EA")])
 ins("ext.ExpectedDemand", [dict(Material="M121", Plant="1100", Month="2025-08-01", Qty=1000)])
+
+# ---------------------------------------------------------------- 通用料號（GenericMaterial）
+# M125 跟 M120 一樣 7 月暴增，但列為通用料號 → K07 不看；5 家供應商單價差 100 倍 → 建議清單會列出來
+cur.execute("INSERT kri.ValueList (KriCode, ListName, ListValue) VALUES ('*', 'GenericMaterial', 'M125')")
+ins("prc.PurchaseRequisition",
+    [dict(PrNumber=f"10000004{m:02d}", PrItem="00010", PrDate=f"2025-{m:02d}-05", Material="M125", Plant="1100",
+          ReqQty=10 if m < 7 else 100, Uom="EA") for m in range(1, 8)])
+ins("prc.PurchaseOrderDetail", [po(f"47000000{i:02d}", Vendor=f"VG{i}", Material=f"M12{6 if i < 6 else 5}", NetPrice=p,
+                                  PoDate="2025-04-01") for i, p in zip(range(1, 11), [1, 5, 20, 50, 100] * 2)])
 
 # ---------------------------------------------------------------- K11
 cur.execute("INSERT kri.ValueList (KriCode, ListName, ListValue) VALUES ('K11', 'EmergencyPoType', 'ZEM')")
@@ -750,6 +761,7 @@ d = {(x.VendorA, x.VendorB, x.MatchType): x for x in one("SELECT * FROM kri.K02_
 check("K02 配對：統編、電話（去符號）、地址（去空白標點）、商工登記", sorted(d),
       [("V80", "V81", "TaxNumber"), ("V82", "V83", "Phone"), ("V84", "V85", "Address"), ("V84", "V85", "商工登記"),
        ("V86", "V87", "TaxNumber")])
+check("K02 填充值（NANANA、0000000000）不配對", [k for k in d if "V88" in k], [])
 check("K02 基準日之後才凍結的不算凍結；商工登記正反、多種關係併成一筆",
       (d[("V86", "V87", "TaxNumber")].ABlocked, d[("V86", "V87", "TaxNumber")].IsFlagged,
        d[("V84", "V85", "商工登記")].MatchValue), (False, False, "同代表人；同代表人（反向）；同地址"))
@@ -778,6 +790,16 @@ d = {(x.Material, str(x.Month)): x for x in one("SELECT * FROM kri.K07_Detail WH
 check("K07 只有 7 月暴增被標記", [k[1] for k in sorted(d) if k[0] == "M120" and d[k].IsFlagged], ["2025-07-01"])
 check("K07 有預期量表用表：100 / 1000 不標記", (d[("M121", "2025-08-01")].ExpectedSource, d[("M121", "2025-08-01")].IsFlagged),
       ("預期量表", False))
+
+# 通用料號
+check("通用料號 K07 不看", [k for k in d if k[0] == "M125"], [])
+check("PoBase 標出通用料號", sorted(set((r.Material, r.IsGeneric) for r in one(
+      "SELECT Material, IsGeneric FROM kri.PoBase('K13', '2025-04-01', '2025-04-01') WHERE Material IN ('M125', 'M126')"))),
+      [("M125", True), ("M126", False)])
+check("建議清單：多家供應商、單價差很大的料號（已列入的有註明）",
+      sorted((r.Material, r.Vendors, float(r.Spread), r.Listed) for r in one(
+          "EXEC kri.SuggestGenericMaterial @From = '2025-04-01', @To = '2025-04-01'")),
+      [("M125", 5, 100.0, "已列入"), ("M126", 5, 100.0, "")])
 
 # K11
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K11_Detail WHERE RunId = ?", rid)}

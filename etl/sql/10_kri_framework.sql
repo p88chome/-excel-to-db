@@ -191,6 +191,19 @@ FROM dbo.T001
 GROUP BY BUKRS;
 GO
 
+-- 通用、雜項料號（ValueList GenericMaterial，只在本地設定）：一個料號底下其實是很多種不同的東西，
+-- 單價、數量沒有可比性。比價、比量的 KRI（K06、K07、K12、K13、K14、K22、K23、K24）排除；
+-- 流程類（拆單、付款條件、先收後補…）照常看。數字料號可以不補零。候選清單用 kri.SuggestGenericMaterial 找。
+CREATE OR ALTER FUNCTION kri.IsGeneric (@KriCode NVARCHAR(10), @Material NVARCHAR(40))
+RETURNS TABLE
+AS RETURN
+SELECT 1 AS IsGeneric
+WHERE EXISTS (SELECT 1 FROM kri.ValueList x
+              WHERE x.KriCode IN (@KriCode, '*') AND x.ListName = 'GenericMaterial'
+                AND (@Material = x.ListValue
+                     OR (x.ListValue NOT LIKE '%[^0-9]%' AND @Material = RIGHT(REPLICATE('0', 18) + x.ListValue, 18))));
+GO
+
 -- PO 母體：觀察期間內、未刪除、數量 > 0，套用排除名單。比價類 KRI 共用。
 CREATE OR ALTER FUNCTION kri.PoBase (@KriCode NVARCHAR(10), @From DATE, @To DATE)
 RETURNS TABLE
@@ -200,9 +213,11 @@ SELECT p.PoNumber, p.PoItem, p.PoType, p.PoDate, p.CompanyCode, p.PurchOrg, p.Pl
        p.OrderQty, p.OrderUom, p.NetPrice, p.PriceUnit, p.NetValue, p.Currency,
        p.ExchangeRate, p.DelivDate, p.DelivComplInd, p.GrQty,
        CAST(p.NetPrice / NULLIF(p.PriceUnit, 0) AS DECIMAL(19,6)) AS UnitPrice,
-       c.LocalCurrency
+       c.LocalCurrency,
+       CAST(IIF(g.IsGeneric IS NULL, 0, 1) AS BIT) AS IsGeneric      -- 通用料號：比價類 KRI 用 IsGeneric = 0 排除
 FROM prc.PurchaseOrderDetail p
 LEFT JOIN kri.vCompanyCurrency c ON c.CompanyCode = p.CompanyCode
+OUTER APPLY kri.IsGeneric(@KriCode, p.Material) g
 WHERE p.PoDate BETWEEN @From AND @To
   AND ISNULL(p.DeletionInd, '') = ''
   AND p.OrderQty > 0
@@ -217,6 +232,30 @@ WHERE p.PoDate BETWEEN @From AND @To
                OR (x.ListName = 'ExcludeMaterial'      AND (p.Material = x.ListValue      -- 通用、雜項料號；數字料號可以不補零
                                                            OR (x.ListValue NOT LIKE '%[^0-9]%'
                                                                AND p.Material = RIGHT(REPLICATE('0', 18) + x.ListValue, 18))))));
+GO
+
+-- 找通用料號的候選：期間內同一個料號（同幣別、同單位）有很多家供應商、單價差距很大。
+-- 只是建議，確認後自己加進 ValueList：INSERT kri.ValueList (KriCode, ListName, ListValue) VALUES ('*', 'GenericMaterial', 'M001');
+--   EXEC kri.SuggestGenericMaterial @From = '2024-01-01', @To = '2024-12-31';
+CREATE OR ALTER PROCEDURE kri.SuggestGenericMaterial
+    @From DATE, @To DATE, @MinVendors INT = 5, @MinSpread DECIMAL(19,4) = 20
+AS
+BEGIN
+    SET NOCOUNT ON;
+    WITH g AS (
+        SELECT Material, Currency, OrderUom, COUNT(*) AS Items, COUNT(DISTINCT Vendor) AS Vendors,
+               COUNT(DISTINCT Plant) AS Plants, MIN(UnitPrice) AS MinPrice, MAX(UnitPrice) AS MaxPrice
+        FROM kri.PoBase('*', @From, @To)
+        WHERE ISNULL(Material, '') <> '' AND UnitPrice > 0
+        GROUP BY Material, Currency, OrderUom
+    )
+    SELECT g.Material, g.Currency, g.OrderUom, g.Items AS PoItems, g.Vendors, g.Plants, g.MinPrice, g.MaxPrice,
+           CAST(g.MaxPrice / g.MinPrice AS DECIMAL(19,1)) AS Spread,
+           IIF(EXISTS (SELECT 1 FROM kri.IsGeneric('*', g.Material)), N'已列入', N'') AS Listed
+    FROM g
+    WHERE g.Vendors >= @MinVendors AND g.MaxPrice / g.MinPrice >= @MinSpread
+    ORDER BY g.Items DESC;
+END;
 GO
 
 -- 下單日有效的主檔價：A017（分工廠）優先，沒有再用 A018。條件類型、資訊記錄類別依白名單。
