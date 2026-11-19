@@ -419,6 +419,7 @@ ins("mst.Vendor", [
     vend("V86", TaxNumber="11112222", CentralPurchBlock="X"),        # 基準日之後才凍結 → 基準日當時沒凍結
     vend("V88", TaxNumber="NANANANANA", Phone="0000000000"),         # 填充值：不配對
     vend("V89", TaxNumber="NANANANANA", Phone="0000000000"),
+    dict(vend("V81", TaxNumber="XXXXXXXXXX"), CompanyCode="2000"),   # 同一家另一筆被遮罩：不能蓋掉真的統編
     vend("V87", TaxNumber="11112222"),
 ])
 ins("mst.VendorChangeHistory", [chg("V86", "C086", "2026-02-01", "LFA1", "100V86", "SPERM", "", "X")])

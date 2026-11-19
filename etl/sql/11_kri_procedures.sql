@@ -1520,9 +1520,10 @@ BEGIN
     WHERE rn = 1;
 
     SELECT Vendor,
-           MAX(NULLIF(LTRIM(RTRIM(TaxNumber)), '')) AS Tax,
-           MAX(NULLIF(REPLACE(REPLACE(REPLACE(Phone, '-', ''), ' ', ''), '+', ''), '')) AS Phone,
-           MAX(NULLIF(UPPER(REPLACE(REPLACE(REPLACE(Address, ' ', ''), ',', ''), '.', '')), '')) AS Addr,
+           -- 只從看起來是真值的挑：遮罩值（XXXXXXXXXX、NANANA、-）字母排在數字後面，直接 MAX 會蓋掉真的統編
+           MAX(IIF(n.TaxOk = 1, n.Tax, NULL)) AS Tax,
+           MAX(IIF(n.PhoneOk = 1, n.Phone, NULL)) AS Phone,
+           MAX(IIF(n.AddrOk = 1, n.Addr, NULL)) AS Addr,
            -- 凍結 = 中央凍結，或每個採購組織／公司別都凍結（只凍結某一個組織不算）
            IIF(MAX(ListValue) IS NULL AND (MAX(Central) = 1 OR MIN(OrgBlk) = 1), 1, 0) AS Blocked
     INTO #v
@@ -1538,6 +1539,17 @@ BEGIN
                          AND Scope = v.PurchOrg) f3
           OUTER APPLY (SELECT MAX(OldValue) AS OldValue FROM #fut WHERE Vendor = v.Vendor AND TableName = 'LFB1' AND FieldName = 'SPERR'
                          AND Scope = v.CompanyCode) f4) v
+    CROSS APPLY (SELECT NULLIF(LTRIM(RTRIM(v.TaxNumber)), '') AS Tax,
+                        NULLIF(REPLACE(REPLACE(REPLACE(v.Phone, '-', ''), ' ', ''), '+', ''), '') AS Phone,
+                        NULLIF(UPPER(REPLACE(REPLACE(REPLACE(v.Address, ' ', ''), ',', ''), '.', '')), '') AS Addr) n0
+    -- 真值 = 有足夠的數字（統編 4、電話 6）、不是整串同一個字（0000000000、XXXXXXXXXX、----）、不是 NANANA；地址至少 6 個字
+    CROSS APPLY (SELECT n0.*,
+                        IIF(LEN(n0.Tax) - LEN(REPLACE(TRANSLATE(n0.Tax, '0123456789', '##########'), '#', '')) >= 4
+                            AND REPLACE(n0.Tax, LEFT(n0.Tax, 1), '') <> '' AND REPLACE(n0.Tax, 'NA', '') <> '', 1, 0) AS TaxOk,
+                        IIF(LEN(n0.Phone) - LEN(REPLACE(TRANSLATE(n0.Phone, '0123456789', '##########'), '#', '')) >= 6
+                            AND REPLACE(n0.Phone, LEFT(n0.Phone, 1), '') <> '', 1, 0) AS PhoneOk,
+                        IIF(LEN(n0.Addr) >= 6 AND REPLACE(n0.Addr, LEFT(n0.Addr, 1), '') <> ''
+                            AND REPLACE(n0.Addr, 'NA', '') <> '', 1, 0) AS AddrOk) n
     GROUP BY Vendor;
 
     -- 填充值不算相同（NA、NANANA、0000000000、-）：統編、電話要有足夠的數字，而且不能整串同一個字
