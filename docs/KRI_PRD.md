@@ -323,7 +323,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 - **母體**：基準日當時的 Open PO 項目：未刪除、數量 > 0、基準日當時已收數量 < 訂購數量、還沒結案（`kri.PoReceivedAt`，見 D12）。
 - **邏輯**：
   1. 收貨比例 = 已收數量 ÷ 訂購數量（用數量，不用金額：GrAmount 是本幣、NetValue 是文件幣別，不能直接相除）。
-  2. 逾期天數 = 基準日 − 交貨日（EKET 最早的排程日）。
+  2. 逾期天數 = 基準日 − 交貨日（EKET 最早的排程日）；交貨日早於 PO 日（補開的 PO）時從 PO 日起算，PO 還沒開的日子不算逾期。
   3. 收貨比例 < `MinReceivedRatio` 且逾期天數 > `OverdueDays` → 標記。
 - **影響金額**：未交數量 × PO 單價，換算本幣。
 - **參數**：`MinReceivedRatio` = 0.5；`OverdueDays` = 30（皆暫定）。

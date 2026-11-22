@@ -115,6 +115,8 @@ ins("prc.PurchaseOrderDetail", [
     po("4520000003", Material="M40", NetPrice=5, GrQty=0, DelivDate="2025-12-15"),    # 只逾期 16 天
     po("4520000004", Material="M40", NetPrice=5, GrQty=0, DelivDate="2025-01-01", DelivComplInd="X"),
     po("4520000005", Material="M40", NetPrice=5, GrQty=100, DelivDate="2025-01-01"),  # 已收齊
+    # 交貨日早於 PO 日（補開的 PO）：逾期從 PO 日 12/10 起算 = 21 天，不標記
+    po("4520000007", Material="M40", NetPrice=5, GrQty=0, DelivDate="2025-10-01", PoDate="2025-12-10"),
 ])
 
 # ---------------------------------------------------------------- K08
@@ -560,7 +562,9 @@ check("K13 影響金額 (14-10)×100", float(d["4510000003"].EffectLocal), 400.0
 
 # K18
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K18_Detail WHERE RunId = ?", rid)}
-check("K18 只有未結案、已過交貨日的進明細", sorted(d), ["4520000001", "4520000002", "4520000003", "4520000006"])
+check("K18 只有未結案、已過交貨日的進明細", sorted(d), ["4520000001", "4520000002", "4520000003", "4520000006",
+                                                  "4520000007"])
+check("K18 交貨日早於 PO 日：逾期從 PO 日起算", (d["4520000007"].OverdueDays, d["4520000007"].IsFlagged), (21, False))
 check("K18 基準日之後才輸入的收貨不算已收、不算結案", (float(d["4520000006"].GrQty), d["4520000006"].IsFlagged),
       (0.0, True))
 check("K18 逾期 91 天收 20% 標記、影響 80×5", (d["4520000001"].IsFlagged, d["4520000001"].OverdueDays,

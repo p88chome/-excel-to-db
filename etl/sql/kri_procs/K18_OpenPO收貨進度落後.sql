@@ -7,7 +7,8 @@
 -- 【怎麼判斷】
 --   第 1 步：找出觀察期間內下單、基準日當時還沒結案、已經過了交貨日的 PO 項目。
 --            「基準日當時」已收多少用 kri.PoReceivedAt 算，基準日之後才收的貨不算。
---   第 2 步：算出還沒收的數量、已收比例、逾期天數。
+--   第 2 步：算出還沒收的數量、已收比例、逾期天數。逾期從「交貨日」和「PO 日」較晚的那天起算：
+--            交貨日早於 PO 日（PO 補開、交貨日沒改）時，PO 還沒開的那幾天不能算逾期。
 --   第 3 步：逾期超過 OverdueDays 天，而且已收比例低於 MinReceivedRatio → 標記。
 --            影響金額 = 還沒收的數量 × PO 單價（換成本幣）。
 --
@@ -20,7 +21,7 @@
 --   GrQty          基準日當時已收的數量（PO 訂購單位）
 --   OpenQty        還沒收的數量 = 訂購數量 − GrQty
 --   ReceivedRatio  已收比例 = GrQty ÷ 訂購數量
---   OverdueDays    基準日 − 交貨日
+--   OverdueDays    基準日 − 交貨日（交貨日早於 PO 日時改用 PO 日）
 --   OpenAmountDoc  還沒收的金額（PO 幣別）；EffectLocal 是標記列換成本幣的金額
 --
 -- 【限制】
@@ -69,19 +70,21 @@ BEGIN
     SELECT b.PoNumber, b.PoItem, b.PoDate, b.DelivDate, b.CompanyCode, b.PurchOrg, b.Plant,
            b.Vendor, b.VendorName, b.Material, b.OrderQty, b.Currency, b.UnitPrice,
            b.LocalCurrency, b.ExchangeRate,
-           r.ReceivedQty
+           r.ReceivedQty,
+           CASE WHEN b.PoDate > b.DelivDate THEN b.PoDate ELSE b.DelivDate END AS DueDate   -- 逾期起算日
     INTO #OpenPo
     FROM kri.PoBase('K18', @PeriodFrom, @PeriodTo) b
     CROSS APPLY kri.PoReceivedAt(b.PoNumber, b.PoItem, b.GrQty, b.DelivComplInd, b.PoDate, @AsOfDate) r
     WHERE r.IsClosed = 0                    -- 基準日當時還沒結案
       AND r.ReceivedQty < b.OrderQty        -- 還沒收齊
-      AND b.DelivDate < @AsOfDate;          -- 已經過了交貨日
+      AND b.DelivDate < @AsOfDate           -- 已經過了交貨日
+      AND b.PoDate < @AsOfDate;
 
     -- 第 2 步：還沒收的數量、已收比例、逾期天數
     SELECT o.*,
            o.OrderQty - o.ReceivedQty               AS OpenQty,
            o.ReceivedQty / o.OrderQty               AS ReceivedRatio,
-           DATEDIFF(DAY, o.DelivDate, @AsOfDate)    AS OverdueDays
+           DATEDIFF(DAY, o.DueDate, @AsOfDate)      AS OverdueDays
     INTO #Progress
     FROM #OpenPo o;
 
