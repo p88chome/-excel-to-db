@@ -616,9 +616,12 @@ GO
 
 -- ======================================================================
 -- 呆滯判斷（K15、K16 共用）：優先用呆滯報表快照（ext.SlowMoving，取指定日以前最新一份）；
--- 沒有快照而且 UseSapFallback = 1 時，用最後一次異動日 + SlowDays 推估認列呆滯的日期。
+-- 沒有快照而且 UseSapFallback = 1 時，用「最後一次領用日」+ SlowDays 推估認列呆滯的日期。
+--   領用 = 這一題 ConsumptionMovementType 名單裡、從庫存扣出（貸方 H）的異動。收貨、移倉、沖回都不算：
+--   不然每收一次貨呆滯就重新計算，一直在買、卻沒人用的料反而永遠不會呆滯。
+--   從來沒有領用過的料，用第一次出現異動的日子起算。
 -- ======================================================================
-CREATE OR ALTER FUNCTION kri.SlowStatusAt (@Material NVARCHAR(18), @Plant NVARCHAR(4), @OnDate DATE,
+CREATE OR ALTER FUNCTION kri.SlowStatusAt (@KriCode NVARCHAR(10), @Material NVARCHAR(18), @Plant NVARCHAR(4), @OnDate DATE,
                                             @SlowDays INT, @UseSapFallback INT)
 RETURNS TABLE
 AS RETURN
@@ -631,8 +634,12 @@ FROM (
       AND s.SnapshotDate = (SELECT MAX(SnapshotDate) FROM ext.SlowMoving WHERE SnapshotDate <= @OnDate)
     UNION ALL
     SELECT 2, N'SAP推估', NULL, NULL, DATEADD(DAY, @SlowDays, m.LastMove), m.LastMove, NULL, NULL, NULL
-    FROM (SELECT MAX(PostingDate) AS LastMove FROM inv.MaterialMovement
-          WHERE Material = @Material AND Plant = @Plant AND PostingDate <= @OnDate) m
+    FROM (SELECT COALESCE(MAX(CASE WHEN mv.DebitCreditInd = 'H' AND c.Value IS NOT NULL
+                                    THEN mv.PostingDate END),   -- 最後一次領用
+                          MIN(mv.PostingDate)) AS LastMove       -- 沒領用過：第一次出現的日子
+          FROM inv.MaterialMovement mv
+          LEFT JOIN kri.List(@KriCode, 'ConsumptionMovementType') c ON c.Value = mv.MovementType
+          WHERE mv.Material = @Material AND mv.Plant = @Plant AND mv.PostingDate <= @OnDate) m
     WHERE @UseSapFallback = 1 AND m.LastMove IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM ext.SlowMoving WHERE SnapshotDate <= @OnDate)
 ) x

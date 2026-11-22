@@ -380,13 +380,17 @@ def ib(mat, qty, value=None):
 
 
 ins("inv.InventoryBalance", [ib("M110", 1000), ib("M111", 50), ib("M112", 0), ib("M130", 20), ib("M131", 0),
-                             ib("M132", 0), ib("M140", 10, 500), ib("M142", 10, 300)])
+                             ib("M132", 0), ib("M140", 10, 500), ib("M142", 10, 300),
+                             ib("M143", 10, 100)])
 months = [f"{y}-{m:02d}-01" for y in (2024, 2025) for m in range(1, 13)][6:]          # 2024-07 ～ 2025-12
 ins("inv.MaterialMovement",
     [mm(f"49100{i:05d}", d, "261", "M110", 100, "H") for i, d in enumerate(months)]           # 每月耗用 100
     + [mm(f"49200{i:05d}", d, "261", "M112", 200, "H") for i, d in enumerate(months[:12])]    # 耗用到 2025-06
     + [mm("4930000001", "2025-01-10", "101", "M140", 10, "S"),     # 最後異動 → 2026-01-10 呆滯
-       mm("4930000002", "2024-01-05", "101", "M142", 10, "S")])    # 2025-01-04 起呆滯
+       mm("4930000002", "2024-01-05", "101", "M142", 10, "S"),     # 2025-01-04 起呆滯
+       # M143：最後一次領用 2024-03-01，之後只有收貨 → 2025-03-01 起呆滯（收貨不會讓呆滯重新計算）
+       mm("4930000003", "2024-03-01", "261", "M143", 5, "H"),
+       mm("4930000004", "2025-05-01", "101", "M143", 10, "S")])
 ins("prc.PurchaseRequisition", [
     dict(PrNumber="1000000101", PrItem="00010", PrDate="2025-06-15", Material="M110", Plant="1100", ReqQty=500, ValPrice=1, Currency="TWD"),
     dict(PrNumber="1000000102", PrItem="00010", PrDate="2025-06-15", Material="M111", Plant="1100", ReqQty=10, ValPrice=1, Currency="TWD"),
@@ -431,6 +435,7 @@ ins("prc.PurchaseOrderDetail", [
 ins("prc.PurchaseOrderDetail", [
     po("4650000001", Material="M142", NetPrice=10, PoDate="2025-06-01"),   # 呆滯、有庫存仍下單 → 標記
     po("4650000002", Material="M140", NetPrice=10, PoDate="2025-06-01"),   # 還沒呆滯
+    po("4650000003", Material="M143", NetPrice=10, PoDate="2025-06-01"),   # 一直收貨、沒人領用 → 呆滯仍下單 → 標記
 ])
 
 # ---------------------------------------------------------------- K17
@@ -741,7 +746,8 @@ check("K15 已呆滯、還早的不標記", (d["M142"].IsFlagged, d["M110"].IsFl
 
 # K16
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K16_Detail WHERE RunId = ?", rid)}
-check("K16 呆滯、有庫存仍下單 → 標記", sorted((k, x.IsFlagged) for k, x in d.items()), [("4650000001", True)])
+check("K16 呆滯、有庫存仍下單 → 標記；一直收貨但沒人領用的也算呆滯", sorted((k, x.IsFlagged) for k, x in d.items()),
+      [("4650000001", True), ("4650000003", True)])
 
 # K17
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K17_Detail WHERE RunId = ?", rid)}
@@ -782,7 +788,7 @@ check("11_kri_procedures.sql 跟 kri_procs 一致", subprocess.run(
 r = one("SELECT KriCode, COUNT(*) FROM kri.vFlagLatest GROUP BY KriCode ORDER BY KriCode")
 check("vFlagLatest 各題標記數", [(x[0], x[1]) for x in r],
       [("K01", 5), ("K02", 3), ("K03", 5), ("K04", 6), ("K05", 2), ("K06", 2), ("K07", 1), ("K08", 2), ("K09", 1),
-       ("K10", 5), ("K11", 2), ("K12", 2), ("K13", 1), ("K14", 5), ("K15", 1), ("K16", 1), ("K17", 2), ("K18", 2),
+       ("K10", 5), ("K11", 2), ("K12", 2), ("K13", 1), ("K14", 5), ("K15", 1), ("K16", 2), ("K17", 2), ("K18", 2),
        ("K19", 5), ("K20", 2)])
 
 # 參數與對照表改了，結果跟著變

@@ -262,7 +262,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | **K12** | **集中且買貴** | ✅ 第三批 | 獨家先用 PO 資料判斷；客戶的獨家料號清單／製造商料號進來後改 |
 | **K13** | **跨據點同料號單價差異** | ✅ 第一期 | — |
 | **K14** | **PO 單價高於主檔價** | ✅ 第一期 | — |
-| **K15 / K16** | **呆滯警示／呆滯仍採購** | ✅ 第四批 | 呆滯報表放 `ext.SlowMoving`；沒有時用最後異動推估 |
+| **K15 / K16** | **呆滯警示／呆滯仍採購** | ✅ 第四批 | 呆滯報表放 `ext.SlowMoving`；沒有時用最後領用推估 |
 | **K17** | **重大工程未簽合約** | ✅ 第四批 | 工程類 PO 的判斷要在本地設定；合約放 `ext.Contract` |
 | **K18** | **Open PO 收貨進度異常** | ✅ 第一期 | — |
 | **K20** | **驗退後未及時處理** | ✅ 第四批 | 待退倉要在本地設定 |
@@ -418,11 +418,11 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 - **已知限制**：PO 項目說明（TXZ01）還沒有，先比對收貨說明。
 
 ### K15 已屆呆滯之警示 ／ K16 呆滯料仍進行採購
-- **共用**：`kri.SlowStatusAt`：優先用呆滯報表（指定日以前最新一份快照的認列日 SlowOn）；沒有報表而且 `UseSapFallback` = 1 時，用最後一次異動日 + `SlowDays` 推估。
+- **共用**：`kri.SlowStatusAt`：優先用呆滯報表（指定日以前最新一份快照的認列日 SlowOn）；沒有報表而且 `UseSapFallback` = 1 時，用最後一次領用日 + `SlowDays` 推估（領用 = `ConsumptionMovementType` 名單裡、從庫存扣出的異動；收貨、移倉、沖回不算，否則一直收貨的料永遠不會呆滯；沒領用過用第一次異動日）。
 - **K15**：基準日有庫存（推估時用 `kri.StockAt` 回推）、還沒認列、`WarnDays` 天內會認列 → 標記。影響金額 = 庫存金額（推估時按基準日數量比例換算）。
 - **K16**：下單前一天已呆滯（認列日 ≤ 下單日，或狀態在 `SlowStatus`）、而且有庫存（推估時）仍下 PO；同料號 × 工廠最近 3 個月有 `MinConsecMonths` 個月以上這樣下單 → 標記。
 - **參數**：K15 `WarnDays` = 14、`SlowDays` = 365、`UseSapFallback` = 1；K16 `MinConsecMonths` = 1、`SlowDays` = 365、`UseSapFallback` = 1。
-- **已知限制**：建議直接用會計認列的呆滯報表，推估版只是先看得到東西；推估時「最後異動」包含所有異動類型。`kri.StockAt` 逐筆回推，料號異動量很大時要注意效能（之後可改成先彙總每日淨異動）。
+- **已知限制**：建議直接用會計認列的呆滯報表，推估版只是先看得到東西；`kri.StockAt` 逐筆回推，料號異動量很大時要注意效能（之後可改成先彙總每日淨異動）。
 
 ### K17 重大工程未簽合約
 - **邏輯**：工程類 PO（`ConstructionPoType`、`ConstructionMaterialGroup`、`ConstructionGlPattern` 任一，只在本地設定），整張 PO 本幣金額 ≥ `MajorAmount`（本幣在 `AmountCurrency`），PO 沒有參照 SAP 合約、`ext.Contract` 也對不到 → 「無合約」；合約簽約日晚於 PO → 「合約晚於PO」，都標記。合約先用 PO 號碼對，沒有再用供應商 + 有效期間對。

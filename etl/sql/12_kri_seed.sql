@@ -131,6 +131,14 @@ FROM (VALUES
  ('K06', 'ConsumptionMovementType', '262', N'261 沖回'),
  ('K06', 'ConsumptionMovementType', '281', N'領用至網路'),
  ('K06', 'ConsumptionMovementType', '282', N'281 沖回'),
+ ('K15', 'ConsumptionMovementType', '201', N'領用至成本中心'),
+ ('K15', 'ConsumptionMovementType', '221', N'領用至專案'),
+ ('K15', 'ConsumptionMovementType', '261', N'領用至工單'),
+ ('K15', 'ConsumptionMovementType', '281', N'領用至網路'),
+ ('K16', 'ConsumptionMovementType', '201', N'領用至成本中心'),
+ ('K16', 'ConsumptionMovementType', '221', N'領用至專案'),
+ ('K16', 'ConsumptionMovementType', '261', N'領用至工單'),
+ ('K16', 'ConsumptionMovementType', '281', N'領用至網路'),
  ('K17', 'AmountCurrency',     'TWD',  N'重大工程金額門檻的幣別'),
  ('K20', 'ReturnTransferType', '311',  N'倉間轉撥')
 ) AS s (KriCode, ListName, ListValue, Note)

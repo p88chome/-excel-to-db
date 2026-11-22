@@ -2259,19 +2259,22 @@ GO
 --            沒有報表就用庫存表（inv.InventoryBalance）裡的料。
 --   第 2 步：每個料號 × 工廠查呆滯狀態（kri.SlowStatusAt）：
 --            有報表 → 用報表的認列呆滯日（SlowOn）、庫存數量、金額；
---            沒報表 → 認列呆滯日 = 最後一次異動日 + SlowDays，庫存數量用 kri.StockAt 回推到基準日，
+--            沒報表 → 認列呆滯日 = 最後一次領用日 + SlowDays（收貨、移倉不算，沒領用過用第一次異動日），庫存數量用 kri.StockAt 回推到基準日，
 --                     金額按目前庫存金額 × 基準日數量比例換算。
 --   第 3 步：離認列呆滯還有 0～WarnDays 天、而且有庫存 → 標記。推估的只留基準日有庫存的料。
 --
 -- 【門檻】（kri.Parameter，KriCode = 'K15'）
 --   WarnDays        幾天內會認列呆滯就警示
---   SlowDays        沒有呆滯報表時：最後異動後幾天算呆滯
---   UseSapFallback  1 = 沒有呆滯報表時用最後異動日推估；0 = 沒報表就不判斷
+--   SlowDays        沒有呆滯報表時：最後領用後幾天算呆滯
+--   UseSapFallback  1 = 沒有呆滯報表時用最後領用日推估；0 = 沒報表就不判斷
+--
+-- 【名單】（kri.ValueList）
+--   ConsumptionMovementType  哪些異動類型算領用（201、221、261、281）；只算從庫存扣出的（貸方）
 --
 -- 【明細表 kri.K15_Detail 怎麼看】
 --   Source       呆滯報表 / SAP推估
 --   SlowOn       認列呆滯的日期；DaysToSlow = 認列日 − 基準日（負數 = 已經呆滯）
---   LastMoveDate 最後一次異動日（推估時才有）
+--   LastMoveDate 最後一次領用日（推估時才有；沒領用過 = 第一次異動日）
 --   StockQty、StockValue、Currency  基準日的庫存數量、金額、幣別
 --
 -- 【限制】
@@ -2333,7 +2336,7 @@ BEGIN
            CASE WHEN s.Source = N'呆滯報表' THEN s.Currency ELSE cc.LocalCurrency END AS Currency
     INTO #SlowStatus
     FROM #Items i
-    CROSS APPLY kri.SlowStatusAt(i.Material, i.Plant, @AsOfDate, @slowDays, @useSapFallback) s
+    CROSS APPLY kri.SlowStatusAt('K15', i.Material, i.Plant, @AsOfDate, @slowDays, @useSapFallback) s
     -- 推估時才需要：回推到基準日的庫存數量
     OUTER APPLY (SELECT StockQty FROM kri.StockAt(i.Material, i.Plant, @AsOfDate)
                  WHERE s.Source = N'SAP推估') st
@@ -2394,21 +2397,22 @@ GO
 -- 【怎麼判斷】
 --   第 1 步：找出 PO 項目（觀察期間，再往前多抓兩個月，用來算月數），查下單前一天的呆滯狀態
 --            （kri.SlowStatusAt）：認列呆滯日 <= 下單日，或呆滯報表的狀態在 SlowStatus 名單裡 = 已呆滯。
---            沒有呆滯報表時用最後異動日 + SlowDays 推估，而且要下單前一天有庫存（kri.StockAt 回推）。
+--            沒有呆滯報表時用最後領用日 + SlowDays 推估（收貨、移倉不算，所以一直收貨也不會讓呆滯重新計算），而且要下單前一天有庫存（kri.StockAt 回推）。
 --   第 2 步：每一筆算「同料號 × 工廠，最近 3 個月（含當月）有幾個月這樣下單」。
 --   第 3 步：多抓的前兩個月只用來算月數，刪掉；月數 >= MinConsecMonths → 標記。
 --
 -- 【門檻】（kri.Parameter，KriCode = 'K16'）
 --   MinConsecMonths  最近 3 個月有幾個月呆滯仍下單才標記
---   SlowDays         沒有呆滯報表時：最後異動後幾天算呆滯
---   UseSapFallback   1 = 沒有呆滯報表時用最後異動日推估
+--   SlowDays         沒有呆滯報表時：最後領用後幾天算呆滯
+--   UseSapFallback   1 = 沒有呆滯報表時用最後領用日推估
 --
 -- 【名單】（kri.ValueList）
---   SlowStatus  呆滯報表裡代表「已呆滯」的狀態值
+--   SlowStatus               呆滯報表裡代表「已呆滯」的狀態值
+--   ConsumptionMovementType  哪些異動類型算領用（201、221、261、281）；只算從庫存扣出的（貸方）
 --
 -- 【明細表 kri.K16_Detail 怎麼看】
 --   Source         呆滯報表 / SAP推估
---   SlowStatus、SlowOn  呆滯報表的狀態、認列呆滯日（推估時 SlowOn = 最後異動 + SlowDays）
+--   SlowStatus、SlowOn  呆滯報表的狀態、認列呆滯日（推估時 SlowOn = 最後領用 + SlowDays）
 --   StockAtPo      下單前一天的庫存（推估時才有）
 --   SlowMonths     最近 3 個月有幾個月呆滯仍下單
 --   AmountLocal    這個 PO 項目的本幣金額
@@ -2466,7 +2470,7 @@ BEGIN
            0
     FROM kri.PoBase('K16', @fetchFrom, @PeriodTo) b
     -- 下單前一天的呆滯狀態
-    CROSS APPLY kri.SlowStatusAt(b.Material, b.Plant, DATEADD(DAY, -1, b.PoDate), @slowDays, @useSapFallback) s
+    CROSS APPLY kri.SlowStatusAt('K16', b.Material, b.Plant, DATEADD(DAY, -1, b.PoDate), @slowDays, @useSapFallback) s
     -- 推估時才需要：下單前一天的庫存（有呆滯報表時不用回推庫存）
     OUTER APPLY (SELECT StockQty FROM kri.StockAt(b.Material, b.Plant, DATEADD(DAY, -1, b.PoDate))
                  WHERE s.Source = N'SAP推估') st
