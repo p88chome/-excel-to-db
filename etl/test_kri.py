@@ -853,6 +853,10 @@ x = one("SELECT OwnLevel, WindowLevel, IsFlagged FROM kri.K08_Detail WHERE RunId
 check("K08 核決表從 10000 起：單筆 6000 當第 0 層，合計 12000 第 1 層 → 標記", (x.OwnLevel, x.WindowLevel, x.IsFlagged),
       (0, 1, True))
 cur.execute("DELETE kri.ApprovalMatrix")
+ins("kri.ApprovalMatrix", [dict(DocType="PR", CompanyCode="1000", Currency="TWD", MinAmount=0, MaxAmount=100000, ApprovalLevel=1)])
+res, _ = run("K08")
+check("K08 只有特定公司別的 PR 核決權限：不標記並提示要填 '*'", (res["K08"][5], "CompanyCode = '*'" in res["K08"][7]), (0, True))
+cur.execute("DELETE kri.ApprovalMatrix")
 
 cur.execute("UPDATE kri.Definition SET Enabled = 0 WHERE KriCode = 'K13'")
 cur.execute("UPDATE kri.Parameter SET ParamValue = 0.99 WHERE KriCode = 'K13' AND ParamName = 'PriceTolerance'")

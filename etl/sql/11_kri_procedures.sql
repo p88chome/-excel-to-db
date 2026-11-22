@@ -1212,6 +1212,7 @@ GO
 -- 【限制】
 --   單筆金額低於核決表的最低區間，當作第 0 層（不用簽核）；合計金額要落在核決表的區間裡才會標記。
 --   沒有填 kri.ApprovalMatrix 的 PR 核決權限時不會標記任何資料（備註會提示）。
+--   PR 沒有公司別，只用 CompanyCode = '*' 的 PR 核決權限；只填了特定公司別的 PR 權限不會用到（備註會提示）。
 --   PR 的價格單位不在規格內，金額先當價格單位 = 1；PR 沒有匯率，影響金額以 PR 幣別計。
 --   部門暫時用成本中心代表。
 -- ======================================================================
@@ -1308,6 +1309,8 @@ BEGIN
     -- 執行結果的說明
     IF NOT EXISTS (SELECT 1 FROM kri.ApprovalMatrix WHERE DocType = 'PR')
         SET @Note = N'kri.ApprovalMatrix 沒有 PR 的核決權限，這題不會標記任何資料';
+    ELSE IF NOT EXISTS (SELECT 1 FROM kri.ApprovalMatrix WHERE DocType = 'PR' AND CompanyCode = '*')
+        SET @Note = N'kri.ApprovalMatrix 的 PR 核決權限只有特定公司別；PR 沒有公司別，要填 CompanyCode = ''*'' 才會用到，這題不會標記任何資料';
     ELSE
         SELECT @Note = CONCAT(N'候選 PR 項目 ', COUNT(*)) FROM kri.K08_Detail WHERE RunId = @RunId;
 END;
