@@ -278,7 +278,10 @@ ins("prc.PurchaseOrderDetail", [
     po("4560000009", NetPrice=100, PoDate="2025-04-10"),
     po("4560000010", NetPrice=100, PoDate="2025-04-10", PrNumber="1100000099", PrItem="00010"),  # PR 不在資料裡
     po("4560000011", NetPrice=100, PoDate="2025-04-10"),
+    po("4560000012", NetPrice=100, PoDate="2025-04-10"),                                    # 收了 1 萬
+    po("4560000012", "00020", NetPrice=5000, PoDate="2025-04-10", MaterialGroup="MGX"),     # 50 萬，K10 排除的物料群組
 ])
+cur.execute("INSERT kri.ValueList (KriCode, ListName, ListValue) VALUES ('K10', 'ExcludeMaterialGroup', 'MGX')")
 ins("prc.PurchaseRequisition", [dict(PrNumber="1100000001", PrItem="00010", PrDate="2025-03-01")])
 ins("prc.GoodsReceipt", [
     gr("5000000001", "4560000001", "2025-04-08"),                   # 早於 PO 2 天
@@ -293,6 +296,7 @@ ins("prc.GoodsReceipt", [
     gr("5000000009", "4560000009", "2025-04-10", entry="2026-02-01"),  # 基準日之後才補的收貨
     gr("5000000010", "4560000010", "2025-04-10"),
     dict(gr("5000000011", "4560000011", "2025-04-20"), DocumentDate="2025-04-05"),  # 送貨單早於 PO 5 天
+    gr("5000000012", "4560000012", "2025-04-10"),
 ])
 cur.execute("INSERT kri.ValueList (KriCode, ListName, ListValue) VALUES ('*', 'ExcludeTextPattern', '%URGENT%')")
 
@@ -643,7 +647,7 @@ check("K04 PO 空白、發票比主檔早 15 天 → 標記", (d["4550000012"].A
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K10_Detail WHERE RunId = ?", rid)}
 check("K10 明細：有收貨（101 借方）、基準日當時已存在的 PO", sorted(d),
       ["4560000001", "4560000002", "4560000003", "4560000004", "4560000005", "4560000006", "4560000008",
-       "4560000010", "4560000011", "4690000002", "4690000003"])
+       "4560000010", "4560000011", "4560000012", "4690000002", "4690000003"])
 check("K10 送貨單日早於 PO：照樣標記", (d["4560000011"].GapDays, d["4560000011"].DocGapDays, d["4560000011"].IsFlagged),
       (10, -5, True))
 x = one("SELECT MetricValue, ThresholdValue, Reason FROM kri.Flag WHERE RunId = ? AND KriCode = 'K10' "
@@ -653,6 +657,9 @@ check("K10 只因送貨單日標記：指標用送貨單日", (float(x.MetricVal
 check("K10 備註列出送貨單早於 PO 的筆數", "送貨單早於 PO 1" in res["K10"][7], True)
 check("K10 整張 PO 金額含沒收貨的項目：超過上限不標記",
       (float(d["4560000008"].PoAmountLocal), d["4560000008"].AmountCheck, d["4560000008"].IsFlagged),
+      (510000.0, "超過上限", False))
+check("K10 整張 PO 金額含被排除名單濾掉的項目：超過上限不標記",
+      (float(d["4560000012"].PoAmountLocal), d["4560000012"].AmountCheck, d["4560000012"].IsFlagged),
       (510000.0, "超過上限", False))
 check("K10 收貨早於 PO 2 天（取第一次收貨）", (d["4560000001"].GapDays, d["4560000001"].IsFlagged), (-2, True))
 check("K10 輸入日比過帳日早時用輸入日", (d["4560000002"].GapDays, d["4560000002"].IsFlagged), (1, True))
@@ -667,7 +674,7 @@ d = {x.PoNumber: x for x in one("SELECT * FROM kri.K19_Detail WHERE RunId = ?", 
 check("K19 有 PR 用 PR 日：42 天不標記", (d["4560000003"].RefType, d["4560000003"].GapDays, d["4560000003"].IsFlagged),
       ("PR", 42, False))
 check("K19 沒有 PR 用 PO 日、不限金額", sorted(k for k, x in d.items() if x.IsFlagged),
-      ["4560000001", "4560000002", "4560000005", "4560000006", "4560000008"])
+      ["4560000001", "4560000002", "4560000005", "4560000006", "4560000008", "4560000012"])
 check("K19 有 PR 號碼但 PR 找不到：不退回 PO 日、不標記",
       (d["4560000010"].RefType, d["4560000010"].RefDate, d["4560000010"].IsFlagged), ("PR", None, False))
 check("K19 備註列出 PR 找不到的筆數", "PR 找不到 1" in res["K19"][7], True)
@@ -789,7 +796,7 @@ r = one("SELECT KriCode, COUNT(*) FROM kri.vFlagLatest GROUP BY KriCode ORDER BY
 check("vFlagLatest 各題標記數", [(x[0], x[1]) for x in r],
       [("K01", 5), ("K02", 3), ("K03", 5), ("K04", 6), ("K05", 2), ("K06", 2), ("K07", 1), ("K08", 2), ("K09", 1),
        ("K10", 5), ("K11", 2), ("K12", 2), ("K13", 1), ("K14", 5), ("K15", 1), ("K16", 2), ("K17", 2), ("K18", 2),
-       ("K19", 5), ("K20", 2)])
+       ("K19", 6), ("K20", 2)])
 
 # 參數與對照表改了，結果跟著變
 cur.execute("UPDATE kri.Parameter SET ParamValue = 1 WHERE KriCode = 'K01' AND ParamName = 'RequireSameMaterial'")

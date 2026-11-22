@@ -1492,7 +1492,8 @@ GO
 --            基準日以前已經存在的收貨）。收貨日取「過帳日」和「系統輸入日」較早的那個：
 --            過帳日可以手動填，輸入日不行。也記下最早的收貨文件日（通常是送貨單日期）。
 --   第 2 步：算 PO 日到第一次收貨的天數（負數 = 收貨早於 PO）、PO 日到送貨單日的天數，
---            以及整張 PO 的本幣金額（所有項目合計，含還沒收貨的項目）。
+--            以及整張 PO 的本幣金額：直接從 PO 明細加總所有項目（含還沒收貨、被排除名單濾掉的項目；
+--            只不算已刪除和數量 0 的）。排除名單只決定哪些項目要看，不能讓整張 PO 的金額變小。
 --   第 3 步：判斷金額上限：本幣不在 AmountCurrency 的、或有項目換不出本幣的，標「未判斷」（照樣可以標記）；
 --            整張 PO 超過 MaxPoAmount 的標「超過上限」（不標記）。MaxPoAmount = 0 表示不限。
 --   第 4 步：（收貨在 PO 後 MaxGapDays 天內，或送貨單日早於 PO）、收貨說明沒有排除關鍵字、
@@ -1535,7 +1536,7 @@ CREATE TABLE kri.K10_Detail (
     FirstGrEntryDate DATE          NULL,
     GapDays          INT           NULL,     -- 較早的收貨日 − PO 日；負數 = 收貨早於 PO
     HasExcludedText  BIT           NOT NULL,
-    PoAmountLocal    DECIMAL(19,4) NULL,     -- 整張 PO 的本幣金額（母體內所有項目合計，含未收貨；有項目換不出本幣 = NULL）
+    PoAmountLocal    DECIMAL(19,4) NULL,     -- 整張 PO 的本幣金額（所有未刪除項目合計，含未收貨、被排除的；有項目換不出本幣 = NULL）
     AmountCheck      NVARCHAR(20)  NOT NULL, -- 未超過 / 超過上限 / 未判斷 / 不限
     ItemAmountLocal  DECIMAL(19,4) NULL,
     LocalCurrency    NVARCHAR(5)   NULL,
@@ -1559,29 +1560,38 @@ BEGIN
     DECLARE @maxGapDays  INT           = kri.Param('K10', 'MaxGapDays'),     -- PO 後幾天內就收貨
             @maxPoAmount DECIMAL(19,4) = kri.Param('K10', 'MaxPoAmount');    -- 整張 PO 金額上限，0 = 不限
 
-    -- 第 1 步：觀察期間內的 PO 項目，接上第一次收貨（還沒收貨的也留著，整張 PO 金額要算全部項目）
+    -- 第 1 步：觀察期間內的 PO 項目，接上第一次收貨（只留有收貨的）
     SELECT b.PoNumber, b.PoItem, b.PoDate, b.CompanyCode, b.PurchOrg, b.Plant, b.Vendor, b.VendorName,
            b.Material, b.LocalCurrency,
-           r.PoNumber AS GrPoNumber,               -- NULL = 這個項目還沒收貨
            r.FirstGrDate, r.FirstGrEntryDate,
            r.FirstDate,                            -- 過帳日、輸入日取較早的
            r.FirstDocDate, r.HasExcludedText,
            kri.ToLocal(b.NetValue, b.Currency, b.LocalCurrency, b.ExchangeRate) AS ItemAmountLocal
     INTO #PoItem
     FROM kri.PoBase('K10', @PeriodFrom, @PeriodTo) b
-    LEFT JOIN kri.PoReceipt('K10', @AsOfDate) r ON r.PoNumber = b.PoNumber AND r.PoItem = b.PoItem;
+    JOIN kri.PoReceipt('K10', @AsOfDate) r ON r.PoNumber = b.PoNumber AND r.PoItem = b.PoItem;
 
-    -- 第 2 步：PO 到收貨的天數、PO 到送貨單的天數、整張 PO 的本幣金額
+    -- 第 2 步：整張 PO 的本幣金額：直接從 PO 明細加總，排除名單濾掉的項目也要算進去
+    --   有任何一個項目換不出本幣，整張 PO 金額就不算（留 NULL → 未判斷）
+    SELECT d.PoNumber,
+           CASE WHEN COUNT(*) = COUNT(a.AmountLocal) THEN SUM(a.AmountLocal) END AS PoAmountLocal
+    INTO #PoTotal
+    FROM prc.PurchaseOrderDetail d
+    LEFT JOIN kri.vCompanyCurrency c ON c.CompanyCode = d.CompanyCode
+    CROSS APPLY (SELECT kri.ToLocal(d.NetValue, d.Currency, c.LocalCurrency, d.ExchangeRate) AS AmountLocal) a
+    WHERE d.PoNumber IN (SELECT PoNumber FROM #PoItem)
+      AND ISNULL(d.DeletionInd, '') = ''
+      AND d.OrderQty > 0
+    GROUP BY d.PoNumber;
+
+    --   PO 到收貨的天數、PO 到送貨單的天數
     SELECT p.*,
            DATEDIFF(DAY, p.PoDate, p.FirstDate)    AS GapDays,
            DATEDIFF(DAY, p.PoDate, p.FirstDocDate) AS DocGapDays,
-           -- 有任何一個項目換不出本幣，整張 PO 金額就不算（留 NULL → 未判斷）
-           CASE WHEN COUNT(*) OVER (PARTITION BY p.PoNumber) = COUNT(p.ItemAmountLocal) OVER (PARTITION BY p.PoNumber)
-                THEN SUM(p.ItemAmountLocal) OVER (PARTITION BY p.PoNumber) END AS PoAmountLocal
+           t.PoAmountLocal
     INTO #Gap
-    FROM #PoItem p;
-
-    DELETE #Gap WHERE GrPoNumber IS NULL;          -- 明細只留有收貨的項目（整張金額已經算好了）
+    FROM #PoItem p
+    LEFT JOIN #PoTotal t ON t.PoNumber = p.PoNumber;
 
     -- 第 3 步：金額上限的判斷
     SELECT g.*,
