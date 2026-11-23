@@ -865,8 +865,10 @@ except pyodbc.Error as e:
 check("@RaiseOnFail = 1：有題目失敗時丟出錯誤", raised, True)
 cur.execute("INSERT kri.Run (AsOfDate) VALUES ('2025-01-01')")      # 模擬上次中途斷掉、停在 RUNNING
 stale = one("SELECT MAX(RunId) FROM kri.Run")[0][0]
+cur.execute("INSERT kri.RunStep (RunId, KriCode, Status) VALUES (?, 'K01', 'RUNNING')", stale)
 run("K01")
-check("上次停在 RUNNING 的執行改成 ABORTED", one("SELECT Status FROM kri.Run WHERE RunId = ?", stale)[0][0], "ABORTED")
+check("上次停在 RUNNING 的執行改成 ABORTED", (one("SELECT Status FROM kri.Run WHERE RunId = ?", stale)[0][0],
+      one("SELECT Status FROM kri.RunStep WHERE RunId = ?", stale)[0][0]), ("ABORTED", "ABORTED"))
 cur.execute("INSERT kri.Parameter (KriCode, ParamName, ParamValue) VALUES ('*', 'TestGlobal', 5), ('K01', 'TestGlobal', 7)")
 check("kri.Param：先找這一題的，沒有再找 '*'",
       [float(one(f"SELECT kri.Param('{k}', 'TestGlobal')")[0][0]) for k in ("K01", "K02")], [7.0, 5.0])
@@ -909,12 +911,28 @@ check("重跑 10、12 不動已調的門檻、啟用狀態、核決權限", (
 res, _ = run()
 check("停用的 K13 不會跑", "K13" in res, False)
 
+# 回補過去的基準日：儀表板仍顯示基準日最新的那次
+latest14 = one("SELECT DISTINCT RunId FROM kri.vFlagLatest WHERE KriCode = 'K14'")[0][0]
+cur.execute("EXEC kri.RunAll @AsOfDate = '2025-06-30', @Only = N'K14'")
+while cur.nextset():
+    pass
+check("回補較早的基準日不會蓋掉儀表板的最新結果",
+      one("SELECT DISTINCT RunId FROM kri.vFlagLatest WHERE KriCode = 'K14'")[0][0], latest14)
+
 cur.execute("UPDATE kri.Parameter SET ParamValue = 2 WHERE KriCode = '*' AND ParamName = 'KeepRuns'")
-run(); run()
-keep = [x[0] for x in one("SELECT RunId FROM kri.Run ORDER BY RunId")]
-check("KeepRuns = 2：只留最近兩次", len(keep), 2)
-check("明細、標記跟著清掉", one("SELECT COUNT(*) FROM kri.K14_Detail WHERE RunId < ?", keep[0])[0][0]
-      + one("SELECT COUNT(*) FROM kri.Flag WHERE RunId < ?", keep[0])[0][0], 0)
+k13 = one("SELECT RunId FROM kri.vLatestStep WHERE KriCode = 'K13'")[0][0]     # K13 停用了，之後不會再跑
+run(); run(); run("K14"); run("K14")
+keep14 = [x[0] for x in one("SELECT RunId FROM kri.RunStep WHERE KriCode = 'K14' ORDER BY RunId")]
+check("KeepRuns = 2：每題各自留最近兩次", len([r for r in keep14 if r != latest14]) <= 2 and len(keep14) <= 3, True)
+check("KeepRuns：停用、很久沒跑的 K13 結果還在儀表板", (
+    one("SELECT RunId FROM kri.vLatestStep WHERE KriCode = 'K13'")[0][0],
+    one("SELECT COUNT(*) FROM kri.Flag WHERE RunId = ? AND KriCode = 'K13'", k13)[0][0] > 0), (k13, True))
+check("明細、標記跟著清掉", one("SELECT COUNT(*) FROM kri.K14_Detail d WHERE NOT EXISTS (SELECT 1 FROM kri.RunStep s "
+      "WHERE s.RunId = d.RunId AND s.KriCode = 'K14')")[0][0]
+      + one("SELECT COUNT(*) FROM kri.Flag f WHERE NOT EXISTS (SELECT 1 FROM kri.RunStep s "
+            "WHERE s.RunId = f.RunId AND s.KriCode = f.KriCode)")[0][0], 0)
+check("沒有任何一題留著的執行紀錄也刪掉", one("SELECT COUNT(*) FROM kri.Run r WHERE NOT EXISTS "
+      "(SELECT 1 FROM kri.RunStep s WHERE s.RunId = r.RunId)")[0][0], 0)
 
 cn.close()
 sqlcmd("-Q", f"ALTER DATABASE {DB} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {DB};")

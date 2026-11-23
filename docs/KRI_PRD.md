@@ -77,7 +77,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 - **放棄**：先寫死、之後再改。
 
 ### D4. 結果以 RunId 保存，不 DROP 重建
-- **選擇**：每次 `kri.RunAll` 產生一個 RunId，所有輸出表都帶 RunId。表用固定 DDL 建立、有主鍵。儀表板看「每個 KRI 最新一次成功的 Run」（`kri.vFlagLatest`）。保留最近 N 次（參數 `KeepRuns`）。
+- **選擇**：每次 `kri.RunAll` 產生一個 RunId，所有輸出表都帶 RunId。表用固定 DDL 建立、有主鍵。儀表板看「每個 KRI 基準日最新、同基準日取最後一次的成功 Run」（`kri.vLatestStep` → `kri.vFlagLatest`），回補過去的基準日不會蓋掉現在的結果。保留（參數 `KeepRuns`）每題各自算：每題留最近 N 次，另外一定留儀表板正在用的那次；用 `@Only` 重跑某題、或停用很久的題目，都不會把別題的結果擠掉。沒有任何一題留著的 Run 一併刪除。
 - **原因**：過往專案每次 `DROP` + `SELECT INTO`，沒有主鍵、型別會漂移。歷史表用 `SELECT *` 寫入，欄位一改就壞。執行到一半失敗，BI 會讀到缺表或半套資料。
 - **放棄**：依期間 delete+insert 的歷史表（RunId 已經涵蓋同樣的需求，而且更簡單）。
 
@@ -209,7 +209,9 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 
 **kri.Kxx_Detail**：每個 KRI 自己的明細表，欄位依題目而定，一律帶 RunId。明細表會包含**未被標記但有參與比較的列**（例如比價 KRI 的「未比對」列），用來算覆蓋率。
 
-**kri.vFlagLatest**（view）：每個 KRI 最新一次成功 Run 的 Flag。儀表板接這張。
+**kri.vLatestStep**（view）：每個 KRI 目前採用的那一次成功執行（基準日最新，同基準日取 RunId 最大）。
+
+**kri.vFlagLatest**（view）：`kri.vLatestStep` 那一次的 Flag。儀表板接這張。
 
 ---
 

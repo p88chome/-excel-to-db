@@ -51,7 +51,7 @@ EXEC etl.Load_PurchaseOrderDetail; -- 只跑一張
 EXEC kri.RunAll;                            -- 跑全部啟用的 KRI，基準日今天
 EXEC kri.RunAll @AsOfDate = '2025-12-31';   -- 指定基準日
 EXEC kri.RunAll @Only = N'K14';              -- 只跑某幾題
-SELECT * FROM kri.vFlagLatest;              -- 每題最新一次成功的標記（儀表板接這個）
+SELECT * FROM kri.vFlagLatest;              -- 每題基準日最新的成功標記（儀表板接這個）
 ```
 
 - **調門檻：** `UPDATE kri.Parameter SET ParamValue = 0.1, IsTentative = 0 WHERE KriCode = 'K14' AND ParamName = 'PriceTolerance';`

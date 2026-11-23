@@ -459,16 +459,23 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_kri_GR_Po' AND object_
 GO
 
 -- ======================================================================
--- 儀表板讀這個：每個 KRI 最新一次成功執行的標記
+-- 儀表板讀這個：每個 KRI「基準日最新」的那次成功執行的標記
+--   先比基準日，同一個基準日再比 RunId。回補過去的基準日不會蓋掉現在的結果。
 -- ======================================================================
+CREATE OR ALTER VIEW kri.vLatestStep AS
+SELECT RunId, KriCode, AsOfDate, PeriodFrom, PeriodTo
+FROM (SELECT s.RunId, s.KriCode, r.AsOfDate, s.PeriodFrom, s.PeriodTo,
+             ROW_NUMBER() OVER (PARTITION BY s.KriCode ORDER BY r.AsOfDate DESC, s.RunId DESC) AS rn
+      FROM kri.RunStep s
+      JOIN kri.Run r ON r.RunId = s.RunId
+      WHERE s.Status = 'OK') x
+WHERE rn = 1;
+GO
 CREATE OR ALTER VIEW kri.vFlagLatest AS
-SELECT f.*, d.Name AS KriName, s.PeriodFrom, s.PeriodTo, r.AsOfDate
+SELECT f.*, d.Name AS KriName, l.PeriodFrom, l.PeriodTo, l.AsOfDate
 FROM kri.Flag f
-JOIN (SELECT KriCode, MAX(RunId) AS RunId FROM kri.RunStep WHERE Status = 'OK' GROUP BY KriCode) l
-  ON l.KriCode = f.KriCode AND l.RunId = f.RunId
-JOIN kri.RunStep s   ON s.RunId = f.RunId AND s.KriCode = f.KriCode
-JOIN kri.Run r       ON r.RunId = f.RunId
-JOIN kri.Definition d ON d.KriCode = f.KriCode;
+JOIN kri.vLatestStep l ON l.KriCode = f.KriCode AND l.RunId = f.RunId
+JOIN kri.Definition d  ON d.KriCode = f.KriCode;
 GO
 
 -- ======================================================================
@@ -556,13 +563,20 @@ BEGIN
                       ELSE 'FAILED' END
     WHERE RunId = @RunId;
 
-    -- 只保留最近 KeepRuns 次（D4）。沒設參數就全部保留。
+    -- 保留（D4）：每一題各自留最近 KeepRuns 次，另外一定留著儀表板正在用的那一次（kri.vLatestStep）。
+    --   每題分開算：用 @Only 重跑某一題、或某題一季才跑一次，都不會把別題的結果擠掉。沒設參數就全部保留。
     DECLARE @keep INT = (SELECT CAST(ParamValue AS INT) FROM kri.Parameter
                          WHERE KriCode = '*' AND ParamName = 'KeepRuns');
     IF @keep > 0
     BEGIN
-        DECLARE @cut INT = (SELECT MIN(RunId) FROM (SELECT TOP (@keep) RunId FROM kri.Run ORDER BY RunId DESC) k);
-        DECLARE @t NVARCHAR(128);
+        SELECT RunId, KriCode INTO #Keep
+        FROM (SELECT RunId, KriCode, ROW_NUMBER() OVER (PARTITION BY KriCode ORDER BY RunId DESC) AS rn
+              FROM kri.RunStep) x
+        WHERE rn <= @keep
+        UNION
+        SELECT RunId, KriCode FROM kri.vLatestStep;
+
+        DECLARE @t NVARCHAR(128), @tcode NVARCHAR(10);
         DECLARE tbls CURSOR LOCAL FAST_FORWARD FOR
             SELECT t.name FROM sys.tables t
             WHERE t.schema_id = SCHEMA_ID('kri') AND t.name LIKE N'K%[_]Detail';
@@ -570,14 +584,20 @@ BEGIN
         FETCH NEXT FROM tbls INTO @t;
         WHILE @@FETCH_STATUS = 0
         BEGIN
-            SET @sql = N'DELETE kri.' + QUOTENAME(@t) + N' WHERE RunId < @cut';
-            EXEC sp_executesql @sql, N'@cut INT', @cut = @cut;
+            -- 表名 K14_Detail → 題號 K14
+            SET @sql = N'DELETE d FROM kri.' + QUOTENAME(@t) + N' d WHERE NOT EXISTS (SELECT 1 FROM #Keep k '
+                     + N'WHERE k.RunId = d.RunId AND k.KriCode = @code)';
+            SET @tcode = LEFT(@t, LEN(@t) - 7);
+            EXEC sp_executesql @sql, N'@code NVARCHAR(10)', @code = @tcode;
             FETCH NEXT FROM tbls INTO @t;
         END;
         CLOSE tbls;
-        DELETE kri.Flag    WHERE RunId < @cut;
-        DELETE kri.RunStep WHERE RunId < @cut;
-        DELETE kri.Run     WHERE RunId < @cut;
+        DELETE f FROM kri.Flag f
+        WHERE NOT EXISTS (SELECT 1 FROM #Keep k WHERE k.RunId = f.RunId AND k.KriCode = f.KriCode);
+        DELETE s FROM kri.RunStep s
+        WHERE NOT EXISTS (SELECT 1 FROM #Keep k WHERE k.RunId = s.RunId AND k.KriCode = s.KriCode);
+        DELETE r FROM kri.Run r                       -- 沒有任何一題還留著的執行
+        WHERE r.RunId <> @RunId AND NOT EXISTS (SELECT 1 FROM kri.RunStep s WHERE s.RunId = r.RunId);
     END;
 
     SELECT s.KriCode AS [KRI], d.Name AS [名稱], s.PeriodFrom AS [期間起], s.PeriodTo AS [期間迄],
