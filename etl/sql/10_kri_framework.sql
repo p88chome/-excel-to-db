@@ -489,6 +489,91 @@ JOIN kri.Definition d  ON d.KriCode = f.KriCode;
 GO
 
 -- ======================================================================
+-- Power BI 用（D16）：把標記和題目說明、供應商、料號接好，BI 不用自己 JOIN
+-- ======================================================================
+-- 題目說明裡的 {參數名} 換成現在的門檻值：比例（ratio、小於 1）顯示成百分比，其他顯示數字
+CREATE OR ALTER FUNCTION kri.DescribeKri (@KriCode NVARCHAR(10), @Text NVARCHAR(1000))
+RETURNS NVARCHAR(1000)
+AS
+BEGIN
+    SELECT @Text = REPLACE(@Text, N'{' + p.ParamName + N'}',
+                           CASE WHEN p.Unit = 'ratio' AND ABS(p.ParamValue) < 1 THEN FORMAT(p.ParamValue, '0.##%')
+                                ELSE FORMAT(p.ParamValue, '#,0.##') END)
+    FROM (SELECT ParamName, ParamValue, Unit,
+                 ROW_NUMBER() OVER (PARTITION BY ParamName ORDER BY CASE WHEN KriCode = @KriCode THEN 0 ELSE 1 END) AS rn
+          FROM kri.Parameter WHERE KriCode IN (@KriCode, '*')) p
+    WHERE p.rn = 1 AND CHARINDEX(N'{' + p.ParamName + N'}', @Text) > 0;
+    RETURN @Text;
+END;
+GO
+
+-- 每題一列：設定、說明、目前儀表板用的那次結果、最近一次執行的狀態
+CREATE OR ALTER VIEW kri.vBiKri AS
+SELECT d.KriCode, d.Name AS KriName, kri.DescribeKri(d.KriCode, d.Description) AS KriDescription,
+       d.Stage, d.EntityType, d.Enabled, d.Frequency, d.RunDay, d.WindowMonths,
+       d.IsCompliance, d.IsFraud, d.IsOperation, d.IsFinancial,
+       CAST(CASE WHEN EXISTS (SELECT 1 FROM kri.Parameter p WHERE p.KriCode = d.KriCode AND p.IsTentative = 1)
+                 THEN 1 ELSE 0 END AS BIT)                         AS HasTentativeParam,   -- 還有暫定的門檻
+       l.RunId AS LatestRunId, l.AsOfDate, l.PeriodFrom, l.PeriodTo,
+       ls.DetailRows, ls.FlagRows, fs.AmountTWD,
+       lr.Status AS LastStepStatus, lr.AsOfDate AS LastStepAsOfDate,
+       COALESCE(lr.ErrorMessage, lr.Note) AS LastStepNote
+FROM kri.Definition d
+LEFT JOIN kri.vLatestStep l ON l.KriCode = d.KriCode
+LEFT JOIN kri.RunStep ls    ON ls.RunId = l.RunId AND ls.KriCode = l.KriCode
+OUTER APPLY (SELECT SUM(COALESCE(f.EffectTWD, CASE WHEN f.LocalCurrency = 'TWD' THEN f.EffectLocal END)) AS AmountTWD
+             FROM kri.Flag f
+             WHERE f.RunId = l.RunId AND f.KriCode = l.KriCode) fs
+OUTER APPLY (SELECT TOP 1 s.Status, s.Note, s.ErrorMessage, r.AsOfDate          -- 最近一次執行（含失敗、SKIPPED）
+             FROM kri.RunStep s JOIN kri.Run r ON r.RunId = s.RunId
+             WHERE s.KriCode = d.KriCode ORDER BY s.RunId DESC) lr;
+GO
+
+-- 一列 = 一筆標記（跟 kri.vFlagLatest 筆數一樣），帶題目、供應商、料號的資訊
+--   供應商：整家的資料取 VendorRowNo = 1；凍結、付款條件取標記那個公司別／採購組織的那一列（沒有就取整家那列）
+CREATE OR ALTER VIEW kri.vBiFlag AS
+SELECT f.RunId, f.AsOfDate, f.PeriodFrom, f.PeriodTo, f.KriCode, f.KriName,
+       k.KriDescription, k.Stage, k.IsCompliance, k.IsFraud, k.IsOperation, k.IsFinancial, k.HasTentativeParam,
+       f.FlagKey, f.EntityType, f.CompanyCode, f.PurchOrg, f.Plant,
+       f.Vendor, v.VendorName, v.Country AS VendorCountry, v.TaxNumber AS VendorTaxNumber,
+       v.VendorAccountGroup, v.CreatedOn AS VendorCreatedOn,
+       CAST(CASE WHEN ISNULL(v.CentralPurchBlock, '') <> '' OR ISNULL(v.CentralPostingBlock, '') <> ''
+                   OR ISNULL(vo.PurchasingBlock, '') <> '' OR ISNULL(vo.PostingBlock, '') <> ''
+                 THEN 1 ELSE 0 END AS BIT)                         AS VendorBlockedNow,   -- 現在的狀態，不是基準日
+       COALESCE(vo.PurchOrgPaymentTerms, vo.PaymentTerms)          AS VendorPaymentTerms,
+       f.Material, m.MaterialDesc, m.MaterialType, m.MaterialGroup,
+       f.DocNumber, f.DocItem, f.DocDate, f.MetricValue, f.ThresholdValue,
+       f.EffectLocal, f.LocalCurrency, f.EffectTWD,
+       COALESCE(f.EffectTWD, CASE WHEN f.LocalCurrency = 'TWD' THEN f.EffectLocal END) AS AmountTWD,  -- 本幣就是台幣時直接用
+       f.Reason
+FROM kri.vFlagLatest f
+JOIN kri.vBiKri k ON k.KriCode = f.KriCode
+LEFT JOIN mst.Vendor v ON v.Vendor = f.Vendor AND v.VendorRowNo = 1
+OUTER APPLY (SELECT TOP 1 x.PurchasingBlock, x.PostingBlock, x.PaymentTerms, x.PurchOrgPaymentTerms
+             FROM mst.Vendor x
+             WHERE x.Vendor = f.Vendor
+             ORDER BY CASE WHEN x.CompanyCode = ISNULL(f.CompanyCode, '') AND x.PurchOrg = ISNULL(f.PurchOrg, '') THEN 0
+                           WHEN x.CompanyCode = ISNULL(f.CompanyCode, '') OR x.PurchOrg = ISNULL(f.PurchOrg, '') THEN 1
+                           ELSE 2 END, x.VendorRowNo) vo
+LEFT JOIN mst.Material m ON m.Material = f.Material;
+GO
+
+-- 一列 = 一家被標記的供應商：幾題、幾筆、影響金額
+CREATE OR ALTER VIEW kri.vBiVendor AS
+SELECT g.*, kl.KriList
+FROM (SELECT Vendor, MAX(VendorName) AS VendorName, MAX(VendorCountry) AS VendorCountry,
+             MAX(CAST(VendorBlockedNow AS INT)) AS VendorBlockedNow,
+             COUNT(DISTINCT KriCode) AS KriCount, COUNT(*) AS FlagCount,
+             SUM(AmountTWD) AS AmountTWD,
+             COUNT(CASE WHEN AmountTWD IS NULL THEN 1 END) AS FlagsWithoutTWD,     -- 沒有台幣金額的筆數
+             MAX(AsOfDate) AS LatestAsOfDate
+      FROM kri.vBiFlag WHERE ISNULL(Vendor, '') <> ''
+      GROUP BY Vendor) g
+CROSS APPLY (SELECT STRING_AGG(CAST(KriCode AS NVARCHAR(MAX)), N',') WITHIN GROUP (ORDER BY KriCode) AS KriList
+             FROM (SELECT DISTINCT KriCode FROM kri.vBiFlag WHERE Vendor = g.Vendor) x) kl;
+GO
+
+-- ======================================================================
 -- kri.LastDueDate：基準日（含）以前最近一次「該跑」的日子（D13）
 --   DAILY = 基準日本身。不受 SET DATEFIRST 影響（1900-01-01 是星期一）。
 -- ======================================================================

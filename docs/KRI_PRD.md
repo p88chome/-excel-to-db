@@ -141,6 +141,11 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 - **原因**：有些題目（呆滯料、主檔價變動）一個月看一次就夠，每天跑浪費也讓結果跳動。過往專案用執行當下的日期（GETDATE）判斷要不要跑，回補過去的基準日時判斷會錯，漏跑也不會補。
 - **放棄**：每種頻率各開一個排程（排程多、容易漏設）；用「今天是不是月底」判斷（漏跑那天就整個月沒結果）。
 
+
+### D16. 給 Power BI 的 view 先接好
+- **選擇**：`kri.vBiKri`、`kri.vBiFlag`、`kri.vBiVendor`（第 5 節）把標記、題目說明、供應商、料號接好。供應商主檔一家多列，view 裡已經處理，筆數跟 `kri.vFlagLatest` 一樣。供應商的凍結狀態是「現在」的值，跟基準日當時可能不同（基準日當時的狀態看各題明細）。
+- **原因**：過往專案把主檔接進 BI 時，LEFT JOIN 又在 WHERE 加條件（語言、地址有效日），沒有英文品名、地址的對象整筆消失；BI 端各自 JOIN 一家多列的主檔也容易重複計算。
+- **放棄**：在 Power BI 裡自己 JOIN（每張報表各寫一次、容易錯）。
 ---
 
 ## 5. 資料模型（schema `kri`）
@@ -217,7 +222,14 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 
 **kri.vLatestStep**（view）：每個 KRI 目前採用的那一次成功執行（基準日最新，同基準日取 RunId 最大）。
 
-**kri.vFlagLatest**（view）：`kri.vLatestStep` 那一次的 Flag。儀表板接這張。
+**kri.vFlagLatest**（view）：`kri.vLatestStep` 那一次的 Flag。
+
+**Power BI 用的 view**（D16）：
+| view | 一列是 | 內容 |
+|---|---|---|
+| `kri.vBiKri` | 一題 | 設定、風險分類、頻率、說明（`{參數}` 換成現在的門檻值，`kri.DescribeKri`）、還有沒有暫定門檻、儀表板用的那次結果、最近一次執行的狀態和說明 |
+| `kri.vBiFlag` | 一筆標記（筆數 = `kri.vFlagLatest`） | 標記 + 題目說明 + 供應商（整家資料取 `VendorRowNo = 1`；凍結、付款條件取標記那個公司別／採購組織的那列）+ 料號；`AmountTWD` = EffectTWD，沒有時本幣是台幣就用 EffectLocal |
+| `kri.vBiVendor` | 一家被標記的供應商 | 幾題、幾筆、題號清單、AmountTWD 合計、沒有台幣金額的筆數 |
 
 ---
 
@@ -507,4 +519,4 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | 2026-10-19 | v1.2 | 第一期實作完成：框架 + K08、K13、K14、K18，LocalDB 測試 37 項通過 |
 | 2026-11-18 | v1.3 | 第二批：K01、K03、K04、K10、K19（第 9b 節）；新增 `ext.QualityIssue`、`kri.PaymentTerm`；LocalDB 測試 63 項通過 |
 | 2026-11-19 | v1.4 | 一題一個檔（`etl/sql/kri_procs/`），檔頭用白話寫規則（D13）；回補基準日只用當時已知的資料（D12：K05、K06、K18 已收數量，K14 主檔價建立日，K04 下單當時的主檔付款條件）；K02 加銀行帳號；K08、K09 單筆低於核決表最低區間當第 0 層；LocalDB 測試 117 項通過 |
-| 2026-11-23 | v1.5 | 本機驗證後的修正：本幣換算套 SAP 換算因子（TCURF）；RunAll 記錄錯誤細節、防重複執行、清掉中斷的執行；儀表板依基準日取最新結果、保留次數每題分開算（D4）；每題的執行頻率（D15） |
+| 2026-11-23 | v1.5 | 本機驗證後的修正：本幣換算套 SAP 換算因子（TCURF）；RunAll 記錄錯誤細節、防重複執行、清掉中斷的執行；儀表板依基準日取最新結果、保留次數每題分開算（D4）；每題的執行頻率（D15）；Power BI 用的 view（D16） |

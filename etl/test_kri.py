@@ -814,6 +814,23 @@ check("vFlagLatest 各題標記數", [(x[0], x[1]) for x in r],
        ("K10", 5), ("K11", 2), ("K12", 2), ("K13", 1), ("K14", 5), ("K15", 1), ("K16", 2), ("K17", 2), ("K18", 2),
        ("K19", 6), ("K20", 2)])
 
+# Power BI 用的 view
+check("vBiFlag 筆數跟 vFlagLatest 一樣（供應商多列不會重複）",
+      one("SELECT COUNT(*) FROM kri.vBiFlag")[0][0], one("SELECT COUNT(*) FROM kri.vFlagLatest")[0][0])
+check("vBiKri：一題一列，說明裡的 {參數} 都換成門檻值", (
+    one("SELECT COUNT(*) FROM kri.vBiKri")[0][0] == one("SELECT COUNT(*) FROM kri.Definition")[0][0],
+    one("SELECT COUNT(*) FROM kri.vBiKri WHERE KriDescription LIKE N'%{%'")[0][0],
+    "高 5% 以上" in one("SELECT KriDescription FROM kri.vBiKri WHERE KriCode = 'K14'")[0][0],
+    "{OverdueDays}" not in one("SELECT KriDescription FROM kri.vBiKri WHERE KriCode = 'K18'")[0][0]), (True, 0, True, True))
+check("vBiVendor：每家的標記數加起來 = 有供應商的標記數",
+      one("SELECT SUM(FlagCount) FROM kri.vBiVendor")[0][0],
+      one("SELECT COUNT(*) FROM kri.vBiFlag WHERE ISNULL(Vendor, '') <> ''")[0][0])
+x = one("SELECT TOP 1 KriList, KriCount FROM kri.vBiVendor WHERE KriCount > 1")
+check("vBiVendor：KriList 不重複", bool(x) and len(x[0][0].split(",")) == x[0][1], True)
+check("vBiFlag：本幣是 TWD 時 AmountTWD = EffectLocal", one(
+    "SELECT COUNT(*) FROM kri.vBiFlag WHERE LocalCurrency = 'TWD' AND EffectLocal IS NOT NULL "
+    "AND ISNULL(AmountTWD, -1) <> EffectLocal")[0][0], 0)
+
 # 參數與對照表改了，結果跟著變
 cur.execute("UPDATE kri.Parameter SET ParamValue = 1 WHERE KriCode = 'K01' AND ParamName = 'RequireSameMaterial'")
 cur.execute("INSERT kri.PaymentTerm (Code, Days) VALUES ('IMMD', 0), ('T045', 45)")
