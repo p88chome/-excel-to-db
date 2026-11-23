@@ -51,6 +51,7 @@ EXEC etl.Load_PurchaseOrderDetail; -- 只跑一張
 EXEC kri.RunAll;                            -- 跑全部啟用的 KRI，基準日今天
 EXEC kri.RunAll @AsOfDate = '2025-12-31';   -- 指定基準日
 EXEC kri.RunAll @Only = N'K14';              -- 只跑某幾題
+EXEC kri.RunAll @Force = 1;                  -- 不管每題的頻率（kri.Definition.Frequency），全部都跑
 SELECT * FROM kri.vFlagLatest;              -- 每題基準日最新的成功標記（儀表板接這個）
 ```
 

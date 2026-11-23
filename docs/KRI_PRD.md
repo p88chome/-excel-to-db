@@ -136,6 +136,11 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 - 主鍵欄位空白存成空字串，不讓一筆異常資料拖垮整張表。
 - stg 缺欄位時可以用 `@fill` 補空欄先組起來。
 
+### D15. 每題有自己的執行頻率，排程每天跑一次就好
+- **選擇**：`kri.Definition.Frequency`、`RunDay` 設定每題的頻率。排程每天 `EXEC kri.RunAll`；`kri.LastDueDate` 算出基準日以前最近一次「該跑」的日子，那天到基準日之間已經成功跑過的題目，這次記 `SKIPPED`（說明寫上次的 RunId）不跑。排程漏跑那天，下一次執行就會補上。`@Only` 點名的題目、`@Force = 1` 不看頻率。SKIPPED 不算失敗、不算保留次數，儀表板繼續用上次的結果。日期都用基準日算，不受伺服器的 `DATEFIRST` 設定影響。
+- **原因**：有些題目（呆滯料、主檔價變動）一個月看一次就夠，每天跑浪費也讓結果跳動。過往專案用執行當下的日期（GETDATE）判斷要不要跑，回補過去的基準日時判斷會錯，漏跑也不會補。
+- **放棄**：每種頻率各開一個排程（排程多、容易漏設）；用「今天是不是月底」判斷（漏跑那天就整個月沒結果）。
+
 ---
 
 ## 5. 資料模型（schema `kri`）
@@ -153,6 +158,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | ProcName | 執行的程序，例：`kri.Run_K14` |
 | WindowMonths | 預設觀察期間（月） |
 | Enabled | 1 = 由 RunAll 執行 |
+| Frequency / RunDay | 執行頻率（D15）：`DAILY`（預設）、`WEEKLY`（RunDay = 星期幾，1 = 星期一）、`MONTHLY`（RunDay = 幾號，空白 = 月底）、`QUARTERLY`（3、6、9、12 月的 RunDay 號，空白 = 季底） |
 | Phase | 開發期別 |
 | IsCompliance / IsFraud / IsOperation / IsFinancial | 風險分類（可複選） |
 | Notes | 備註、待確認事項 |
@@ -189,7 +195,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 
 **kri.Run**：RunId (PK, identity)、AsOfDate、StartedAt、EndedAt、Status（`RUNNING` / `OK` / `PARTIAL` / `FAILED`）
 
-**kri.RunStep**：RunId + KriCode (PK)、PeriodFrom、PeriodTo、StartedAt、EndedAt、DetailRows、FlagRows、Status（RUNNING／OK／FAILED／ABORTED）、ErrorMessage、ErrorNumber、ErrorSeverity、ErrorState、ErrorProcedure、ErrorLine
+**kri.RunStep**：RunId + KriCode (PK)、PeriodFrom、PeriodTo、StartedAt、EndedAt、DetailRows、FlagRows、Status（RUNNING／OK／FAILED／ABORTED／SKIPPED）、ErrorMessage、ErrorNumber、ErrorSeverity、ErrorState、ErrorProcedure、ErrorLine
 
 ### 5.3 輸出
 
@@ -501,3 +507,4 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | 2026-10-19 | v1.2 | 第一期實作完成：框架 + K08、K13、K14、K18，LocalDB 測試 37 項通過 |
 | 2026-11-18 | v1.3 | 第二批：K01、K03、K04、K10、K19（第 9b 節）；新增 `ext.QualityIssue`、`kri.PaymentTerm`；LocalDB 測試 63 項通過 |
 | 2026-11-19 | v1.4 | 一題一個檔（`etl/sql/kri_procs/`），檔頭用白話寫規則（D13）；回補基準日只用當時已知的資料（D12：K05、K06、K18 已收數量，K14 主檔價建立日，K04 下單當時的主檔付款條件）；K02 加銀行帳號；K08、K09 單筆低於核決表最低區間當第 0 層；LocalDB 測試 117 項通過 |
+| 2026-11-23 | v1.5 | 本機驗證後的修正：本幣換算套 SAP 換算因子（TCURF）；RunAll 記錄錯誤細節、防重複執行、清掉中斷的執行；儀表板依基準日取最新結果、保留次數每題分開算（D4）；每題的執行頻率（D15） |

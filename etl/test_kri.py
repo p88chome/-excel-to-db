@@ -874,6 +874,53 @@ check("kri.Param：先找這一題的，沒有再找 '*'",
       [float(one(f"SELECT kri.Param('{k}', 'TestGlobal')")[0][0]) for k in ("K01", "K02")], [7.0, 5.0])
 cur.execute("DELETE kri.Parameter WHERE ParamName = 'TestGlobal'")
 run_file("12_kri_seed.sql")      # 重跑 seed 會把缺的參數補回來
+# 頻率
+cur.execute("SET DATEFIRST 3")      # 不受 DATEFIRST 影響
+check("kri.LastDueDate", [str(x[0]) for x in one(
+    "SELECT kri.LastDueDate(f, d, a) FROM (VALUES "
+    "('DAILY', NULL, '2025-11-12'), ('WEEKLY', NULL, '2025-11-12'), ('WEEKLY', 3, '2025-11-11'), "
+    "('MONTHLY', NULL, '2025-11-12'), ('MONTHLY', 15, '2025-11-12'), ('MONTHLY', 31, '2025-02-28'), "
+    "('QUARTERLY', NULL, '2025-11-12'), ('QUARTERLY', NULL, '2025-12-31'), ('QUARTERLY', 5, '2025-02-01')"
+    ") v(f, d, a)")],
+    ["2025-11-12", "2025-11-10", "2025-11-05", "2025-10-31", "2025-10-15", "2025-02-28",
+     "2025-09-30", "2025-12-31", "2024-12-05"])
+cur.execute("SET DATEFIRST 7")
+cur.execute("UPDATE kri.Definition SET Frequency = 'MONTHLY', RunDay = NULL WHERE KriCode = 'K01'")
+cur.execute("EXEC kri.RunAll @AsOfDate = '2026-02-10'")
+while cur.nextset():
+    pass
+r1 = one("SELECT MAX(RunId) FROM kri.Run")[0][0]
+cur.execute("EXEC kri.RunAll @AsOfDate = '2026-02-20', @RaiseOnFail = 1")
+while cur.nextset():
+    pass
+r2 = one("SELECT MAX(RunId) FROM kri.Run")[0][0]
+st = one("SELECT Status, Note FROM kri.RunStep WHERE RunId = ? AND KriCode = 'K01'", r2)[0]
+check("MONTHLY：同一期跑過就 SKIPPED，說明寫上次的 RunId", (st[0], f"RunId {r1}" in st[1]), ("SKIPPED", True))
+check("SKIPPED 不影響整次結果、其他題照跑", (one("SELECT Status FROM kri.Run WHERE RunId = ?", r2)[0][0],
+      one("SELECT Status FROM kri.RunStep WHERE RunId = ? AND KriCode = 'K02'", r2)[0][0]), ("OK", "OK"))
+check("SKIPPED 時儀表板仍顯示上次結果", one("SELECT RunId FROM kri.vLatestStep WHERE KriCode = 'K01'")[0][0], r1)
+cur.execute("EXEC kri.RunAll @AsOfDate = '2026-02-28'")
+while cur.nextset():
+    pass
+check("MONTHLY：到月底就跑", one("SELECT Status FROM kri.RunStep WHERE RunId = (SELECT MAX(RunId) FROM kri.Run) "
+                               "AND KriCode = 'K01'")[0][0], "OK")
+cur.execute("EXEC kri.RunAll @AsOfDate = '2026-02-28', @Only = N'K01'")
+while cur.nextset():
+    pass
+cur.execute("EXEC kri.RunAll @AsOfDate = '2026-02-28', @Force = 1")
+while cur.nextset():
+    pass
+check("@Only 點名、@Force 都不看頻率", [x[0] for x in one(
+    "SELECT Status FROM kri.RunStep WHERE KriCode = 'K01' AND RunId > (SELECT MAX(RunId) - 2 FROM kri.Run) "
+    "ORDER BY RunId")], ["OK", "OK"])
+cur.execute("UPDATE kri.Definition SET Frequency = 'DAILY' WHERE KriCode = 'K01'")
+cur.execute("""DECLARE @s NVARCHAR(MAX) = (SELECT STRING_AGG(CAST(N'DELETE kri.' + QUOTENAME(name)
+                + N' WHERE RunId IN (SELECT RunId FROM kri.Run WHERE AsOfDate >= ''2026-01-01'');' AS NVARCHAR(MAX)), N' ')
+                FROM sys.tables WHERE schema_id = SCHEMA_ID('kri') AND name LIKE N'K%[_]Detail');
+               EXEC (@s);
+               DELETE kri.Flag WHERE RunId IN (SELECT RunId FROM kri.Run WHERE AsOfDate >= '2026-01-01');
+               DELETE kri.RunStep WHERE RunId IN (SELECT RunId FROM kri.Run WHERE AsOfDate >= '2026-01-01');
+               DELETE kri.Run WHERE AsOfDate >= '2026-01-01';""")    # 清掉頻率測試的執行，不影響後面
 
 cur.execute("EXEC sp_rename 'mst.PurchasingCondA018', 'PurchasingCondA018_x'")
 res, _ = run()

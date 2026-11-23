@@ -123,11 +123,21 @@ CREATE TABLE kri.RunStep (
     EndedAt      DATETIME2(0)   NULL,
     DetailRows   BIGINT         NULL,
     FlagRows     BIGINT         NULL,
-    Status       NVARCHAR(10)   NOT NULL DEFAULT 'RUNNING',  -- RUNNING / OK / FAILED / ABORTED
+    Status       NVARCHAR(10)   NOT NULL DEFAULT 'RUNNING',  -- RUNNING / OK / FAILED / ABORTED / SKIPPED（還沒到頻率）
     Note         NVARCHAR(400)  NULL,
     ErrorMessage NVARCHAR(4000) NULL,
     CONSTRAINT PK_kri_RunStep PRIMARY KEY (RunId, KriCode)
 );
+GO
+-- 執行頻率（D13）：排程每天跑 RunAll，每題依自己的頻率決定這次要不要跑
+--   Frequency  DAILY（預設）/ WEEKLY / MONTHLY / QUARTERLY
+--   RunDay     WEEKLY：星期幾（1 = 星期一 … 7 = 星期日，預設 1）
+--              MONTHLY、QUARTERLY：幾號（空白 = 月底；超過當月天數也算月底）。QUARTERLY 在 3、6、9、12 月
+IF COL_LENGTH('kri.Definition', 'Frequency') IS NULL
+    ALTER TABLE kri.Definition ADD Frequency NVARCHAR(10) NOT NULL
+        CONSTRAINT DF_kri_Definition_Frequency DEFAULT 'DAILY'
+        CONSTRAINT CK_kri_Definition_Frequency CHECK (Frequency IN ('DAILY', 'WEEKLY', 'MONTHLY', 'QUARTERLY')),
+        RunDay TINYINT NULL;
 GO
 -- 錯誤細節：哪支程序、第幾行出錯（ErrorLine 從那支程序的 CREATE 那行算起，對得到 kri_procs/Kxx_*.sql）
 IF COL_LENGTH('kri.RunStep', 'ErrorNumber') IS NULL
@@ -479,17 +489,51 @@ JOIN kri.Definition d  ON d.KriCode = f.KriCode;
 GO
 
 -- ======================================================================
+-- kri.LastDueDate：基準日（含）以前最近一次「該跑」的日子（D13）
+--   DAILY = 基準日本身。不受 SET DATEFIRST 影響（1900-01-01 是星期一）。
+-- ======================================================================
+CREATE OR ALTER FUNCTION kri.LastDueDate (@Frequency NVARCHAR(10), @RunDay TINYINT, @AsOfDate DATE)
+RETURNS DATE
+AS
+BEGIN
+    IF @Frequency = 'WEEKLY'
+    BEGIN
+        DECLARE @dow INT = DATEDIFF(DAY, '19000101', @AsOfDate) % 7 + 1;       -- 1 = 星期一
+        RETURN DATEADD(DAY, -((@dow - ISNULL(NULLIF(@RunDay, 0), 1) + 7) % 7), @AsOfDate);
+    END;
+    IF @Frequency IN ('MONTHLY', 'QUARTERLY')
+    BEGIN
+        DECLARE @step INT = IIF(@Frequency = 'QUARTERLY', 3, 1),
+                @m INT = MONTH(@AsOfDate);
+        -- 這一期的月份第一天：MONTHLY = 本月；QUARTERLY = 本季最後一個月（3、6、9、12）
+        DECLARE @ms DATE = DATEFROMPARTS(YEAR(@AsOfDate), IIF(@step = 3, ((@m - 1) / 3 + 1) * 3, @m), 1);
+        DECLARE @c DATE = IIF(ISNULL(@RunDay, 0) = 0 OR @RunDay >= DAY(EOMONTH(@ms)), EOMONTH(@ms),
+                              DATEADD(DAY, @RunDay - 1, @ms));
+        IF @c <= @AsOfDate RETURN @c;
+        SET @ms = DATEADD(MONTH, -@step, @ms);                                   -- 這一期還沒到，往前一期
+        RETURN IIF(ISNULL(@RunDay, 0) = 0 OR @RunDay >= DAY(EOMONTH(@ms)), EOMONTH(@ms),
+                   DATEADD(DAY, @RunDay - 1, @ms));
+    END;
+    RETURN @AsOfDate;
+END;
+GO
+
+-- ======================================================================
 -- kri.RunAll：依 kri.Definition 跑所有啟用的 KRI（D7）
 --   EXEC kri.RunAll;                          -- 基準日 = 今天
 --   EXEC kri.RunAll @AsOfDate = '2025-12-31'; -- 回補某個基準日
 --   EXEC kri.RunAll @Only = N'K14,K13';        -- 只跑這幾題
 --   EXEC kri.RunAll @RaiseOnFail = 1;          -- 排程用：有題目失敗時最後丟出錯誤，讓 SQL Agent 看得到
+--   EXEC kri.RunAll @Force = 1;                -- 不管頻率，全部都跑
+-- 頻率（D13）：上一個該跑的日子（kri.LastDueDate）到基準日之間已經成功跑過的題目，這次記 SKIPPED 不跑；
+--   排程漏跑時，下一次就會補上。@Only 點名的題目不看頻率。
 -- 每題各自一個交易：失敗的那題回滾、記錄錯誤（程序、行號），其他照跑。
 -- 同一時間只能有一個 RunAll；開始時把上一次中途斷掉、還停在 RUNNING 的紀錄改成 ABORTED。
 -- 每題的程序簽名：@RunId, @AsOfDate, @PeriodFrom, @PeriodTo, @Note OUTPUT，
 -- 明細寫到 kri.<KriCode>_Detail、標記寫到 kri.Flag，都帶 RunId。
 -- ======================================================================
-CREATE OR ALTER PROCEDURE kri.RunAll @AsOfDate DATE = NULL, @Only NVARCHAR(400) = NULL, @RaiseOnFail BIT = 0
+CREATE OR ALTER PROCEDURE kri.RunAll @AsOfDate DATE = NULL, @Only NVARCHAR(400) = NULL, @RaiseOnFail BIT = 0,
+                                    @Force BIT = 0
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -509,25 +553,43 @@ BEGIN
     INSERT kri.Run (AsOfDate) VALUES (@AsOfDate);
     DECLARE @RunId INT = SCOPE_IDENTITY();
 
-    DECLARE @steps TABLE (seq INT IDENTITY, KriCode NVARCHAR(10), ProcName NVARCHAR(128), WindowMonths INT);
-    INSERT @steps (KriCode, ProcName, WindowMonths)
+    DECLARE @steps TABLE (seq INT IDENTITY, KriCode NVARCHAR(10), ProcName NVARCHAR(128), WindowMonths INT,
+                          SkipNote NVARCHAR(400));
+    INSERT @steps (KriCode, ProcName, WindowMonths, SkipNote)
     SELECT d.KriCode, d.ProcName,
-           ISNULL(CAST(p.ParamValue AS INT), d.WindowMonths)   -- 參數可以覆寫預設期間
+           ISNULL(CAST(p.ParamValue AS INT), d.WindowMonths),  -- 參數可以覆寫預設期間
+           CASE WHEN done.RunId IS NOT NULL
+                THEN CONCAT(N'還沒到頻率（', d.Frequency, N'，上一個該跑的日子 ', FORMAT(due.d, 'yyyy-MM-dd'),
+                            N'），已在 RunId ', done.RunId, N'（基準日 ', FORMAT(done.AsOfDate, 'yyyy-MM-dd'), N'）跑過') END
     FROM kri.Definition d
     LEFT JOIN kri.Parameter p ON p.KriCode = d.KriCode AND p.ParamName = 'WindowMonths'
+    CROSS APPLY (SELECT kri.LastDueDate(d.Frequency, d.RunDay, @AsOfDate) AS d) due
+    -- 這一期已經成功跑過的那次（@Force、@Only 點名、DAILY 都不跳過）
+    OUTER APPLY (SELECT TOP 1 s.RunId, r.AsOfDate
+                 FROM kri.RunStep s JOIN kri.Run r ON r.RunId = s.RunId
+                 WHERE @Force = 0 AND @Only IS NULL AND d.Frequency <> 'DAILY'
+                   AND s.KriCode = d.KriCode AND s.Status = 'OK' AND r.AsOfDate BETWEEN due.d AND @AsOfDate
+                 ORDER BY s.RunId DESC) done
     WHERE d.Enabled = 1
       AND (@Only IS NULL OR d.KriCode IN (SELECT LTRIM(RTRIM(value)) FROM STRING_SPLIT(@Only, ',')))
     ORDER BY d.KriCode;
 
     DECLARE @i INT = 1, @n INT = (SELECT COUNT(*) FROM @steps),
             @code NVARCHAR(10), @proc NVARCHAR(128), @months INT,
-            @from DATE, @note NVARCHAR(400), @rows BIGINT, @sql NVARCHAR(400);
+            @from DATE, @note NVARCHAR(400), @rows BIGINT, @sql NVARCHAR(400), @skip NVARCHAR(400);
 
     WHILE @i <= @n
     BEGIN
-        SELECT @code = KriCode, @proc = ProcName, @months = WindowMonths FROM @steps WHERE seq = @i;
+        SELECT @code = KriCode, @proc = ProcName, @months = WindowMonths, @skip = SkipNote FROM @steps WHERE seq = @i;
         SET @from = DATEADD(DAY, 1, DATEADD(MONTH, -@months, @AsOfDate));
         SET @note = NULL;
+        IF @skip IS NOT NULL
+        BEGIN
+            INSERT kri.RunStep (RunId, KriCode, PeriodFrom, PeriodTo, EndedAt, Status, Note)
+            VALUES (@RunId, @code, @from, @AsOfDate, SYSDATETIME(), 'SKIPPED', @skip);
+            SET @i += 1;
+            CONTINUE;
+        END;
         INSERT kri.RunStep (RunId, KriCode, PeriodFrom, PeriodTo) VALUES (@RunId, @code, @from, @AsOfDate);
         BEGIN TRY
             BEGIN TRAN;
@@ -556,25 +618,29 @@ BEGIN
         SET @i += 1;
     END;
 
-    UPDATE kri.Run
+    UPDATE kri.Run                                     -- SKIPPED 不影響整次的結果
     SET EndedAt = SYSDATETIME(),
-        Status = CASE WHEN NOT EXISTS (SELECT 1 FROM kri.RunStep WHERE RunId = @RunId AND Status <> 'OK') THEN 'OK'
+        Status = CASE WHEN NOT EXISTS (SELECT 1 FROM kri.RunStep WHERE RunId = @RunId AND Status NOT IN ('OK', 'SKIPPED'))
+                      THEN 'OK'
                       WHEN EXISTS (SELECT 1 FROM kri.RunStep WHERE RunId = @RunId AND Status = 'OK') THEN 'PARTIAL'
                       ELSE 'FAILED' END
     WHERE RunId = @RunId;
 
     -- 保留（D4）：每一題各自留最近 KeepRuns 次，另外一定留著儀表板正在用的那一次（kri.vLatestStep）。
     --   每題分開算：用 @Only 重跑某一題、或某題一季才跑一次，都不會把別題的結果擠掉。沒設參數就全部保留。
+    --   SKIPPED 不算次數，只留這一次的。
     DECLARE @keep INT = (SELECT CAST(ParamValue AS INT) FROM kri.Parameter
                          WHERE KriCode = '*' AND ParamName = 'KeepRuns');
     IF @keep > 0
     BEGIN
         SELECT RunId, KriCode INTO #Keep
         FROM (SELECT RunId, KriCode, ROW_NUMBER() OVER (PARTITION BY KriCode ORDER BY RunId DESC) AS rn
-              FROM kri.RunStep) x
+              FROM kri.RunStep WHERE Status <> 'SKIPPED') x
         WHERE rn <= @keep
         UNION
-        SELECT RunId, KriCode FROM kri.vLatestStep;
+        SELECT RunId, KriCode FROM kri.vLatestStep
+        UNION
+        SELECT RunId, KriCode FROM kri.RunStep WHERE RunId = @RunId;
 
         DECLARE @t NVARCHAR(128), @tcode NVARCHAR(10);
         DECLARE tbls CURSOR LOCAL FAST_FORWARD FOR
@@ -610,10 +676,10 @@ BEGIN
 
     EXEC sp_releaseapplock @Resource = N'kri.RunAll', @LockOwner = N'Session';
 
-    IF @RaiseOnFail = 1 AND EXISTS (SELECT 1 FROM kri.RunStep WHERE RunId = @RunId AND Status <> 'OK')
+    IF @RaiseOnFail = 1 AND EXISTS (SELECT 1 FROM kri.RunStep WHERE RunId = @RunId AND Status NOT IN ('OK', 'SKIPPED'))
     BEGIN
         DECLARE @msg NVARCHAR(400) = CONCAT(N'kri.RunAll 有 ',
-            (SELECT COUNT(*) FROM kri.RunStep WHERE RunId = @RunId AND Status <> 'OK'),
+            (SELECT COUNT(*) FROM kri.RunStep WHERE RunId = @RunId AND Status NOT IN ('OK', 'SKIPPED')),
             N' 題沒有成功，見 kri.RunStep RunId = ', @RunId);
         THROW 50001, @msg, 1;
     END;
