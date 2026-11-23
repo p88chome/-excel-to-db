@@ -5,6 +5,7 @@
 只碰 (localdb)\\MSSQLLocalDB 上的 kri_test_scratch，跑完會刪掉。
 資料直接塞進業務表（prc / mst），不經過 ETL，KRI 的邏輯才測得乾淨。
 """
+import math
 import os
 import subprocess
 import sys
@@ -524,10 +525,15 @@ def check(name, got, want):
     print(f"{'PASS' if ok else 'FAIL'}  {name}: {got!r}" + ("" if ok else f"  (預期 {want!r})"))
 
 
+SCORE = []
+
+
 def run(only=None):
     sql = "EXEC kri.RunAll @AsOfDate = ?" + (", @Only = ?" if only else "")
     rows = cur.execute(sql, AS_OF, *([only] if only else [])).fetchall()
-    return {r[0]: r for r in rows}, one("SELECT MAX(RunId) FROM kri.Run")[0][0]
+    res = {r[0]: r for r in rows}
+    SCORE.append(res.pop("SCORE", None))      # 風險分數那一步另外放
+    return res, one("SELECT MAX(RunId) FROM kri.Run")[0][0]
 
 
 res, rid = run()
@@ -814,6 +820,46 @@ check("vFlagLatest 各題標記數", [(x[0], x[1]) for x in r],
        ("K10", 5), ("K11", 2), ("K12", 2), ("K13", 1), ("K14", 5), ("K15", 1), ("K16", 2), ("K17", 2), ("K18", 2),
        ("K19", 6), ("K20", 2)])
 
+# 風險分數
+check("SCORE 這一步成功", SCORE[0][6] if SCORE[0] else None, "OK")
+sc = {(x.EntityType, x.EntityKey, x.Category): x for x in one("SELECT * FROM kri.Score WHERE RunId = ?", rid)}
+check("每個被標記的供應商、料號都有 OVERALL 分數", sum(1 for k in sc if k[2] == "OVERALL"), one(
+    "SELECT COUNT(*) FROM (SELECT DISTINCT 'V' AS t, Vendor AS k FROM kri.Flag WHERE RunId = ? AND ISNULL(Vendor, '') <> '' "
+    "UNION SELECT 'M', Material FROM kri.Flag WHERE RunId = ? AND ISNULL(Material, '') <> '') x", rid, rid)[0][0])
+check("分數 = 100 ×（1 − EXP(−點數 ÷ 10)），0～100", all(
+    abs(float(x.Score) - 100 * (1 - math.exp(-float(x.RawPoints) / 10))) < 0.001 and 0 <= x.Score < 100
+    for x in sc.values()), True)
+x = one("SELECT TOP 1 Points, Weight, FlagCount FROM kri.ScoreDetail WHERE RunId = ? AND FlagsWithoutAmount = FlagCount", rid)
+check("沒有金額的標記只算基本分", bool(x) and abs(float(x[0][0]) - float(x[0][1]) * x[0][2]) < 1e-6, True)
+x = one("SELECT TOP 1 Points, Weight, AmountTWD FROM kri.ScoreDetail WHERE RunId = ? AND FlagCount = 1 "
+        "AND FlagsWithoutAmount = 0 AND AmountTWD > 0", rid)
+check("有金額：點數 = 1 + LOG10(1 + 金額 ÷ 100000)", bool(x) and abs(
+    float(x[0][0]) - (1 + math.log10(1 + float(x[0][2]) / 100000))) < 1e-4, True)
+cats = {k[2] for k in sc}
+check("分成整體和四種風險分類", cats <= {"OVERALL", "COMPLIANCE", "FRAUD", "OPERATION", "FINANCIAL"} and len(cats) == 5, True)
+# 固定尺度：多一家被標記，原本那家的分數不變
+v0, s0 = next((k[1], x.Score) for k, x in sc.items() if k[0] == "VENDOR" and k[2] == "OVERALL")
+cur.execute("INSERT kri.Run (AsOfDate, Status) VALUES (?, 'OK')", AS_OF)
+r_a = one("SELECT MAX(RunId) FROM kri.Run")[0][0]
+cur.execute("INSERT kri.Flag (RunId, KriCode, FlagKey, EntityType, Vendor, EffectLocal, LocalCurrency) "
+            "SELECT TOP 1 RunId, KriCode, 'TESTNEW', 'VENDOR', 'VNEWX', 99999999, 'TWD' FROM kri.Flag WHERE RunId = ?", rid)
+cur.execute("DECLARE @n NVARCHAR(400); EXEC kri.Run_Score @RunId = ?, @AsOfDate = ?, @Note = @n OUTPUT", r_a, AS_OF)
+check("固定尺度：多一家高金額的供應商，原本那家的分數不變", (
+    one("SELECT Score FROM kri.Score WHERE RunId = ? AND EntityType = 'VENDOR' AND EntityKey = ? AND Category = 'OVERALL'",
+        r_a, v0)[0][0] == s0,
+    one("SELECT RiskLevel FROM kri.Score WHERE RunId = ? AND EntityKey = 'VNEWX' AND Category = 'OVERALL'", r_a)[0][0]),
+    (True, "LOW"))
+cur.execute("DELETE kri.Flag WHERE FlagKey = 'TESTNEW'")
+cur.execute("INSERT kri.Parameter (KriCode, ParamName, ParamValue) VALUES ('K14', 'ScoreWeight', 3)")
+cur.execute("DELETE kri.ScoreDetail WHERE RunId = ?; DELETE kri.Score WHERE RunId = ?", r_a, r_a)
+cur.execute("DECLARE @n NVARCHAR(400); EXEC kri.Run_Score @RunId = ?, @AsOfDate = ?, @Note = @n OUTPUT", r_a, AS_OF)
+check("每題可以各自設權重", {float(x[0]) for x in one(
+    "SELECT DISTINCT Weight FROM kri.ScoreDetail WHERE RunId = ? AND KriCode = 'K14'", r_a)}, {3.0})
+cur.execute("DELETE kri.Parameter WHERE KriCode = 'K14' AND ParamName = 'ScoreWeight'")
+cur.execute("DELETE kri.ScoreDetail WHERE RunId = ?; DELETE kri.Score WHERE RunId = ?; DELETE kri.Run WHERE RunId = ?",
+            r_a, r_a, r_a)
+check("vBiVendor 帶最新的分數", one("SELECT COUNT(*) FROM kri.vBiVendor WHERE Score IS NULL")[0][0], 0)
+
 # Power BI 用的 view
 check("vBiFlag 筆數跟 vFlagLatest 一樣（供應商多列不會重複）",
       one("SELECT COUNT(*) FROM kri.vBiFlag")[0][0], one("SELECT COUNT(*) FROM kri.vFlagLatest")[0][0])
@@ -890,6 +936,10 @@ cur.execute("INSERT kri.Parameter (KriCode, ParamName, ParamValue) VALUES ('*', 
 check("kri.Param：先找這一題的，沒有再找 '*'",
       [float(one(f"SELECT kri.Param('{k}', 'TestGlobal')")[0][0]) for k in ("K01", "K02")], [7.0, 5.0])
 cur.execute("DELETE kri.Parameter WHERE ParamName = 'TestGlobal'")
+cur.execute("DELETE kri.Parameter WHERE KriCode = '*' AND ParamName = 'ScoreScaleK'")
+res, _ = run("K01")
+check("風險分數缺參數：SCORE 失敗、各題照樣成功", (SCORE[-1][6], "ScoreScaleK" in (SCORE[-1][7] or ""), res["K01"][6]),
+      ("FAILED", True, "OK"))
 run_file("12_kri_seed.sql")      # 重跑 seed 會把缺的參數補回來
 # 頻率
 cur.execute("SET DATEFIRST 3")      # 不受 DATEFIRST 影響

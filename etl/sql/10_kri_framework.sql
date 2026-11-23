@@ -489,6 +489,118 @@ JOIN kri.Definition d  ON d.KriCode = f.KriCode;
 GO
 
 -- ======================================================================
+-- 風險分數（D9）：kri.RunAll 最後呼叫 kri.Run_Score，RunStep 記成 KriCode = 'SCORE'
+--   每筆標記的點數 = 權重 ×（基本分 + LOG10(1 + 台幣金額 ÷ 金額單位)）
+--   分數 = 100 ×（1 − EXP(−點數合計 ÷ ScaleK)），0～100，固定尺度：一家的分數不會因為別家而變
+-- ======================================================================
+IF OBJECT_ID(N'kri.ScoreDetail', N'U') IS NULL
+CREATE TABLE kri.ScoreDetail (               -- 一列 = 一個對象 × 一題
+    RunId              INT           NOT NULL,
+    EntityType         NVARCHAR(20)  NOT NULL,   -- VENDOR / MATERIAL
+    EntityKey          NVARCHAR(40)  NOT NULL,
+    KriCode            NVARCHAR(10)  NOT NULL,
+    SourceRunId        INT           NOT NULL,   -- 這題採用哪一次的結果
+    FlagCount          INT           NOT NULL,
+    AmountTWD          DECIMAL(19,4) NULL,
+    FlagsWithoutAmount INT           NOT NULL,   -- 沒有台幣金額、只算基本分的筆數
+    Weight             DECIMAL(19,6) NOT NULL,
+    Points             DECIMAL(19,6) NOT NULL,
+    CONSTRAINT PK_kri_ScoreDetail PRIMARY KEY (RunId, EntityType, EntityKey, KriCode)
+);
+IF OBJECT_ID(N'kri.Score', N'U') IS NULL
+CREATE TABLE kri.Score (                     -- 一列 = 一個對象 × 一種風險分類
+    RunId              INT           NOT NULL,
+    AsOfDate           DATE          NOT NULL,
+    EntityType         NVARCHAR(20)  NOT NULL,
+    EntityKey          NVARCHAR(40)  NOT NULL,
+    Category           NVARCHAR(20)  NOT NULL,   -- OVERALL / COMPLIANCE / FRAUD / OPERATION / FINANCIAL
+    RawPoints          DECIMAL(19,6) NOT NULL,
+    Score              DECIMAL(9,4)  NOT NULL,
+    RiskLevel          NVARCHAR(10)  NOT NULL,   -- HIGH / MEDIUM / LOW
+    KriCount           INT           NOT NULL,
+    FlagCount          INT           NOT NULL,
+    AmountTWD          DECIMAL(19,4) NULL,
+    FlagsWithoutAmount INT           NOT NULL,
+    CONSTRAINT PK_kri_Score PRIMARY KEY (RunId, EntityType, EntityKey, Category)
+);
+GO
+
+CREATE OR ALTER PROCEDURE kri.Run_Score @RunId INT, @AsOfDate DATE, @Note NVARCHAR(400) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @unit   DECIMAL(19,6) = kri.Param('*', 'ScoreAmountUnit'),    -- 金額單位（台幣）
+            @base   DECIMAL(19,6) = kri.Param('*', 'ScoreBasePoints'),    -- 每筆標記的基本分
+            @k      DECIMAL(19,6) = kri.Param('*', 'ScoreScaleK'),        -- 點數多少分數到 63
+            @high   DECIMAL(19,6) = kri.Param('*', 'ScoreHighCut'),
+            @medium DECIMAL(19,6) = kri.Param('*', 'ScoreMediumCut');
+
+    -- 第 1 步：每題用基準日（含）以前最近一次成功的結果；停用的題目不算
+    SELECT x.KriCode, x.RunId
+    INTO #Src
+    FROM (SELECT s.KriCode, s.RunId,
+                 ROW_NUMBER() OVER (PARTITION BY s.KriCode ORDER BY r.AsOfDate DESC, s.RunId DESC) AS rn
+          FROM kri.RunStep s
+          JOIN kri.Run r        ON r.RunId = s.RunId
+          JOIN kri.Definition d ON d.KriCode = s.KriCode AND d.Enabled = 1
+          WHERE s.Status = 'OK' AND r.AsOfDate <= @AsOfDate) x
+    WHERE x.rn = 1;
+
+    -- 第 2 步：每筆標記的點數；一筆標記同時有供應商和料號時，兩邊都算
+    SELECT e.EntityType, e.EntityKey, f.KriCode, f.RunId AS SourceRunId, w.Weight, a.Amount,
+           w.Weight * (@base + LOG10(1 + IIF(a.Amount > 0, a.Amount, 0) / @unit)) AS Points
+    INTO #FlagPoint
+    FROM #Src s
+    JOIN kri.Flag f ON f.RunId = s.RunId AND f.KriCode = s.KriCode
+    CROSS APPLY (SELECT COALESCE(f.EffectTWD, CASE WHEN f.LocalCurrency = 'TWD' THEN f.EffectLocal END) AS Amount) a
+    CROSS APPLY (SELECT kri.Param(f.KriCode, 'ScoreWeight') AS Weight) w      -- 每題可以各自設權重
+    CROSS APPLY (SELECT CAST('VENDOR' AS NVARCHAR(20)), CAST(f.Vendor AS NVARCHAR(40)) WHERE ISNULL(f.Vendor, '') <> ''
+                 UNION ALL
+                 SELECT 'MATERIAL', f.Material WHERE ISNULL(f.Material, '') <> '') e(EntityType, EntityKey);
+
+    INSERT kri.ScoreDetail (RunId, EntityType, EntityKey, KriCode, SourceRunId, FlagCount, AmountTWD,
+                            FlagsWithoutAmount, Weight, Points)
+    SELECT @RunId, EntityType, EntityKey, KriCode, SourceRunId, COUNT(*), SUM(Amount),
+           COUNT(CASE WHEN Amount IS NULL THEN 1 END), MAX(Weight), SUM(Points)
+    FROM #FlagPoint
+    GROUP BY EntityType, EntityKey, KriCode, SourceRunId;
+
+    -- 第 3 步：依風險分類加總、換成 0～100 分
+    INSERT kri.Score (RunId, AsOfDate, EntityType, EntityKey, Category, RawPoints, Score, RiskLevel,
+                      KriCount, FlagCount, AmountTWD, FlagsWithoutAmount)
+    SELECT @RunId, @AsOfDate, g.EntityType, g.EntityKey, g.Category, g.RawPoints, sc.Score,
+           CASE WHEN sc.Score >= @high THEN 'HIGH' WHEN sc.Score >= @medium THEN 'MEDIUM' ELSE 'LOW' END,
+           g.KriCount, g.FlagCount, g.AmountTWD, g.FlagsWithoutAmount
+    FROM (SELECT d.EntityType, d.EntityKey, c.Category, SUM(d.Points) AS RawPoints, COUNT(*) AS KriCount,
+                 SUM(d.FlagCount) AS FlagCount, SUM(d.AmountTWD) AS AmountTWD, SUM(d.FlagsWithoutAmount) AS FlagsWithoutAmount
+          FROM kri.ScoreDetail d
+          JOIN kri.Definition k ON k.KriCode = d.KriCode
+          CROSS APPLY (SELECT CAST('OVERALL' AS NVARCHAR(20)) WHERE 1 = 1
+                       UNION ALL SELECT 'COMPLIANCE' WHERE k.IsCompliance = 1
+                       UNION ALL SELECT 'FRAUD'      WHERE k.IsFraud = 1
+                       UNION ALL SELECT 'OPERATION'  WHERE k.IsOperation = 1
+                       UNION ALL SELECT 'FINANCIAL'  WHERE k.IsFinancial = 1) c(Category)
+          WHERE d.RunId = @RunId
+          GROUP BY d.EntityType, d.EntityKey, c.Category) g
+    CROSS APPLY (SELECT CAST(100 * (1 - EXP(-CAST(g.RawPoints AS FLOAT) / @k)) AS DECIMAL(9,4)) AS Score) sc;
+
+    SELECT @Note = CONCAT(N'採用 ', (SELECT COUNT(*) FROM #Src), N' 題的結果；供應商 ',
+                          COUNT(CASE WHEN EntityType = 'VENDOR' THEN 1 END), N'、料號 ',
+                          COUNT(CASE WHEN EntityType = 'MATERIAL' THEN 1 END), N'；高風險 ',
+                          COUNT(CASE WHEN RiskLevel = 'HIGH' THEN 1 END),
+                          N'；沒有台幣金額、只算基本分的標記 ', ISNULL(SUM(FlagsWithoutAmount), 0), N' 筆')
+    FROM kri.Score WHERE RunId = @RunId AND Category = 'OVERALL';
+END;
+GO
+
+-- 最新一次成功的分數
+CREATE OR ALTER VIEW kri.vScoreLatest AS
+SELECT sc.*
+FROM kri.Score sc
+JOIN kri.vLatestStep l ON l.KriCode = 'SCORE' AND l.RunId = sc.RunId;
+GO
+
+-- ======================================================================
 -- Power BI 用（D16）：把標記和題目說明、供應商、料號接好，BI 不用自己 JOIN
 -- ======================================================================
 -- 題目說明裡的 {參數名} 換成現在的門檻值：比例（ratio、小於 1）顯示成百分比，其他顯示數字
@@ -560,7 +672,7 @@ GO
 
 -- 一列 = 一家被標記的供應商：幾題、幾筆、影響金額
 CREATE OR ALTER VIEW kri.vBiVendor AS
-SELECT g.*, kl.KriList
+SELECT g.*, kl.KriList, sc.Score, sc.RiskLevel
 FROM (SELECT Vendor, MAX(VendorName) AS VendorName, MAX(VendorCountry) AS VendorCountry,
              MAX(CAST(VendorBlockedNow AS INT)) AS VendorBlockedNow,
              COUNT(DISTINCT KriCode) AS KriCount, COUNT(*) AS FlagCount,
@@ -570,7 +682,8 @@ FROM (SELECT Vendor, MAX(VendorName) AS VendorName, MAX(VendorCountry) AS Vendor
       FROM kri.vBiFlag WHERE ISNULL(Vendor, '') <> ''
       GROUP BY Vendor) g
 CROSS APPLY (SELECT STRING_AGG(CAST(KriCode AS NVARCHAR(MAX)), N',') WITHIN GROUP (ORDER BY KriCode) AS KriList
-             FROM (SELECT DISTINCT KriCode FROM kri.vBiFlag WHERE Vendor = g.Vendor) x) kl;
+             FROM (SELECT DISTINCT KriCode FROM kri.vBiFlag WHERE Vendor = g.Vendor) x) kl
+LEFT JOIN kri.vScoreLatest sc ON sc.EntityType = 'VENDOR' AND sc.EntityKey = g.Vendor AND sc.Category = 'OVERALL';
 GO
 
 -- ======================================================================
@@ -610,6 +723,7 @@ GO
 --   EXEC kri.RunAll @Only = N'K14,K13';        -- 只跑這幾題
 --   EXEC kri.RunAll @RaiseOnFail = 1;          -- 排程用：有題目失敗時最後丟出錯誤，讓 SQL Agent 看得到
 --   EXEC kri.RunAll @Force = 1;                -- 不管頻率，全部都跑
+-- 各題跑完後算風險分數（kri.Run_Score），RunStep 記成 KriCode = 'SCORE'。
 -- 頻率（D13）：上一個該跑的日子（kri.LastDueDate）到基準日之間已經成功跑過的題目，這次記 SKIPPED 不跑；
 --   排程漏跑時，下一次就會補上。@Only 點名的題目不看頻率。
 -- 每題各自一個交易：失敗的那題回滾、記錄錯誤（程序、行號），其他照跑。
@@ -703,6 +817,29 @@ BEGIN
         SET @i += 1;
     END;
 
+    -- 風險分數（D9）：用每題基準日以前最近一次成功的結果算；失敗只記在 SCORE 這一步
+    INSERT kri.RunStep (RunId, KriCode, PeriodTo) VALUES (@RunId, 'SCORE', @AsOfDate);
+    BEGIN TRY
+        BEGIN TRAN;
+        SET @note = NULL;
+        EXEC kri.Run_Score @RunId = @RunId, @AsOfDate = @AsOfDate, @Note = @note OUTPUT;
+        UPDATE kri.RunStep
+        SET EndedAt = SYSDATETIME(), Status = 'OK', Note = @note,
+            DetailRows = (SELECT COUNT_BIG(*) FROM kri.ScoreDetail WHERE RunId = @RunId),
+            FlagRows   = (SELECT COUNT_BIG(*) FROM kri.Score WHERE RunId = @RunId AND Category = 'OVERALL' AND RiskLevel = 'HIGH')
+        WHERE RunId = @RunId AND KriCode = 'SCORE';
+        COMMIT;
+    END TRY
+    BEGIN CATCH
+        SELECT @en = ERROR_NUMBER(), @es = ERROR_SEVERITY(), @et = ERROR_STATE(),
+               @ep = ERROR_PROCEDURE(), @el = ERROR_LINE(), @em = ERROR_MESSAGE();
+        IF XACT_STATE() <> 0 ROLLBACK;
+        UPDATE kri.RunStep
+        SET EndedAt = SYSDATETIME(), Status = 'FAILED', ErrorMessage = CONCAT(N'[', @en, N'] ', @em),
+            ErrorNumber = @en, ErrorSeverity = @es, ErrorState = @et, ErrorProcedure = @ep, ErrorLine = @el
+        WHERE RunId = @RunId AND KriCode = 'SCORE';
+    END CATCH;
+
     UPDATE kri.Run                                     -- SKIPPED 不影響整次的結果
     SET EndedAt = SYSDATETIME(),
         Status = CASE WHEN NOT EXISTS (SELECT 1 FROM kri.RunStep WHERE RunId = @RunId AND Status NOT IN ('OK', 'SKIPPED'))
@@ -745,17 +882,21 @@ BEGIN
         CLOSE tbls;
         DELETE f FROM kri.Flag f
         WHERE NOT EXISTS (SELECT 1 FROM #Keep k WHERE k.RunId = f.RunId AND k.KriCode = f.KriCode);
+        DELETE sd FROM kri.ScoreDetail sd
+        WHERE NOT EXISTS (SELECT 1 FROM #Keep k WHERE k.RunId = sd.RunId AND k.KriCode = 'SCORE');
+        DELETE sc FROM kri.Score sc
+        WHERE NOT EXISTS (SELECT 1 FROM #Keep k WHERE k.RunId = sc.RunId AND k.KriCode = 'SCORE');
         DELETE s FROM kri.RunStep s
         WHERE NOT EXISTS (SELECT 1 FROM #Keep k WHERE k.RunId = s.RunId AND k.KriCode = s.KriCode);
         DELETE r FROM kri.Run r                       -- 沒有任何一題還留著的執行
         WHERE r.RunId <> @RunId AND NOT EXISTS (SELECT 1 FROM kri.RunStep s WHERE s.RunId = r.RunId);
     END;
 
-    SELECT s.KriCode AS [KRI], d.Name AS [名稱], s.PeriodFrom AS [期間起], s.PeriodTo AS [期間迄],
+    SELECT s.KriCode AS [KRI], ISNULL(d.Name, N'風險分數') AS [名稱], s.PeriodFrom AS [期間起], s.PeriodTo AS [期間迄],
            s.DetailRows AS [明細筆數], s.FlagRows AS [標記筆數], s.Status AS [結果],
            COALESCE(s.ErrorMessage, s.Note) AS [說明]
     FROM kri.RunStep s
-    JOIN kri.Definition d ON d.KriCode = s.KriCode
+    LEFT JOIN kri.Definition d ON d.KriCode = s.KriCode
     WHERE s.RunId = @RunId
     ORDER BY s.KriCode;
 

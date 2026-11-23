@@ -64,7 +64,13 @@ WHEN NOT MATCHED BY SOURCE AND t.KriCode LIKE 'K[0-9][0-9]' THEN DELETE;
 INSERT kri.Parameter (KriCode, ParamName, ParamValue, Unit, Description)
 SELECT s.KriCode, s.ParamName, s.ParamValue, s.Unit, s.Description
 FROM (VALUES
- ('*',   'KeepRuns',         10,   'count',  N'kri.RunAll 保留最近幾次的結果'),
+ ('*',   'KeepRuns',         10,   'count',  N'kri.RunAll 每題保留最近幾次的結果'),
+ ('*',   'ScoreAmountUnit',  100000, 'amount', N'風險分數：台幣金額單位；每筆點數 = 權重 ×（基本分 + LOG10(1 + 金額 ÷ 單位)）'),
+ ('*',   'ScoreBasePoints',  1,    'count',  N'風險分數：每筆標記的基本分（沒有台幣金額時只算這個）'),
+ ('*',   'ScoreScaleK',      10,   'count',  N'風險分數：分數 = 100 ×（1 − EXP(−點數 ÷ ScaleK)）'),
+ ('*',   'ScoreHighCut',     70,   'count',  N'風險分數：幾分以上算高風險'),
+ ('*',   'ScoreMediumCut',   40,   'count',  N'風險分數：幾分以上算中風險'),
+ ('*',   'ScoreWeight',      1,    'ratio',  N'風險分數：每題的權重；要某題加重就設 KriCode = 該題'),
  ('K08', 'WindowDays',       30,   'days',   N'滾動視窗天數'),
  ('K08', 'MinCount',         2,    'count',  N'視窗內至少幾張 PR 才算'),
  ('K13', 'PriceTolerance',   0.30, 'ratio',  N'比其他據點最低單價高出多少比例才標記'),
