@@ -95,8 +95,8 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 - **放棄**：把所有金額先換成台幣再比（現在沒有匯率表）。
 
 ### D7. 每個 KRI 獨立執行、獨立失敗
-- **選擇**：`kri.RunAll` 依 `kri.Definition` 裡啟用的 KRI 逐一執行。每一題各自 TRY/CATCH，失敗記錄在 `kri.RunStep`，其他照跑，最後列出結果。跟 `etl.LoadAll` 的行為一致。
-- **原因**：過往專案外層只包了一個 TRY/CATCH，前面一個 KRI 失敗，後面全部不跑，排程卻顯示成功。
+- **選擇**：`kri.RunAll` 依 `kri.Definition` 裡啟用的 KRI 逐一執行。每一題各自一個交易和 TRY/CATCH：結果、筆數、OK 狀態一起 COMMIT；失敗的回滾，錯誤號碼、程序、行號記在 `kri.RunStep`，其他照跑，最後列出結果。跟 `etl.LoadAll` 的行為一致。同時只能跑一個 RunAll（`sp_getapplock`），開始時把上次中途斷掉、停在 RUNNING 的紀錄改成 ABORTED。排程用 `@RaiseOnFail = 1`：有題目失敗時最後丟出錯誤，SQL Agent 才看得到。
+- **原因**：過往專案的錯誤處理不一致：沒有自己 TRY/CATCH 的程序一出錯，外層唯一的 CATCH 接住，後面全部不跑；有自己 TRY/CATCH 的則把錯誤寫進 log 就吞掉，連拉資料失敗都照跑後面的題目，最後排程仍記一筆成功。
 - **放棄**：一個失敗就全停。
 
 ### D8. 期間用「基準日 + 回看月數」
@@ -189,7 +189,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 
 **kri.Run**：RunId (PK, identity)、AsOfDate、StartedAt、EndedAt、Status（`RUNNING` / `OK` / `PARTIAL` / `FAILED`）
 
-**kri.RunStep**：RunId + KriCode (PK)、PeriodFrom、PeriodTo、StartedAt、EndedAt、DetailRows、FlagRows、Status、ErrorMessage
+**kri.RunStep**：RunId + KriCode (PK)、PeriodFrom、PeriodTo、StartedAt、EndedAt、DetailRows、FlagRows、Status（RUNNING／OK／FAILED／ABORTED）、ErrorMessage、ErrorNumber、ErrorSeverity、ErrorState、ErrorProcedure、ErrorLine
 
 ### 5.3 輸出
 

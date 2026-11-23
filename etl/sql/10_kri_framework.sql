@@ -110,7 +110,7 @@ CREATE TABLE kri.Run (
     AsOfDate  DATE         NOT NULL,
     StartedAt DATETIME2(0) NOT NULL DEFAULT SYSDATETIME(),
     EndedAt   DATETIME2(0) NULL,
-    Status    NVARCHAR(10) NOT NULL DEFAULT 'RUNNING'   -- RUNNING / OK / PARTIAL / FAILED
+    Status    NVARCHAR(10) NOT NULL DEFAULT 'RUNNING'   -- RUNNING / OK / PARTIAL / FAILED / ABORTED（中途斷掉）
 );
 
 IF OBJECT_ID(N'kri.RunStep', N'U') IS NULL
@@ -123,11 +123,17 @@ CREATE TABLE kri.RunStep (
     EndedAt      DATETIME2(0)   NULL,
     DetailRows   BIGINT         NULL,
     FlagRows     BIGINT         NULL,
-    Status       NVARCHAR(10)   NOT NULL DEFAULT 'RUNNING',  -- RUNNING / OK / FAILED
+    Status       NVARCHAR(10)   NOT NULL DEFAULT 'RUNNING',  -- RUNNING / OK / FAILED / ABORTED
     Note         NVARCHAR(400)  NULL,
     ErrorMessage NVARCHAR(4000) NULL,
     CONSTRAINT PK_kri_RunStep PRIMARY KEY (RunId, KriCode)
 );
+GO
+-- 錯誤細節：哪支程序、第幾行出錯（ErrorLine 從那支程序的 CREATE 那行算起，對得到 kri_procs/Kxx_*.sql）
+IF COL_LENGTH('kri.RunStep', 'ErrorNumber') IS NULL
+    ALTER TABLE kri.RunStep ADD ErrorNumber INT NULL, ErrorSeverity INT NULL, ErrorState INT NULL,
+                                ErrorProcedure NVARCHAR(128) NULL, ErrorLine INT NULL;
+GO
 
 IF OBJECT_ID(N'kri.Flag', N'U') IS NULL
 CREATE TABLE kri.Flag (
@@ -157,14 +163,16 @@ GO
 -- 共用函式
 -- ======================================================================
 
--- 讀門檻。找不到就讓查詢失敗並指名缺哪一個參數，不靜默用預設值（D3）。
+-- 讀門檻。先找這一題的，沒有再找 KriCode = '*'（全域）的。
+-- 都找不到就讓查詢失敗並指名缺哪一個參數，不靜默用預設值（D3）。
 -- 函式裡不能 RAISERROR，用型別轉換錯誤把訊息帶出來。
 CREATE OR ALTER FUNCTION kri.Param (@KriCode NVARCHAR(10), @ParamName NVARCHAR(50))
 RETURNS DECIMAL(19,6)
 AS
 BEGIN
-    DECLARE @v DECIMAL(19,6) = (SELECT ParamValue FROM kri.Parameter
-                                WHERE KriCode = @KriCode AND ParamName = @ParamName);
+    DECLARE @v DECIMAL(19,6) = (SELECT TOP 1 ParamValue FROM kri.Parameter
+                                WHERE KriCode IN (@KriCode, '*') AND ParamName = @ParamName
+                                ORDER BY CASE WHEN KriCode = @KriCode THEN 0 ELSE 1 END);
     IF @v IS NULL
         RETURN CAST(CONCAT(N'kri.Parameter 缺少參數 ', @KriCode, N'.', @ParamName) AS INT);
     RETURN @v;
@@ -468,15 +476,28 @@ GO
 --   EXEC kri.RunAll;                          -- 基準日 = 今天
 --   EXEC kri.RunAll @AsOfDate = '2025-12-31'; -- 回補某個基準日
 --   EXEC kri.RunAll @Only = N'K14,K13';        -- 只跑這幾題
--- 每題各自一個交易：失敗的那題回滾、記錄錯誤，其他照跑。
+--   EXEC kri.RunAll @RaiseOnFail = 1;          -- 排程用：有題目失敗時最後丟出錯誤，讓 SQL Agent 看得到
+-- 每題各自一個交易：失敗的那題回滾、記錄錯誤（程序、行號），其他照跑。
+-- 同一時間只能有一個 RunAll；開始時把上一次中途斷掉、還停在 RUNNING 的紀錄改成 ABORTED。
 -- 每題的程序簽名：@RunId, @AsOfDate, @PeriodFrom, @PeriodTo, @Note OUTPUT，
 -- 明細寫到 kri.<KriCode>_Detail、標記寫到 kri.Flag，都帶 RunId。
 -- ======================================================================
-CREATE OR ALTER PROCEDURE kri.RunAll @AsOfDate DATE = NULL, @Only NVARCHAR(400) = NULL
+CREATE OR ALTER PROCEDURE kri.RunAll @AsOfDate DATE = NULL, @Only NVARCHAR(400) = NULL, @RaiseOnFail BIT = 0
 AS
 BEGIN
     SET NOCOUNT ON;
     SET @AsOfDate = ISNULL(@AsOfDate, CAST(GETDATE() AS DATE));
+
+    -- 同時只能跑一個（鎖跟著連線，連線斷了自動放掉）
+    DECLARE @lock INT;
+    EXEC @lock = sp_getapplock @Resource = N'kri.RunAll', @LockMode = N'Exclusive',
+                               @LockOwner = N'Session', @LockTimeout = 0;
+    IF @lock < 0
+        THROW 50002, N'另一個 kri.RunAll 正在執行，請等它跑完再試', 1;
+
+    -- 拿得到鎖 = 沒有別人在跑：還停在 RUNNING 的都是上次中途斷掉的
+    UPDATE kri.RunStep SET Status = 'ABORTED', EndedAt = ISNULL(EndedAt, SYSDATETIME()) WHERE Status = 'RUNNING';
+    UPDATE kri.Run     SET Status = 'ABORTED', EndedAt = ISNULL(EndedAt, SYSDATETIME()) WHERE Status = 'RUNNING';
 
     INSERT kri.Run (AsOfDate) VALUES (@AsOfDate);
     DECLARE @RunId INT = SCOPE_IDENTITY();
@@ -505,19 +526,24 @@ BEGIN
             BEGIN TRAN;
             EXEC @proc @RunId = @RunId, @AsOfDate = @AsOfDate, @PeriodFrom = @from,
                        @PeriodTo = @AsOfDate, @Note = @note OUTPUT;
-            COMMIT;
+            -- 筆數和 OK 狀態跟結果一起 COMMIT：要嘛全部成功，要嘛整題回滾記 FAILED
             SET @sql = N'SELECT @r = COUNT_BIG(*) FROM kri.' + QUOTENAME(@code + N'_Detail') + N' WHERE RunId = @id';
             EXEC sp_executesql @sql, N'@r BIGINT OUTPUT, @id INT', @r = @rows OUTPUT, @id = @RunId;
             UPDATE kri.RunStep
             SET EndedAt = SYSDATETIME(), Status = 'OK', Note = @note, DetailRows = @rows,
                 FlagRows = (SELECT COUNT_BIG(*) FROM kri.Flag WHERE RunId = @RunId AND KriCode = @code)
             WHERE RunId = @RunId AND KriCode = @code;
+            COMMIT;
         END TRY
         BEGIN CATCH
+            -- 先把錯誤資訊存起來再回滾
+            DECLARE @en INT = ERROR_NUMBER(), @es INT = ERROR_SEVERITY(), @et INT = ERROR_STATE(),
+                    @ep NVARCHAR(128) = ERROR_PROCEDURE(), @el INT = ERROR_LINE(), @em NVARCHAR(4000) = ERROR_MESSAGE();
             IF XACT_STATE() <> 0 ROLLBACK;
             UPDATE kri.RunStep
             SET EndedAt = SYSDATETIME(), Status = 'FAILED',
-                ErrorMessage = CONCAT(N'[', ERROR_NUMBER(), N'] ', ERROR_MESSAGE())
+                ErrorMessage = CONCAT(N'[', @en, N'] ', @em),
+                ErrorNumber = @en, ErrorSeverity = @es, ErrorState = @et, ErrorProcedure = @ep, ErrorLine = @el
             WHERE RunId = @RunId AND KriCode = @code;
         END CATCH;
         SET @i += 1;
@@ -561,6 +587,16 @@ BEGIN
     JOIN kri.Definition d ON d.KriCode = s.KriCode
     WHERE s.RunId = @RunId
     ORDER BY s.KriCode;
+
+    EXEC sp_releaseapplock @Resource = N'kri.RunAll', @LockOwner = N'Session';
+
+    IF @RaiseOnFail = 1 AND EXISTS (SELECT 1 FROM kri.RunStep WHERE RunId = @RunId AND Status <> 'OK')
+    BEGIN
+        DECLARE @msg NVARCHAR(400) = CONCAT(N'kri.RunAll 有 ',
+            (SELECT COUNT(*) FROM kri.RunStep WHERE RunId = @RunId AND Status <> 'OK'),
+            N' 題沒有成功，見 kri.RunStep RunId = ', @RunId);
+        THROW 50001, @msg, 1;
+    END;
 END;
 GO
 

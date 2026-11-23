@@ -851,6 +851,26 @@ res, _ = run()
 check("缺參數：K18 失敗並指名缺哪個參數", (res["K18"][6], "K18.OverdueDays" in (res["K18"][7] or "")), ("FAILED", True))
 check("缺參數：其他題照跑", sorted(c for c, r in res.items() if r[6] == "OK"), [c for c in ALL if c != "K18"])
 check("Run 狀態為 PARTIAL", one("SELECT Status FROM kri.Run WHERE RunId = (SELECT MAX(RunId) FROM kri.Run)")[0][0], "PARTIAL")
+x = one("SELECT ErrorNumber, ErrorProcedure, ErrorLine FROM kri.RunStep "
+        "WHERE RunId = (SELECT MAX(RunId) FROM kri.Run) AND KriCode = 'K18'")[0]
+check("失敗的題目記下錯誤號碼、程序、行號", (x.ErrorNumber, x.ErrorProcedure, (x.ErrorLine or 0) > 0),
+      (245, "kri.Run_K18", True))
+try:
+    cur.execute("EXEC kri.RunAll @AsOfDate = ?, @Only = N'K18', @RaiseOnFail = 1", AS_OF)
+    while cur.nextset():
+        pass
+    raised = False
+except pyodbc.Error as e:
+    raised = "50001" in str(e) or "沒有成功" in str(e)
+check("@RaiseOnFail = 1：有題目失敗時丟出錯誤", raised, True)
+cur.execute("INSERT kri.Run (AsOfDate) VALUES ('2025-01-01')")      # 模擬上次中途斷掉、停在 RUNNING
+stale = one("SELECT MAX(RunId) FROM kri.Run")[0][0]
+run("K01")
+check("上次停在 RUNNING 的執行改成 ABORTED", one("SELECT Status FROM kri.Run WHERE RunId = ?", stale)[0][0], "ABORTED")
+cur.execute("INSERT kri.Parameter (KriCode, ParamName, ParamValue) VALUES ('*', 'TestGlobal', 5), ('K01', 'TestGlobal', 7)")
+check("kri.Param：先找這一題的，沒有再找 '*'",
+      [float(one(f"SELECT kri.Param('{k}', 'TestGlobal')")[0][0]) for k in ("K01", "K02")], [7.0, 5.0])
+cur.execute("DELETE kri.Parameter WHERE ParamName = 'TestGlobal'")
 run_file("12_kri_seed.sql")      # 重跑 seed 會把缺的參數補回來
 
 cur.execute("EXEC sp_rename 'mst.PurchasingCondA018', 'PurchasingCondA018_x'")
