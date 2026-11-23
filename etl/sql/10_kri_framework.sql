@@ -265,7 +265,7 @@ BEGIN
 END;
 GO
 
--- 公司別本幣。KRI 只讀業務表（D1），這是唯一讀 SAP 原表的地方。
+-- 公司別本幣。KRI 只讀業務表（D1）；讀 SAP 原表的例外只有幾個 view（見 PRD D1）。
 CREATE OR ALTER VIEW kri.vCompanyCurrency AS
 SELECT BUKRS AS CompanyCode, MAX(WAERS) AS LocalCurrency
 FROM dbo.T001
