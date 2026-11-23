@@ -58,6 +58,7 @@ SELECT * FROM kri.vFlagLatest;              -- 每題最新一次成功的標記
 - **加排除名單：** `INSERT kri.ValueList (KriCode, ListName, ListValue, Note) VALUES ('*', 'ExcludeVendorPrefix', 'X', N'一次性供應商');`
 - **K08 要先填核決權限：** `kri.ApprovalMatrix`，沒有資料時 K08 不會標記，`RunAll` 的說明欄會提示。
 - **K02 的銀行帳號要有 SAP 原表 `dbo.LFBK`**：跑 `10_kri_framework.sql` 時偵測到才會接上，所以要先匯入再跑 10。
+- **換成本幣要有匯率換算因子 `dbo.TCURF`**：SAP 的匯率可能是「100 SGD = 74.6 USD」，沒有因子金額會差 100 倍。跟 LFBK 一樣要先匯入再跑 10；拿不到時在本地 `kri.CurrencyFactor` 手動填（FromCurrency、ToCurrency、FromFactor、ToFactor）。
 
 ## 抽樣到 exp
 

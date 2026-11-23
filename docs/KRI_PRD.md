@@ -62,7 +62,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 每個決策：**選了什麼／為什麼／放棄了什麼**。
 
 ### D1. KRI 只讀業務表，不讀 SAP 原表
-- **選擇**：KRI 的來源是 `prc`、`mst`、`inv`、`fin`。例外是規格表沒有的兩個欄位，各由一個 view 讀取：公司別本幣（`dbo.T001` → `kri.vCompanyCurrency`）、供應商銀行帳號（`dbo.LFBK` → `kri.vVendorBank`）。原表不存在的環境 view 建成空的，用到的題目照跑、備註說明。
+- **選擇**：KRI 的來源是 `prc`、`mst`、`inv`、`fin`。例外是規格表沒有的三個欄位，各由一個 view 讀取：公司別本幣（`dbo.T001` → `kri.vCompanyCurrency`）、供應商銀行帳號（`dbo.LFBK` → `kri.vVendorBank`）、匯率換算因子（`dbo.TCURF` → `kri.vCurrencyFactorSap`）。原表不存在的環境 view 建成空的，用到的題目照跑、備註說明。
 - **原因**：欄位清洗、去重、一對多 JOIN 的處理已經在 ETL 做完（例如 EKKN 多筆分攤、PR 轉多張 PO）。KRI 直接讀原表會把這些問題再踩一次。
 - **放棄**：過往專案在每個 KRI 裡直接 JOIN SAP 原表，同樣的 JOIN bug 在多個 KRI 重複出現。
 
@@ -233,7 +233,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | **PO 單價** | `NetPrice / NULLIF(PriceUnit, 0)`（PriceUnit 缺值時由 ETL 反推，見 v2.3 規格） |
 | **主檔單價** | `ConditionPrice / NULLIF(PriceUnit, 0)` |
 | **主檔價取用** | 先找 A017（分工廠：Vendor + Material + PurchOrg + Plant + InfoCategory），找不到再用 A018（不分工廠）。條件類型依 `kri.ValueList` 的 `AllowedConditionType` 白名單（預設 PB00），資訊記錄類別依 `AllowedInfoCategory`（預設 0 = 標準）。PO 日期落在 `[ValidFrom, ValidTo]`，排除刪除標記 |
-| **文件幣別 → 本幣** | `WKURS > 0`：金額 × WKURS；`WKURS < 0`（間接報價）：金額 ÷ \|WKURS\|；文件幣別 = 本幣：× 1 |
+| **文件幣別 → 本幣** | `WKURS > 0`：金額 × WKURS；`WKURS < 0`（間接報價）：金額 ÷ \|WKURS\|；再乘換算因子 ToFactor ÷ FromFactor（例：100 SGD = 74.6 USD 時 WKURS 存 74.6，要 ÷ 100）。因子先找本地設定 `kri.CurrencyFactor`，再找 `dbo.TCURF`（匯率類型 M、最新一筆），都沒有當 1 : 1；文件幣別 = 本幣：× 1 |
 | **本幣** | 公司別的 `T001.WAERS` |
 | **台幣** | 第二期：從匯率表 TCURR 取文件日期當月的匯率（**不是**最新匯率） |
 | **排除條件** | PO 刪除標記、數量 ≤ 0、`kri.ValueList` 排除名單列出的對象 |
@@ -460,6 +460,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | `EBAN.ESTKZ`、`EBAN.PEINH` | K08 精準度 | 規格 + ETL | 待補 |
 | MBEWH 歷史庫存 | K06 | 規格 + ETL | 第三期 |
 | `MSEG.UMLGO` | K20 | 重抓 MSEG | 第三期 |
+| 匯率換算因子 TCURF | 所有本幣金額（影響金額、金額門檻） | 匯入 `dbo.TCURF` 後重跑 10；或在本地 `kri.CurrencyFactor` 填 | 待匯入 |
 | CDPOS 的 ZTERM、LFBK 異動 | K04 下單當時的主檔條件 | 重抓 CDPOS（ETL 已會收） | 待重抓 |
 | T052 付款條件 | K04 | 請客戶下載 | 待 K04 是否執行 |
 | `BSEG.SHKZG`、`KOART`、`BSCHL` | AP 借貸方向（K09） | 重抓 BSEG | 待重抓 |

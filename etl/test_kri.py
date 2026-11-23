@@ -43,6 +43,11 @@ cur.execute("CREATE TABLE dbo.LFBK (LIFNR NVARCHAR(10), BANKS NVARCHAR(3), BANKL
 cur.execute("INSERT dbo.LFBK VALUES ('VB1','TW','0040000','123-456 789'), ('VB2','TW','0040000','123456789'),"
             " ('VB3','TW','0040000','0000000000'), ('VB4','TW','0040000','0000000000'),"
             " ('VB1','TW','0050000','555666777'), ('VB2','TW','0050000','555666777')")
+# 匯率換算因子（kri.ToLocal）：kri.vCurrencyFactorSap 依 dbo.TCURF 存不存在決定。GDATU 是倒過來的日期，小的較新
+cur.execute("CREATE TABLE dbo.TCURF (KURST NVARCHAR(4), FCURR NVARCHAR(5), TCURR NVARCHAR(5), GDATU NVARCHAR(8),"
+            " FFACT DECIMAL(9,0), TFACT DECIMAL(9,0))")
+cur.execute("INSERT dbo.TCURF VALUES ('M','SGD','USD','79749898',100,1), ('M','SGD','USD','79899898',1,1),"
+            " ('M','EUR','USD','79749898',100,1), ('P','HKD','USD','79749898',100,1)")
 for f in ("01_create_tables.sql", "10_kri_framework.sql", "11_kri_procedures.sql", "12_kri_seed.sql"):
     run_file(f)
 
@@ -778,6 +783,13 @@ check("K14 基準日之後才建、倒填生效日的主檔價不用", (x.Condit
       ("0000500001", 100.0, True))
 x = one("SELECT * FROM kri.K14_Detail WHERE RunId = ? AND PoNumber = '4500000010'", rid)[0]
 check("K14 舊條件迄日被之後才建的條件縮短：回補時仍有效", (x.ConditionRecord, x.IsFlagged), ("0000500008", True))
+cur.execute("INSERT kri.CurrencyFactor (FromCurrency, ToCurrency, FromFactor, ToFactor) VALUES ('EUR', 'USD', 10, 1)")
+check("kri.ToLocal 套換算因子：TCURF 最新一筆 100:1、手動設定優先、匯率類型不是 M 不用、間接報價、同幣別",
+      [float(one(f"SELECT kri.ToLocal(1000, '{c}', 'USD', {r})")[0][0]) for c, r in
+       (("SGD", 74.6), ("EUR", 106), ("HKD", 0.128), ("SGD", -1.34))]
+      + [float(one("SELECT kri.ToLocal(1000, 'USD', 'USD', 74.6)")[0][0])],
+      [746.0, 10600.0, 128.0, 7.4627, 1000.0])
+cur.execute("DELETE kri.CurrencyFactor")
 check("kri.DigitCount 結尾空白不多算", [one(f"SELECT kri.DigitCount(N'{v}')")[0][0] for v in ("12 3", "(02) 2345 6789")],
       [3, 10])
 x = {(r.VendorA, r.VendorB, r.MatchType): r for r in one("SELECT * FROM kri.K02_Detail WHERE RunId = ?", rid)}

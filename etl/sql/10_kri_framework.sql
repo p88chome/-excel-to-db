@@ -206,7 +206,37 @@ BEGIN
 END;
 GO
 
--- 文件幣別 → 本幣。SAP 的 WKURS 為負代表間接報價（本幣 = 金額 ÷ |匯率|）。
+-- 匯率換算因子。SAP 的匯率不一定是「1 單位」的價格：TCURF 可以設成「100 SGD = 74.6 USD」，
+-- 這時 PO 上的 WKURS 存 74.6，要再乘 ToFactor ÷ FromFactor（1 ÷ 100）才是本幣金額。
+--   kri.CurrencyFactor     手動設定（本地，由客戶確認）；有填的優先
+--   kri.vCurrencyFactorSap 從 SAP 原表 TCURF 讀（有匯入才有；匯率類型 M、每組幣別取最新一筆）
+--   兩邊都沒有 = 1 : 1
+IF OBJECT_ID(N'kri.CurrencyFactor', N'U') IS NULL
+CREATE TABLE kri.CurrencyFactor (
+    FromCurrency NVARCHAR(5)   NOT NULL,   -- 文件幣別
+    ToCurrency   NVARCHAR(5)   NOT NULL,   -- 本幣
+    FromFactor   DECIMAL(19,5) NOT NULL,   -- 例：100（100 SGD）
+    ToFactor     DECIMAL(19,5) NOT NULL,   -- 例：1（= WKURS USD）
+    Note         NVARCHAR(400) NULL,
+    CONSTRAINT PK_kri_CurrencyFactor PRIMARY KEY (FromCurrency, ToCurrency)
+);
+GO
+IF OBJECT_ID(N'dbo.TCURF', N'U') IS NOT NULL
+    EXEC (N'CREATE OR ALTER VIEW kri.vCurrencyFactorSap AS
+            SELECT FCURR AS FromCurrency, TCURR AS ToCurrency,
+                   CAST(FFACT AS DECIMAL(19,5)) AS FromFactor, CAST(TFACT AS DECIMAL(19,5)) AS ToFactor
+            FROM (SELECT FCURR, TCURR, FFACT, TFACT,
+                         ROW_NUMBER() OVER (PARTITION BY FCURR, TCURR ORDER BY GDATU) AS rn   -- GDATU 是倒過來的日期，最小 = 最新
+                  FROM dbo.TCURF WHERE KURST = ''M'' AND FFACT > 0 AND TFACT > 0) t
+            WHERE rn = 1');
+ELSE
+    EXEC (N'CREATE OR ALTER VIEW kri.vCurrencyFactorSap AS
+            SELECT CAST(NULL AS NVARCHAR(5)) AS FromCurrency, CAST(NULL AS NVARCHAR(5)) AS ToCurrency,
+                   CAST(NULL AS DECIMAL(19,5)) AS FromFactor, CAST(NULL AS DECIMAL(19,5)) AS ToFactor WHERE 1 = 0');
+GO
+
+-- 文件幣別 → 本幣：金額 × 匯率 × 換算因子（ToFactor ÷ FromFactor）。
+-- SAP 的 WKURS 為負代表間接報價（金額 ÷ |匯率|），換算因子一樣套上。
 CREATE OR ALTER FUNCTION kri.ToLocal (@Amount DECIMAL(19,4), @DocCurrency NVARCHAR(5),
                                       @LocalCurrency NVARCHAR(5), @Rate DECIMAL(19,5))
 RETURNS DECIMAL(19,4)
@@ -215,7 +245,15 @@ BEGIN
     IF @Amount IS NULL RETURN NULL;
     IF @DocCurrency = @LocalCurrency RETURN @Amount;
     IF @Rate IS NULL OR @Rate = 0 RETURN NULL;
-    RETURN IIF(@Rate > 0, @Amount * @Rate, @Amount / -@Rate);
+    DECLARE @factor DECIMAL(38,12) = ISNULL(
+        (SELECT TOP 1 f.ToFactor / f.FromFactor
+         FROM (SELECT 1 AS Pref, ToFactor, FromFactor FROM kri.CurrencyFactor
+               WHERE FromCurrency = @DocCurrency AND ToCurrency = @LocalCurrency AND FromFactor > 0 AND ToFactor > 0
+               UNION ALL
+               SELECT 2, ToFactor, FromFactor FROM kri.vCurrencyFactorSap
+               WHERE FromCurrency = @DocCurrency AND ToCurrency = @LocalCurrency) f
+         ORDER BY f.Pref), 1);
+    RETURN CAST(IIF(@Rate > 0, @Amount * @Rate, @Amount / -@Rate) * @factor AS DECIMAL(19,4));
 END;
 GO
 
