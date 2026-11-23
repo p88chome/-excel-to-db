@@ -49,6 +49,11 @@ cur.execute("CREATE TABLE dbo.TCURF (KURST NVARCHAR(4), FCURR NVARCHAR(5), TCURR
             " FFACT DECIMAL(9,0), TFACT DECIMAL(9,0))")
 cur.execute("INSERT dbo.TCURF VALUES ('M','SGD','USD','79749898',100,1), ('M','SGD','USD','79899898',1,1),"
             " ('M','EUR','USD','79749898',100,1), ('P','HKD','USD','79749898',100,1)")
+# PO 項目類別、退貨、單位換算（kri.vPoItemSap）：一樣依 dbo.EKPO 有沒有這幾欄決定
+cur.execute("CREATE TABLE dbo.EKPO (EBELN NVARCHAR(10), EBELP NVARCHAR(5), PSTYP NVARCHAR(1), RETPO NVARCHAR(1),"
+            " UMREZ DECIMAL(5,0), UMREN DECIMAL(5,0))")
+cur.execute("INSERT dbo.EKPO VALUES ('4500000011','00010','0','X',1,1), ('4500000012','00010','3','',1,1),"
+            " ('4500000013','00010','0','',10,1), ('4500000014','00010','7','',1,1), ('4510000006','00010','U','',1,1)")
 for f in ("01_create_tables.sql", "10_kri_framework.sql", "11_kri_procedures.sql", "12_kri_seed.sql"):
     run_file(f)
 
@@ -89,7 +94,13 @@ ins("prc.PurchaseOrderDetail", [
     po("4500000007", Material="M7", NetPrice=11, OrderQty=10, Currency="EUR", ExchangeRate=-0.5),
     po("4500000008", Material="M1", NetPrice=999, DeletionInd="L"),  # 已刪除
     po("4500000009", Material="M1", NetPrice=999, Vendor="X00001"),  # 排除的供應商前綴
+    po("4500000011", Material="M1", NetPrice=999),                   # 退貨項目
+    po("4500000012", Material="M81", NetPrice=30),                    # 外包 PO：跟外包價 25 比（不是標準價 10）
+    po("4500000013", Material="M91", NetPrice=120, OrderQty=5, OrderUom="BOX"),  # 1 BOX = 10 EA → 每 EA 12 vs 10
+    po("4500000014", Material="M1", NetPrice=999),                   # 庫存轉移
 ])
+ins("mst.Material", [dict(Material="M91", BaseUom="EA")])
+cur.execute("INSERT kri.ValueList (KriCode, ListName, ListValue) VALUES ('K14', 'AllowedInfoCategory', '3')")
 ins("mst.PurchasingCondA017", [
     cond(Material="M1", Plant="1100", ConditionRecord="0000500001", ConditionPrice=100),
     # 不在白名單的條件類型，而且生效日更近：不能被拿來用
@@ -99,6 +110,9 @@ ins("mst.PurchasingCondA017", [
     cond(Material="M5", Plant="1100", ConditionRecord="0000500005", ConditionPrice=10),
     cond(Material="M6", Plant="1100", ConditionRecord="0000500006", ConditionPrice=10, Currency="USD"),
     cond(Material="M7", Plant="1100", ConditionRecord="0000500007", ConditionPrice=10, Currency="EUR"),
+    cond(Material="M81", Plant="1100", ConditionRecord="0000500011", ConditionPrice=10),
+    cond(Material="M81", Plant="1100", ConditionRecord="0000500012", ConditionPrice=25, InfoCategory="3"),
+    cond(Material="M91", Plant="1100", ConditionRecord="0000500013", ConditionPrice=10),
 ])
 ins("mst.PurchasingCondA018", [
     cond(Material="M2", ConditionRecord="0000510002", ConditionPrice=10, PriceUnit=10),
@@ -112,6 +126,7 @@ ins("prc.PurchaseOrderDetail", [
     po("4510000003", Material="M20", NetPrice=14, CompanyCode="2000", PoDate="2025-03-10"),  # 40% → 標記
     po("4510000004", Material="M20", NetPrice=50, CompanyCode="2000", OrderQty=5),          # 不同數量級距
     po("4510000005", Material="M20", NetPrice=30, CompanyCode="1000", PoDate="2025-08-01"),  # 不同季度
+    po("4510000006", Material="M20", NetPrice=99, CompanyCode="2000", PoDate="2025-02-15"),  # 庫存轉移：不比
 ])
 
 # ---------------------------------------------------------------- K18
@@ -560,6 +575,15 @@ check("K14 外幣換本幣（間接報價 ÷0.5）", float(d[("4500000007", "000
 check("K14 已刪除、排除前綴的 PO 不在母體",
       [k for k in d if k[0] in ("4500000008", "4500000009")], [])
 check("K14 備註列出比對覆蓋率", res["K14"][7].startswith("已比對 "), True)
+check("K14 退貨、庫存轉移項目不在母體", [k for k in d if k[0] in ("4500000011", "4500000014")], [])
+x = d[("4500000012", "00010")]
+check("K14 外包 PO 跟外包的資訊記錄比", (x.ItemCategory, x.InfoCategory, x.ConditionRecord, float(x.DiffRatio), x.IsFlagged),
+      ("3", "3", "0000500012", 0.2, True))
+x = d[("4500000013", "00010")]
+check("K14 PO 單位 BOX、主檔用基本單位 EA：換算後比，影響 =（12 − 10）× 50",
+      (x.MatchStatus, x.UomConverted, float(x.PoUnitPriceInfoUom), float(x.EffectLocal)), ("已比對", True, 12.0, 100.0))
+check("K14 沒有換算比例的單位不同照舊不比", (d[("4500000005", "00010")].MatchStatus,
+                                     d[("4500000005", "00010")].UomConverted), ("單位不同", False))
 
 # K13
 d = {x.PoNumber: x for x in one("SELECT * FROM kri.K13_Detail WHERE RunId = ?", rid)}
@@ -817,7 +841,7 @@ check("11_kri_procedures.sql 跟 kri_procs 一致", subprocess.run(
 r = one("SELECT KriCode, COUNT(*) FROM kri.vFlagLatest GROUP BY KriCode ORDER BY KriCode")
 check("vFlagLatest 各題標記數", [(x[0], x[1]) for x in r],
       [("K01", 5), ("K02", 3), ("K03", 5), ("K04", 6), ("K05", 2), ("K06", 2), ("K07", 1), ("K08", 2), ("K09", 1),
-       ("K10", 5), ("K11", 2), ("K12", 2), ("K13", 1), ("K14", 5), ("K15", 1), ("K16", 2), ("K17", 2), ("K18", 2),
+       ("K10", 5), ("K11", 2), ("K12", 2), ("K13", 1), ("K14", 7), ("K15", 1), ("K16", 2), ("K17", 2), ("K18", 2),
        ("K19", 6), ("K20", 2)])
 
 # 風險分數

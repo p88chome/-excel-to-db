@@ -62,7 +62,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 每個決策：**選了什麼／為什麼／放棄了什麼**。
 
 ### D1. KRI 只讀業務表，不讀 SAP 原表
-- **選擇**：KRI 的來源是 `prc`、`mst`、`inv`、`fin`。例外是規格表沒有的三個欄位，各由一個 view 讀取：公司別本幣（`dbo.T001` → `kri.vCompanyCurrency`）、供應商銀行帳號（`dbo.LFBK` → `kri.vVendorBank`）、匯率換算因子（`dbo.TCURF` → `kri.vCurrencyFactorSap`）。原表不存在的環境 view 建成空的，用到的題目照跑、備註說明。
+- **選擇**：KRI 的來源是 `prc`、`mst`、`inv`、`fin`。例外是規格表沒有的欄位，各由一個 view 讀取：公司別本幣（`dbo.T001` → `kri.vCompanyCurrency`）、供應商銀行帳號（`dbo.LFBK` → `kri.vVendorBank`）、匯率換算因子（`dbo.TCURF` → `kri.vCurrencyFactorSap`）、PO 項目類別／退貨／單位換算（`dbo.EKPO` 的 PSTYP、RETPO、UMREZ、UMREN → `kri.vPoItemSap`）。原表或欄位不存在的環境，view 建成空的或那欄是 NULL，用到的題目照跑、相關判斷不作用。
 - **原因**：欄位清洗、去重、一對多 JOIN 的處理已經在 ETL 做完（例如 EKKN 多筆分攤、PR 轉多張 PO）。KRI 直接讀原表會把這些問題再踩一次。
 - **放棄**：過往專案在每個 KRI 裡直接 JOIN SAP 原表，同樣的 JOIN bug 在多個 KRI 重複出現。
 
@@ -318,13 +318,13 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 
 ### K14 PO 單價高於主檔價
 - **風險**：PO 單價明顯高於下單當時有效的採購資訊記錄價格，可能議價不實或取價錯誤。
-- **母體**：觀察期間內的 PO 項目（`prc.PurchaseOrderDetail`），有料號、未刪除、數量 > 0。
+- **母體**：觀察期間內的 PO 項目（`prc.PurchaseOrderDetail`），有料號、未刪除、數量 > 0；退貨項目（`ExcludeReturnsInd`）、庫存轉移項目（`ExcludeItemCategory` = 7／U）不算。
 - **邏輯**：
-  1. 依第 7 節取下單日有效的主檔價：A017 優先，找不到再用 A018。
-  2. 幣別或單位不同 → 明細標「未比對」，註明原因，不標記。
-  3. 價差比例 = PO 單價 ÷ 主檔單價 − 1。
+  1. 依第 7 節取下單日有效的主檔價：A017 優先，找不到再用 A018。PO 項目類別決定資訊記錄類別：外包（3／L）跟外包價、寄售（2／K）跟寄售價、其他跟標準價比（還要在 `AllowedInfoCategory` 白名單裡；目前只放 0，所以外包、寄售 PO 會是「無主檔價」，不會再拿去跟標準價比）。
+  2. 單位不同、但主檔用料號基本單位時，用 PO 的換算比例（1 訂購單位 = UMREZ ÷ UMREN 基本單位）換成主檔單位再比；換不了才標「單位不同」。幣別不同 → 不比。都寫進明細並註明原因。
+  3. 價差比例 = PO 單價（主檔單位）÷ 主檔單價 − 1。
   4. 價差比例 > `PriceTolerance` → 標記。
-- **影響金額**：(PO 單價 − 主檔單價) × 訂購數量，換算本幣。
+- **影響金額**：(PO 單價 − 主檔單價) × 數量（都用主檔單位），換算本幣。
 - **參數**：`PriceTolerance` = 0.05（暫定）；`WindowMonths` = 12。
 - **已知限制**：級距價格（KONM）沒有下載，目前只用第一筆 KONP。PB00 是毛價、PO 是淨價，有折扣條件的料號本來就會有價差。
 
@@ -495,6 +495,7 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | `EBAN.ESTKZ`、`EBAN.PEINH` | K08 精準度 | 規格 + ETL | 待補 |
 | MBEWH 歷史庫存 | K06 | 規格 + ETL | 第三期 |
 | `MSEG.UMLGO` | K20 | 重抓 MSEG | 第三期 |
+| `EKPO.PSTYP`、`RETPO`、`UMREZ`、`UMREN` | K14 母體和換算、K12／K13 排除庫存轉移、所有 PO 題目排除退貨 | 重抓 EKPO 勾選這幾欄後重跑 10（`kri.vPoItemSap`） | 待重抓 |
 | 匯率換算因子 TCURF | 所有本幣金額（影響金額、金額門檻） | 匯入 `dbo.TCURF` 後重跑 10；或在本地 `kri.CurrencyFactor` 填 | 待匯入 |
 | CDPOS 的 ZTERM、LFBK 異動 | K04 下單當時的主檔條件 | 重抓 CDPOS（ETL 已會收） | 待重抓 |
 | T052 付款條件 | K04 | 請客戶下載 | 待 K04 是否執行 |
@@ -534,4 +535,4 @@ excel-to-db 匯入 SAP 原表 → EXEC etl.LoadAll → EXEC kri.RunAll → Power
 | 2026-10-19 | v1.2 | 第一期實作完成：框架 + K08、K13、K14、K18，LocalDB 測試 37 項通過 |
 | 2026-11-18 | v1.3 | 第二批：K01、K03、K04、K10、K19（第 9b 節）；新增 `ext.QualityIssue`、`kri.PaymentTerm`；LocalDB 測試 63 項通過 |
 | 2026-11-19 | v1.4 | 一題一個檔（`etl/sql/kri_procs/`），檔頭用白話寫規則（D13）；回補基準日只用當時已知的資料（D12：K05、K06、K18 已收數量，K14 主檔價建立日，K04 下單當時的主檔付款條件）；K02 加銀行帳號；K08、K09 單筆低於核決表最低區間當第 0 層；LocalDB 測試 117 項通過 |
-| 2026-11-23 | v1.5 | 本機驗證後的修正：本幣換算套 SAP 換算因子（TCURF）；RunAll 記錄錯誤細節、防重複執行、清掉中斷的執行；儀表板依基準日取最新結果、保留次數每題分開算（D4）；每題的執行頻率（D15）；Power BI 用的 view（D16）；風險分數（D9）；Python 題目的介面設計（D11） |
+| 2026-11-23 | v1.5 | 本機驗證後的修正：本幣換算套 SAP 換算因子（TCURF）；RunAll 記錄錯誤細節、防重複執行、清掉中斷的執行；儀表板依基準日取最新結果、保留次數每題分開算（D4）；每題的執行頻率（D15）；Power BI 用的 view（D16）；風險分數（D9）；Python 題目的介面設計（D11）；參考過往專案：排除退貨和庫存轉移項目、K14 依項目類別挑資訊記錄類別、單位換算 |

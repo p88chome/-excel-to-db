@@ -296,6 +296,26 @@ WHERE EXISTS (SELECT 1 FROM kri.ValueList x
 GO
 
 -- PO 母體：觀察期間內、未刪除、數量 > 0，套用排除名單。比價類 KRI 共用。
+-- PO 項目在業務表沒有的 SAP 欄位（D1 的例外）：項目類別 PSTYP、退貨 RETPO、訂購單位換算 UMREZ／UMREN。
+--   業務表的欄位由客戶規格產生，這幾欄不在規格裡，所以直接讀 dbo.EKPO。
+--   下載的 EKPO 沒有某一欄時那欄是 NULL（相關的判斷不作用）；之後補下載了，重跑這個檔才會讀到。
+IF OBJECT_ID(N'dbo.EKPO', N'U') IS NOT NULL
+BEGIN
+    DECLARE @c NVARCHAR(MAX) = CONCAT(
+        IIF(COL_LENGTH('dbo.EKPO', 'PSTYP') IS NULL, N'CAST(NULL AS NVARCHAR(1))', N'CAST(PSTYP AS NVARCHAR(1))'), N' AS ItemCategory, ',
+        IIF(COL_LENGTH('dbo.EKPO', 'RETPO') IS NULL, N'CAST(NULL AS NVARCHAR(1))', N'CAST(RETPO AS NVARCHAR(1))'), N' AS ReturnsInd, ',
+        IIF(COL_LENGTH('dbo.EKPO', 'UMREZ') IS NULL, N'CAST(NULL AS DECIMAL(19,4))', N'CAST(UMREZ AS DECIMAL(19,4))'), N' AS ConvNum, ',
+        IIF(COL_LENGTH('dbo.EKPO', 'UMREN') IS NULL, N'CAST(NULL AS DECIMAL(19,4))', N'CAST(UMREN AS DECIMAL(19,4))'), N' AS ConvDen');
+    EXEC (N'CREATE OR ALTER VIEW kri.vPoItemSap AS
+          SELECT CAST(EBELN AS NVARCHAR(10)) AS PoNumber, CAST(EBELP AS NVARCHAR(5)) AS PoItem, ' + @c + N' FROM dbo.EKPO');
+END
+ELSE
+    EXEC (N'CREATE OR ALTER VIEW kri.vPoItemSap AS
+          SELECT CAST(NULL AS NVARCHAR(10)) AS PoNumber, CAST(NULL AS NVARCHAR(5)) AS PoItem,
+                 CAST(NULL AS NVARCHAR(1)) AS ItemCategory, CAST(NULL AS NVARCHAR(1)) AS ReturnsInd,
+                 CAST(NULL AS DECIMAL(19,4)) AS ConvNum, CAST(NULL AS DECIMAL(19,4)) AS ConvDen WHERE 1 = 0');
+GO
+
 CREATE OR ALTER FUNCTION kri.PoBase (@KriCode NVARCHAR(10), @From DATE, @To DATE)
 RETURNS TABLE
 AS RETURN
@@ -305,9 +325,14 @@ SELECT p.PoNumber, p.PoItem, p.PoType, p.PoDate, p.CompanyCode, p.PurchOrg, p.Pl
        p.ExchangeRate, p.DelivDate, p.DelivComplInd, p.GrQty,
        CAST(p.NetPrice / NULLIF(p.PriceUnit, 0) AS DECIMAL(19,6)) AS UnitPrice,
        c.LocalCurrency,
-       CAST(IIF(g.IsGeneric IS NULL, 0, 1) AS BIT) AS IsGeneric      -- 通用料號：比價類 KRI 用 IsGeneric = 0 排除
+       CAST(IIF(g.IsGeneric IS NULL, 0, 1) AS BIT) AS IsGeneric,     -- 通用料號：比價類 KRI 用 IsGeneric = 0 排除
+       si.ItemCategory, si.ReturnsInd, si.ConvNum, si.ConvDen,
+       -- 這個項目該跟哪一類資訊記錄比：外包（3／L）→ 3、寄售（2／K）→ 2、其他 → 0 標準；沒下載項目類別 = NULL
+       CAST(CASE WHEN si.ItemCategory IN ('3', 'L') THEN '3' WHEN si.ItemCategory IN ('2', 'K') THEN '2'
+                 WHEN si.ItemCategory IS NOT NULL THEN '0' END AS NVARCHAR(1)) AS InfoCategory
 FROM prc.PurchaseOrderDetail p
 LEFT JOIN kri.vCompanyCurrency c ON c.CompanyCode = p.CompanyCode
+LEFT JOIN kri.vPoItemSap si      ON si.PoNumber = p.PoNumber AND si.PoItem = p.PoItem
 OUTER APPLY kri.IsGeneric(@KriCode, p.Material) g
 WHERE p.PoDate BETWEEN @From AND @To
   AND ISNULL(p.DeletionInd, '') = ''
@@ -319,6 +344,8 @@ WHERE p.PoDate BETWEEN @From AND @To
                OR (x.ListName = 'ExcludePurchOrg'      AND p.PurchOrg = x.ListValue)
                OR (x.ListName = 'ExcludePlant'         AND p.Plant = x.ListValue)
                OR (x.ListName = 'ExcludePoType'        AND p.PoType = x.ListValue)
+               OR (x.ListName = 'ExcludeItemCategory'  AND si.ItemCategory = x.ListValue)
+               OR (x.ListName = 'ExcludeReturnsInd'    AND si.ReturnsInd = x.ListValue)
                OR (x.ListName = 'ExcludeMaterialGroup' AND p.MaterialGroup = x.ListValue)
                OR (x.ListName = 'ExcludeMaterial'      AND (p.Material = x.ListValue      -- 通用、雜項料號；數字料號可以不補零
                                                            OR (x.ListValue NOT LIKE '%[^0-9]%'
@@ -350,13 +377,15 @@ END;
 GO
 
 -- 某一天有效的主檔價：A017（分工廠）優先，沒有再用 A018。條件類型、資訊記錄類別依白名單。
+-- @InfoCategory：只用這一類的資訊記錄（給 kri.PoBase 的 InfoCategory，外包 PO 跟外包價比）；NULL = 只看白名單。
 -- 同一天有多筆有效（不同條件類型或期間重疊）時取生效日最近的一筆。
 -- @KnownBy：只看這天以前已經建立的條件（通常給基準日）。回補過去的基準日時，
 --            不能用到基準日之後才建、再把生效日倒填回去的主檔價。建立日空白的視為生效日就建了。
 --            SAP 建新條件時會把重疊的舊條件的有效迄日縮短；舊條件的迄日如果是被 @KnownBy 之後才建的
 --            條件縮短的（新條件的生效日 = 舊條件迄日 + 1），那天的舊條件當作還有效。
 CREATE OR ALTER FUNCTION kri.InfoPriceAt (@KriCode NVARCHAR(10), @Vendor NVARCHAR(20),
-        @Material NVARCHAR(40), @PurchOrg NVARCHAR(10), @Plant NVARCHAR(10), @OnDate DATE, @KnownBy DATE)
+        @Material NVARCHAR(40), @PurchOrg NVARCHAR(10), @Plant NVARCHAR(10), @OnDate DATE, @KnownBy DATE,
+        @InfoCategory NVARCHAR(1))
 RETURNS TABLE
 AS RETURN
 SELECT TOP 1 c.Source, c.ConditionRecord, c.ConditionType, c.ValidFrom, c.ValidTo,
@@ -393,6 +422,7 @@ WHERE ISNULL(c.DeletionInd, '') = ''
                           WHERE KriCode IN (@KriCode, '*') AND ListName = 'AllowedConditionType')
   AND c.InfoCategory  IN (SELECT ListValue FROM kri.ValueList
                           WHERE KriCode IN (@KriCode, '*') AND ListName = 'AllowedInfoCategory')
+  AND (@InfoCategory IS NULL OR c.InfoCategory = @InfoCategory)
 ORDER BY c.Pref, c.ValidFrom DESC, c.ConditionType;
 GO
 

@@ -19,6 +19,7 @@
 --   EntityLevel     據點層級：1 = 公司別、2 = 工廠
 --
 -- 【名單】（kri.ValueList）
+--   ExcludeItemCategory   不比的 PO 項目類別（7／U = 庫存轉移，沒有採購價）；退貨項目（ExcludeReturnsInd）也不比
 --   GenericMaterial  通用、雜項料號：單價沒有可比性，不看
 --
 -- 【明細表 kri.K13_Detail 怎麼看】（只留有其他據點可比的 PO 項目）

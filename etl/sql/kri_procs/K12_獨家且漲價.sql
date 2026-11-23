@@ -22,6 +22,7 @@
 --   MinGroupMaterials  群組內至少幾個其他料號可比才當基準；不夠以 0 計
 --
 -- 【名單】（kri.ValueList）
+--   ExcludeItemCategory   不比的 PO 項目類別（7／U = 庫存轉移，沒有採購價）；退貨項目（ExcludeReturnsInd）也不比
 --   AllowedSingleSource  合理的獨家料號，不標記
 --   ExcludeVendorPrefix  刻意排除的供應商（關係企業等），不算一個來源
 --   GenericMaterial      通用、雜項料號，不看
